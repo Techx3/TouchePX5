@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Globalization;
@@ -50,6 +51,7 @@ public static class AvPlayerExports
         public byte[]? RawFrame { get; set; }
         public byte[]? RawAudioFrame { get; set; }
         public byte[]? PaddedFrame { get; set; }
+        public byte[]? HostBgraFrame { get; set; }
         public ulong[] GuestBuffers { get; } = new ulong[FrameBufferCount];
         public bool TextureAllocatorFailed { get; set; }
         public int GuestBufferStride { get; set; }
@@ -229,6 +231,7 @@ public static class AvPlayerExports
             }
         }
 
+        VideoOutExports.ClearHostVideoOverlay(player.Handle);
         player.Dispose();
         return SetReturn(ctx, 0);
     }
@@ -969,6 +972,23 @@ public static class AvPlayerExports
             return false;
         }
 
+        // Composite the movie host-side: the title samples this NV12 buffer with
+        // its own YUV->RGB path, which the backend renders as luma-only garbage
+        // (green/striped). Convert the decoded frame to BGRA and push it as a
+        // priority overlay the presenter draws instead.
+        if (Environment.GetEnvironmentVariable("SHARPEMU_AVPLAYER_HOST_VIDEO") != "0")
+        {
+            ConvertNv12ToBgra(player);
+            if (player.HostBgraFrame is not null)
+            {
+                VideoOutExports.SetHostVideoOverlayFrame(
+                    player.Handle,
+                    player.HostBgraFrame,
+                    checked((uint)player.Width),
+                    checked((uint)player.Height));
+            }
+        }
+
         Span<byte> info = extended
             ? stackalloc byte[FrameInfoExSize]
             : stackalloc byte[FrameInfoSize];
@@ -986,6 +1006,47 @@ public static class AvPlayerExports
         }
         return ctx.Memory.TryWrite(infoAddress, info);
     }
+
+    // Convert the decoded NV12 frame (tightly-packed Y plane then interleaved
+    // UV plane, both at player.Width) into BGRA using the BT.601 full-range
+    // coefficients. Output is Width x Height, no row padding.
+    private static void ConvertNv12ToBgra(PlayerState player)
+    {
+        if (player.RawFrame is null || player.Width <= 0 || player.Height <= 0)
+        {
+            return;
+        }
+
+        var width = player.Width;
+        var height = player.Height;
+        var bgraLength = checked(width * height * 4);
+        if (player.HostBgraFrame is null || player.HostBgraFrame.Length != bgraLength)
+        {
+            player.HostBgraFrame = new byte[bgraLength];
+        }
+
+        var chromaOffset = checked(width * height);
+        for (var y = 0; y < height; y++)
+        {
+            var lumaRow = y * width;
+            var chromaRow = chromaOffset + ((y / 2) * width);
+            var bgraRow = y * width * 4;
+            for (var x = 0; x < width; x++)
+            {
+                var c = Math.Max(0, player.RawFrame[lumaRow + x] - 16);
+                var chromaIndex = chromaRow + (x & ~1);
+                var d = player.RawFrame[chromaIndex] - 128;
+                var e = player.RawFrame[chromaIndex + 1] - 128;
+                var destination = bgraRow + (x * 4);
+                player.HostBgraFrame[destination + 0] = ClampToByte((298 * c + 516 * d + 128) >> 8);
+                player.HostBgraFrame[destination + 1] = ClampToByte((298 * c - 100 * d - 208 * e + 128) >> 8);
+                player.HostBgraFrame[destination + 2] = ClampToByte((298 * c + 409 * e + 128) >> 8);
+                player.HostBgraFrame[destination + 3] = byte.MaxValue;
+            }
+        }
+    }
+
+    private static byte ClampToByte(int value) => (byte)Math.Clamp(value, 0, 255);
 
     private static bool AllocateGuestVideoBuffers(CpuContext ctx, PlayerState player, int bufferSize)
     {

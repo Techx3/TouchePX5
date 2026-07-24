@@ -835,6 +835,43 @@ public static class VideoOutExports
         GuestGpu.Current.Submit(bgraFrame, width, height);
     }
 
+    private sealed record HostVideoOverlayFrame(ulong Owner, byte[] Bgra, uint Width, uint Height);
+    private static HostVideoOverlayFrame? _hostVideoOverlay;
+
+    // sceAvPlayer host-decoded video overlay. The AvPlayer decodes each movie
+    // frame to BGRA on the host and pushes it here; the presenter composites it
+    // with priority, bypassing the title's broken guest-side YUV sampling.
+    internal static void SetHostVideoOverlayFrame(
+        ulong owner,
+        ReadOnlySpan<byte> bgraFrame,
+        uint width,
+        uint height)
+    {
+        if (owner == 0 || bgraFrame.Length != checked((int)(width * height * 4)))
+        {
+            return;
+        }
+
+        // The producer reuses its decode buffer, so keep an immutable snapshot
+        // until the Vulkan presentation thread has uploaded this frame.
+        var snapshot = bgraFrame.ToArray();
+        Volatile.Write(ref _hostVideoOverlay, new HostVideoOverlayFrame(owner, snapshot, width, height));
+        VulkanVideoPresenter.SetHostVideoOverlayFrame(owner, snapshot, width, height);
+    }
+
+    internal static void ClearHostVideoOverlay(ulong owner)
+    {
+        var overlay = Volatile.Read(ref _hostVideoOverlay);
+        if (overlay is not null &&
+            overlay.Owner == owner &&
+            ReferenceEquals(
+                Interlocked.CompareExchange(ref _hostVideoOverlay, null, overlay),
+                overlay))
+        {
+            VulkanVideoPresenter.ClearHostVideoOverlay(owner);
+        }
+    }
+
     internal static bool TryGetDisplayBufferInfo(int handle, int bufferIndex, out DisplayBufferInfo info)
     {
         info = default;

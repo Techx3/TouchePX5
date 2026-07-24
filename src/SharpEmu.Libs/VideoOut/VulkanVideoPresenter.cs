@@ -561,6 +561,13 @@ internal static unsafe class VulkanVideoPresenter
     private static VulkanHostSurface? _hostSurfacePendingDetach;
     internal static event Action<VulkanHostSurface>? FirstHostFramePresented;
     private static Presentation? _latestPresentation;
+    // Host-decoded video overlay (sceAvPlayer). While set, this BGRA frame is
+    // presented with priority over ordinary guest work — the title's own
+    // YUV->RGB path leaves the sampled NV12 texture as luma-only garbage
+    // (green/striped), so the video is composited host-side instead.
+    private static Presentation? _hostVideoOverlayPresentation;
+    private static ulong _hostVideoOverlayOwner;
+    private static long _hostVideoOverlaySequence;
     private static byte[]? _copyFragmentSpirv;
     private static uint _windowWidth;
     private static uint _windowHeight;
@@ -856,6 +863,8 @@ internal static unsafe class VulkanVideoPresenter
     private static void ResetHostSessionStateLocked()
     {
         _latestPresentation = null;
+        _hostVideoOverlayPresentation = null;
+        _hostVideoOverlayOwner = 0;
         _splashHidden = false;
         _pendingGuestWorkByQueue.Clear();
         _pendingGuestQueueSchedule.Clear();
@@ -2466,10 +2475,78 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
+    public static void SetHostVideoOverlayFrame(
+        ulong owner,
+        byte[] bgraFrame,
+        uint width,
+        uint height)
+    {
+        if (owner == 0 || bgraFrame.Length != checked((int)(width * height * 4)))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_closed)
+            {
+                return;
+            }
+
+            // Sequence in a range disjoint from (and above) ordinary guest
+            // presentations so the overlay always wins in TryTakePresentation
+            // while a video is playing.
+            var sequence = (1L << 62) + ++_hostVideoOverlaySequence;
+            _hostVideoOverlayOwner = owner;
+            _hostVideoOverlayPresentation = new Presentation(
+                bgraFrame,
+                width,
+                height,
+                sequence,
+                GuestDrawKind.None,
+                TranslatedDraw: null,
+                RequiredGuestWorkSequence: 0,
+                IsSplash: false);
+            System.Threading.Monitor.PulseAll(_gate);
+        }
+    }
+
+    public static void ClearHostVideoOverlay(ulong owner)
+    {
+        lock (_gate)
+        {
+            if (_hostVideoOverlayPresentation is null ||
+                _hostVideoOverlayOwner != owner)
+            {
+                return;
+            }
+
+            _hostVideoOverlayPresentation = null;
+            _hostVideoOverlayOwner = 0;
+            System.Threading.Monitor.PulseAll(_gate);
+        }
+    }
+
     private static bool TryTakePresentation(long presentedSequence, out Presentation presentation)
     {
         lock (_gate)
         {
+            // A host video overlay (sceAvPlayer) preempts all guest work while a
+            // movie plays: present each new decoded frame once and, once it is on
+            // screen, hold it (return false) rather than flashing guest frames
+            // between decoded frames.
+            if (_hostVideoOverlayPresentation is { } overlay)
+            {
+                if (overlay.Sequence == presentedSequence)
+                {
+                    presentation = default;
+                    return false;
+                }
+
+                presentation = overlay;
+                return true;
+            }
+
             // Guest flips are retained in submission order. The renderer is
             // deliberately allowed to lag a frame or two behind the guest
             // while it drains expensive work, so use the first completed flip
