@@ -30,6 +30,12 @@ public static class AudioOutExports
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_AUDIO_OUT"), "1", StringComparison.Ordinal);
     private static long _outputCount;
 
+    // Diagnostic tap: when set, every converted stereo-s16 buffer sent to the host
+    // backend is also appended to this raw PCM file (48 kHz, 2ch, s16le).
+    private static readonly string? _dumpPath =
+        Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_DUMP");
+    private static readonly object _dumpGate = new();
+
     private sealed class PortState : IDisposable
     {
         private readonly object _paceGate = new();
@@ -333,6 +339,16 @@ public static class AudioOutExports
                     port.BytesPerSample,
                     port.IsFloat,
                     port.Volume);
+                if (_dumpPath is { } dumpPath)
+                {
+                    lock (_dumpGate)
+                    {
+                        using var dump = new FileStream(
+                            dumpPath, FileMode.Append, FileAccess.Write, FileShare.Read);
+                        dump.Write(output.AsSpan(0, outputLength));
+                    }
+                }
+
                 if (!port.Backend.Submit(output.AsSpan(0, outputLength)))
                 {
                     port.PaceSilence();

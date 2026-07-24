@@ -21,15 +21,17 @@ public static class Ngs2VagDecoder
 
     public readonly struct Waveform
     {
-        public Waveform(short[] samples, int sampleRate, int loopStart, int loopEnd)
+        public Waveform(short[] samples, short[]? rightSamples, int sampleRate, int loopStart, int loopEnd)
         {
             Samples = samples;
+            RightSamples = rightSamples;
             SampleRate = sampleRate;
             LoopStart = loopStart;
             LoopEnd = loopEnd;
         }
 
         public short[] Samples { get; }
+        public short[]? RightSamples { get; } // null when the waveform is mono
         public int SampleRate { get; }
         public int LoopStart { get; } // -1 when the waveform does not loop
         public int LoopEnd { get; }
@@ -50,9 +52,12 @@ public static class Ngs2VagDecoder
             return false;
         }
 
-        // Header (big-endian): +0x0C dataSize, +0x10 sampleRate.
+        // Header (big-endian): +0x0C dataSize, +0x10 sampleRate, +0x1E channel
+        // count (0 or 1 = mono; 2 = stereo with L/R frames interleaved per
+        // 16-byte block, as shipped by e.g. Castlevania: Dominus Collection).
         var declaredSize = (int)BinaryPrimitives.ReadUInt32BigEndian(data[0x0C..]);
         var sampleRate = (int)BinaryPrimitives.ReadUInt32BigEndian(data[0x10..]);
+        var channels = data[0x1E] == 2 ? 2 : 1;
         if (sampleRate <= 0)
         {
             sampleRate = 48000;
@@ -68,25 +73,39 @@ public static class Ngs2VagDecoder
             return false;
         }
 
-        waveform = Decode(body[..frameBytes], sampleRate);
+        waveform = Decode(body[..frameBytes], sampleRate, channels);
         return waveform.Samples.Length > 0;
     }
 
     // Decode raw 16-byte-framed PS-ADPCM (no container header) into PCM16 and
-    // resolve loop points from the per-frame flag bytes.
-    public static Waveform Decode(ReadOnlySpan<byte> frames, int sampleRate)
+    // resolve loop points from the per-frame flag bytes. Stereo containers
+    // interleave one left frame and one right frame per 16-byte block; each
+    // channel keeps its own predictor history, so decoding them as one mono
+    // stream corrupts the prediction at every frame boundary (audible as a
+    // frame-periodic buzz layered over the music).
+    public static Waveform Decode(ReadOnlySpan<byte> frames, int sampleRate, int channels = 1)
     {
+        var stereo = channels == 2;
         var frameCount = frames.Length / 16;
-        var samples = new short[frameCount * 28];
+        var framesPerChannel = stereo ? frameCount / 2 : frameCount;
+        var samples = new short[framesPerChannel * 28];
+        var rightSamples = stereo ? new short[framesPerChannel * 28] : null;
         var loopStart = -1;
         var loopEnd = -1;
 
-        var hist1 = 0;
-        var hist2 = 0;
-        var outIndex = 0;
+        Span<int> hist1 = stackalloc int[2];
+        Span<int> hist2 = stackalloc int[2];
+        Span<int> outIndex = stackalloc int[2];
         var ended = false;
         for (var frame = 0; frame < frameCount && !ended; frame++)
         {
+            var channel = stereo ? frame & 1 : 0;
+            var target = channel == 1 ? rightSamples! : samples;
+            if (outIndex[channel] + 28 > target.Length)
+            {
+                break;
+            }
+
             var offset = frame * 16;
             var header = frames[offset];
             var shift = header & 0x0F;
@@ -98,15 +117,20 @@ public static class Ngs2VagDecoder
 
             // Per-frame loop marker (exact PS-ADPCM values, not bit masks):
             //   3 = loop start, 6 = loop end + jump back, 1/7 = one-shot end.
+            // Stereo pairs carry the same flags on both frames; track loop
+            // positions from the left channel only so they stay in per-channel
+            // sample units.
             var flags = frames[offset + 1];
-            var blockStart = outIndex;
-            if (flags == 0x03)
+            if (flags == 0x03 && channel == 0)
             {
-                loopStart = blockStart;
+                loopStart = outIndex[0];
             }
 
             var f0 = Coeff0[filter];
             var f1 = Coeff1[filter];
+            var h1 = hist1[channel];
+            var h2 = hist2[channel];
+            var writeIndex = outIndex[channel];
             for (var i = 0; i < 14; i++)
             {
                 var d = frames[offset + 2 + i];
@@ -115,19 +139,26 @@ public static class Ngs2VagDecoder
                     var raw = nibble == 0 ? d & 0x0F : d >> 4;
                     // Sign-extend the 4-bit sample into the top nibble, then scale.
                     var s = (short)(raw << 12) >> shift;
-                    var predicted = (hist1 * f0 + hist2 * f1) >> 6;
+                    var predicted = (h1 * f0 + h2 * f1) >> 6;
                     var sample = Math.Clamp(s + predicted, short.MinValue, short.MaxValue);
-                    samples[outIndex++] = (short)sample;
-                    hist2 = hist1;
-                    hist1 = sample;
+                    target[writeIndex++] = (short)sample;
+                    h2 = h1;
+                    h1 = sample;
                 }
             }
 
-            if (flags == 0x06)
+            hist1[channel] = h1;
+            hist2[channel] = h2;
+            outIndex[channel] = writeIndex;
+
+            if (flags == 0x06 && channel == 0)
             {
-                loopEnd = outIndex;
+                loopEnd = outIndex[0];
             }
-            else if (flags == 0x01 || flags == 0x07)
+
+            // One-shot end: stop after the last frame of the (stereo) pair so
+            // both channels decode the same number of samples.
+            if ((flags == 0x01 || flags == 0x07) && (!stereo || channel == 1))
             {
                 ended = true;
             }
@@ -135,16 +166,22 @@ public static class Ngs2VagDecoder
 
         // Trim to the samples we actually decoded (a one-shot end marker can stop
         // us before the declared frame count).
-        if (outIndex != samples.Length)
+        var decoded = outIndex[0];
+        if (decoded != samples.Length)
         {
-            Array.Resize(ref samples, outIndex);
+            Array.Resize(ref samples, decoded);
+        }
+
+        if (rightSamples is not null && outIndex[1] != rightSamples.Length)
+        {
+            Array.Resize(ref rightSamples, outIndex[1]);
         }
 
         if (loopStart >= 0 && loopEnd <= loopStart)
         {
-            loopEnd = outIndex;
+            loopEnd = decoded;
         }
 
-        return new Waveform(samples, sampleRate, loopStart, loopEnd);
+        return new Waveform(samples, rightSamples, sampleRate, loopStart, loopEnd);
     }
 }

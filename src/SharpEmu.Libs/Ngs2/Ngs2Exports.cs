@@ -53,10 +53,12 @@ public static class Ngs2Exports
         public ulong RackHandle { get; }
         public uint VoiceIndex { get; }
 
-        // Software-mixer playback state. Pcm is the fully decoded mono waveform;
+        // Software-mixer playback state. Pcm is the fully decoded left/mono
+        // waveform (PcmRight carries the right channel of stereo sources);
         // Position is a fractional read cursor advanced at the source/output rate
         // ratio each output frame.
         public short[]? Pcm { get; set; }
+        public short[]? PcmRight { get; set; }
         public ulong SourceAddr { get; set; }
         public int SourceRate { get; set; }
         public double Position { get; set; }
@@ -359,6 +361,7 @@ public static class Ngs2Exports
                 }
 
                 voice.Pcm = waveform.Samples;
+                voice.PcmRight = waveform.RightSamples;
                 voice.SourceAddr = dataAddr;
                 voice.SourceRate = waveform.SampleRate;
                 voice.LoopStart = waveform.LoopStart;
@@ -376,7 +379,8 @@ public static class Ngs2Exports
                 }
 
                 Console.Error.WriteLine(
-                    $"[LOADER][TRACE] ngs2.arm voice=0x{voiceHandle:X16} addr=0x{dataAddr:X} rate={waveform.SampleRate} samples={waveform.Samples.Length} loop={waveform.LoopStart} peak={peak}");
+                    $"[LOADER][TRACE] ngs2.arm voice=0x{voiceHandle:X16} addr=0x{dataAddr:X} rate={waveform.SampleRate} " +
+                    $"samples={waveform.Samples.Length} stereo={waveform.RightSamples is not null} loop={waveform.LoopStart} peak={peak}");
             }
         }
         finally
@@ -606,12 +610,19 @@ public static class Ngs2Exports
         }
     }
 
-    // Resample one voice from its source rate to 48 kHz (nearest-sample) and add
-    // it to the front stereo pair. Advances the voice cursor and handles loop /
-    // one-shot end. Must be called under StateGate.
+    // Resample one voice from its source rate to 48 kHz (linear interpolation)
+    // and add it to the front stereo pair. Advances the voice cursor and handles
+    // loop / one-shot end. Must be called under StateGate.
     private static void MixOneVoice(float[] accum, int frames, int channels, VoiceState voice)
     {
         var pcm = voice.Pcm!;
+        var pcmRight = voice.PcmRight;
+        if (pcmRight is not null && pcmRight.Length < pcm.Length)
+        {
+            // Guard against a short right channel; treat the tail as mono.
+            pcmRight = null;
+        }
+
         var loopEnd = voice.LoopEnd > 0 && voice.LoopEnd <= pcm.Length ? voice.LoopEnd : pcm.Length;
         var loopStart = voice.LoopStart;
         var step = voice.SourceRate / OutputSampleRate;
@@ -624,8 +635,13 @@ public static class Ngs2Exports
             {
                 if (loopStart >= 0 && loopStart < loopEnd)
                 {
-                    pos = loopStart;
-                    idx = loopStart;
+                    pos = loopStart + (pos - loopEnd);
+                    if (pos < loopStart || pos >= loopEnd)
+                    {
+                        pos = loopStart;
+                    }
+
+                    idx = (int)pos;
                 }
                 else
                 {
@@ -640,12 +656,25 @@ public static class Ngs2Exports
                 break;
             }
 
-            var sample = pcm[idx] * gain;
+            // Linear interpolation between idx and the next source sample
+            // (staying inside the loop region) removes the stair-step aliasing
+            // a nearest-sample fetch produces on 44.1 -> 48 kHz music.
+            var frac = (float)(pos - idx);
+            var next = idx + 1;
+            if (next >= loopEnd)
+            {
+                next = loopStart >= 0 && loopStart < loopEnd ? loopStart : idx;
+            }
+
+            var left = pcm[idx] + ((pcm[next] - pcm[idx]) * frac);
+            var right = pcmRight is null
+                ? left
+                : pcmRight[idx] + ((pcmRight[next] - pcmRight[idx]) * frac);
             var baseIndex = f * channels;
-            accum[baseIndex] += sample;
+            accum[baseIndex] += left * gain;
             if (channels > 1)
             {
-                accum[baseIndex + 1] += sample;
+                accum[baseIndex + 1] += right * gain;
             }
 
             pos += step;
