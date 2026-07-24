@@ -158,11 +158,17 @@ public static class AvPlayerExports
         var dataAddress = ctx[CpuRegister.Rsi];
         lock (StateGate)
         {
-            return SetReturn(
-                ctx,
-                handle != 0 && dataAddress != 0 && Players.ContainsKey(handle)
-                    ? 0
-                    : InvalidParameters);
+            // A null post-init block is valid: the guest is accepting the default
+            // decoder configuration. Rejecting it makes the title treat the whole
+            // player as broken and never add a source (Castlevania: Dominus
+            // Collection passes null here and its .mp4 videos stayed blue).
+            if (handle == 0 || !Players.TryGetValue(handle, out var player))
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+
+            Trace($"post_init handle=0x{handle:X16} data=0x{dataAddress:X16}");
+            return SetReturn(ctx, 0);
         }
     }
 
@@ -984,7 +990,14 @@ public static class AvPlayerExports
     private static bool AllocateGuestVideoBuffers(CpuContext ctx, PlayerState player, int bufferSize)
     {
         var scheduler = GuestThreadExecution.Scheduler;
-        if (!player.TextureAllocatorFailed && player.AllocateTextureCallback != 0 && scheduler is not null)
+        // Calling the game's allocator synchronously from a managed export can
+        // re-enter UnmanagedCallersOnly import stubs on Windows and fail-fast
+        // the CLR. The HLE buffers have the same guest-visible lifetime and
+        // avoid that unsafe reverse-P/Invoke path.
+        if (!OperatingSystem.IsWindows() &&
+            !player.TextureAllocatorFailed &&
+            player.AllocateTextureCallback != 0 &&
+            scheduler is not null)
         {
             for (var index = 0; index < player.GuestBuffers.Length; index++)
             {
