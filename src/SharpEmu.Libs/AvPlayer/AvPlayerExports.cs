@@ -58,6 +58,7 @@ public static class AvPlayerExports
         public int NextGuestBuffer { get; set; }
         public ulong LastGuestBuffer { get; set; }
         public long NextFrameIndex { get; set; }
+        public long NextVideoFrameDueTimestamp { get; set; }
         public ulong AudioBufferBase { get; set; }
         public int NextAudioBuffer { get; set; }
         public long NextAudioFrameIndex { get; set; }
@@ -111,6 +112,7 @@ public static class AvPlayerExports
             Dispose();
             PlaybackClock.Reset();
             NextFrameIndex = 0;
+            NextVideoFrameDueTimestamp = 0;
             NextAudioFrameIndex = 0;
             EndOfStream = false;
         }
@@ -708,14 +710,11 @@ public static class AvPlayerExports
             }
 
             var fps = Math.Max(1.0, player.FramesPerSecond);
-            var expectedFrame = (long)Math.Floor(player.PlaybackClock.Elapsed.TotalSeconds * fps);
-            while (player.NextFrameIndex < expectedFrame)
+            var now = Stopwatch.GetTimestamp();
+            if (player.NextVideoFrameDueTimestamp != 0 &&
+                now < player.NextVideoFrameDueTimestamp)
             {
-                if (!ReadFrame(player))
-                {
-                    return FinishStream(ctx, player);
-                }
-                player.NextFrameIndex++;
+                return SetReturn(ctx, 0);
             }
 
             if (!ReadFrame(player))
@@ -725,6 +724,21 @@ public static class AvPlayerExports
 
             var timestamp = checked((ulong)Math.Round(player.NextFrameIndex * 1000.0 / fps));
             player.NextFrameIndex++;
+            var frameDurationTicks = Math.Max(
+                1L,
+                checked((long)Math.Round(Stopwatch.Frequency / fps)));
+            // Do not try to catch up to the host wall clock by discarding frames.
+            // Advance from the previous deadline so conversion time is included in
+            // the 29.97 fps interval instead of being added on top of it. Rebase
+            // only after a long guest stall to avoid an uncontrolled catch-up burst.
+            var nextDeadline = player.NextVideoFrameDueTimestamp == 0
+                ? checked(now + frameDurationTicks)
+                : checked(player.NextVideoFrameDueTimestamp + frameDurationTicks);
+            if (nextDeadline < now - (frameDurationTicks * 2))
+            {
+                nextDeadline = checked(now + frameDurationTicks);
+            }
+            player.NextVideoFrameDueTimestamp = nextDeadline;
             if (!WriteVideoFrame(ctx, player, infoAddress, timestamp, extended))
             {
                 return SetReturn(ctx, 0);
