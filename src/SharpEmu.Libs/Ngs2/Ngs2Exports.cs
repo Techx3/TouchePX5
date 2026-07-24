@@ -903,4 +903,39 @@ public static class Ngs2Exports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
     public static int Ngs2GeomResetListenerParam(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
+        Nid = "MzTa7VLjogY",
+        ExportName = "sceNgs2RackLock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2RackLock(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
+        Nid = "++YZ7P9e87U",
+        ExportName = "sceNgs2RackUnlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2RackUnlock(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
+        Nid = "hyVLT2VlOYk",
+        ExportName = "sceNgs2ParseWaveformData",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2ParseWaveformData(CpuContext ctx)
+    {
+        const ulong waveformInfoSize = 200;
+        var dataAddress = ctx[CpuRegister.Rdi];
+        var dataSize = ctx[CpuRegister.Rsi];
+        var outInfoAddress = ctx[CpuRegister.Rdx];
+        if (dataAddress == 0 || dataSize == 0 || outInfoAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        return TryClearGuestBuffer(ctx, outInfoAddress, waveformInfoSize)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
 }

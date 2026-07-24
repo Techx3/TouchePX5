@@ -1432,6 +1432,49 @@ public static partial class KernelMemoryCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // Reports whether a guest path is reachable on the host. Castlevania: Dominus
+    // Collection probes its asset paths with this during boot; an unresolved import
+    // makes the probe fail and the game skips loading/rendering its content.
+    [SysAbiExport(
+        Nid = "uWyW3v98sU4",
+        ExportName = "sceKernelCheckReachability",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelCheckReachability(CpuContext ctx)
+    {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        if (pathAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var hostPath = ResolveGuestPath(guestPath);
+        var result = !string.IsNullOrEmpty(hostPath) &&
+            (File.Exists(hostPath) || Directory.Exists(hostPath))
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        ctx[CpuRegister.Rax] = unchecked((ulong)result);
+        return result;
+    }
+
+    // Boot-time compatibility init the title calls before its main setup; a plain
+    // success is all the guest expects. Missing this leaves the import unresolved.
+    [SysAbiExport(
+        Nid = "n3kSX62fgNo",
+        ExportName = "sceCompatInitializeN3kSX62fgNo",
+        Target = Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int CompatInitializeN3kSX62fgNo(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "6c3rCVE-fTU",
         ExportName = "_open",

@@ -642,6 +642,10 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             // them up front so the HLE loader can return a real module handle and dlsym
             // can resolve their exports, but defer DT_INIT until the guest requests them.
             (Path: Path.Combine(ebootDirectory, "Media", "Plugins"), StartAtBoot: false),
+            // Some titles ship their dependency modules next to the eboot rather than in
+            // sce_module (Castlevania: Dominus Collection keeps dra01/dra03/emu_integration
+            // in the game root). ShouldPreloadModule still filters out core system modules.
+            (Path: ebootDirectory, StartAtBoot: true),
         }
         .GroupBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
         .Select(group => group.First())
