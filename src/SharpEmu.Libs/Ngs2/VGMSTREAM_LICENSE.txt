@@ -1,3 +1,6 @@
+SPDX-FileCopyrightText: 2008-2025 Adam Gashlin, Fastelbja, Ronny Elfert, bnnm, Christopher Snowhill, NicknineTheEagle, bxaimc, Thealexbarney, CyberBotX, EdnessP, et al
+SPDX-License-Identifier: ISC
+
 Copyright (c) 2008-2025 Adam Gashlin, Fastelbja, Ronny Elfert, bnnm,
                         Christopher Snowhill, NicknineTheEagle, bxaimc,
                         Thealexbarney, CyberBotX, EdnessP, et al
