@@ -7,6 +7,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
 # Touché PX5
 
 <p align="center">
+  <img src="./assets/images/touchepx5-logo.png" width="360" alt="Touché PX5 logo">
+</p>
+
+<p align="center">
   <strong>An experimental PlayStation 5 emulator</strong><br>
   Independent development focused on compatibility, graphics, video, audio, input, and real-game testing.
 </p>

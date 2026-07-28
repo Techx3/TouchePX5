@@ -37,7 +37,7 @@ public sealed class ConsoleWindow : Window
         MinWidth = 520;
         MinHeight = 320;
         Background = new SolidColorBrush(Color.Parse("#0D1017"));
-        Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://SharpEmu.GUI/Assets/SharpEmu.ico")));
+        Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://SharpEmu.GUI/Assets/TouchePx5.ico")));
 
         _searchBox = new TextBox
         {

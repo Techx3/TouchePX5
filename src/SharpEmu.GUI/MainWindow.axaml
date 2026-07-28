@@ -17,7 +17,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         ExtendClientAreaToDecorationsHint="True"
         WindowDecorations="Full"
         ExtendClientAreaTitleBarHeightHint="58"
-        Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
+        Icon="avares://SharpEmu.GUI/Assets/TouchePx5.ico"
         KeyDown="OnKeyDown">
 
   <Grid x:Name="RootLayout" RowDefinitions="Auto,*,Auto">
