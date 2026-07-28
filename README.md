@@ -1,55 +1,53 @@
 ﻿<!--
+Copyright (C) 2026 Touché PX5 contributors
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-# SharpEmu
+# Touché PX5
 
 <p align="center">
-  <img src="./assets/images/logo.png" width=30% height=30% />
+  <strong>An experimental PlayStation 5 emulator</strong><br>
+  Independent development focused on compatibility, graphics, video, audio, input, and real-game testing.
 </p>
 
 <p align="center">
-  An experimental PlayStation 5 emulator for Windows, Linux and macOS.  
-</p>
-
----
-
-<p align="center">
-  <a href="#support">
-    <img src="https://img.shields.io/badge/Support-GitHub%20Sponsors%20%26%20Crypto-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Support SharpEmu">
-  </a>
+  <a href="https://github.com/Techx3/TouchePX5/actions/workflows/workflow.yml"><img src="https://github.com/Techx3/TouchePX5/actions/workflows/workflow.yml/badge.svg?branch=main" alt="Build status"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-GPL--2.0--or--later-6d5dfc.svg" alt="GPL-2.0-or-later"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-16a3ff.svg" alt="Platforms">
 </p>
 
 ---
 
-> [!NOTE]  
-> SharpEmu supports Windows x64, Linux x64, and macOS x64. Apple Silicon Macs
+> [!NOTE]
+> Touché PX5 supports Windows x64, Linux x64, and macOS x64. Apple Silicon Macs
 > can run the macOS x64 build through Rosetta 2, and Windows on ARM devices
 > (e.g. Snapdragon) can run the Windows x64 build through Windows' built-in
 > x64 emulation.
 
-> [!WARNING]  
-> SharpEmu is an experimental PS5 emulator developed from scratch in C#. The current focus is on accuracy and infrastructure setup rather than game-specific compatibility.
+> [!WARNING]
+> Touché PX5 is in an early experimental stage. Games may fail to boot, render incorrectly, run slowly, lose audio synchronization, or crash.
 
-## Info
+## About Touché PX5
 
-SharpEmu is an emulator project currently in its early stages of development.
+Touché PX5 is an independently maintained PlayStation 5 emulator written primarily in C#, with its own interface, roadmap, compatibility work, and public repository.
 
 This project is developed purely for research and educational purposes. There are no commercial goals associated with it. We enjoy learning about system architecture and reverse engineering.
 
-SharpEmu focuses exclusively on the PlayStation 5.  
+Touché PX5 focuses exclusively on the PlayStation 5.
 Our goal is **not** to emulate PS4 games, as there is already an excellent emulator dedicated to that platform: **ShadPS4**.
 
-## Games Tested
+## Tested games
 
-|               Demons Souls Remake                   |                     Dreaming Sarah                         |
-| :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
-| ![Bloodborne screenshot](./.github/images/demons-souls.jpg) | ![Dreaming Sarah](./.github/images/dreaming-sarah.jpg) |
+These results describe development tests, not guaranteed compatibility. Behavior varies by game version, operating system, GPU, and driver.
 
-|                  Void Terrarium                     |                 Dead Cells                    |
-| :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Void Terrarium](./.github/images/void-terrarium.jpg) | ![Dead Cells](./.github/images/dead-cells.jpg) |
+| Game | Observed state |
+| --- | --- |
+| Castlevania Dominus Collection | Boots; menus, video, audio, gameplay, and save paths are under active testing |
+| Dreaming Sarah | Boots and renders in-game |
+| The Messenger | Boots and renders; presentation orientation corrected |
+| Story of Seasons: A Wonderful Life | Boots into gameplay; performance and stability remain under investigation |
+| Cat Quest III | Early boot and compatibility testing |
 
 ## Status
 
@@ -61,90 +59,87 @@ Current capabilities include:
 * Executing native CPU instructions
 * Reading basic game metadata (title, version, etc.)
 * Loading system modules (`prx` / `sys_module`)
-* Partial support for some kernel functions  
+* Partial support for kernel functions
 * `Fiber` and `AMPR` exports
 * PlayGo scenarios
-* Initial loading game files
-* Shader/resource submits and AGC initial
-* Video outputs in some games
+* Initial AGC shader and resource submission
+* Vulkan video output in supported paths
+* AVPlayer video and audio handling
+* NGS2 software mixing and HEVAG decoding
+* Controller input and early save-data support
 
-Some games have reached like `sceVideoOut` and AGC stages.
+Compatibility remains title-specific and is actively evolving.
 
-SharpEmu supports Windows, Linux, and macOS hosts. Video output uses Vulkan on
+Touché PX5 supports Windows, Linux, and macOS hosts. Video output uses Vulkan on
 Windows and Linux, and MoltenVK on macOS. Platform support is still experimental,
 so compatibility and performance vary by game, operating system, and GPU driver.
 
-## Using
+## Using Touché PX5
 
-Download the release archive for your operating system, extract it, and launch
-SharpEmu with the path to a legally obtained game's `eboot.bin`.
+Download a build from [GitHub Actions](https://github.com/Techx3/TouchePX5/actions/workflows/workflow.yml),
+extract it, and launch `TouchePx5.exe` without arguments to open the desktop game
+library. You can also pass the path to a legally obtained game's `eboot.bin`.
 
 Windows PowerShell:
 
 ```powershell
-.\SharpEmu.exe "C:\path\to\game\eboot.bin" 2>&1 |
-  Tee-Object -FilePath "SharpEmu.log"
+.\TouchePx5.exe --cpu-engine=native --log-level=info "C:\path\to\game\eboot.bin" 2>&1 |
+  Tee-Object -FilePath "TouchePx5.log"
 ```
 
 Linux and macOS:
 
 ```bash
-chmod +x ./SharpEmu
+chmod +x ./TouchePx5
 
-./SharpEmu "/path/to/game/eboot.bin" 2>&1 |
-  tee SharpEmu.log
+./TouchePx5 --cpu-engine=native --log-level=info "/path/to/game/eboot.bin" 2>&1 |
+  tee TouchePx5.log
 ```
 
 A Vulkan-capable GPU and current graphics driver are required. The macOS
 release includes the MoltenVK Vulkan implementation.
 
-> [!IMPORTANT]  
-> This project does **not** support or condone piracy.  
-> All games used during development and testing are dumped from consoles that we personally own.  
+> [!IMPORTANT]
+> This project does **not** support or condone piracy.
 > Users are expected to use legally obtained copies of their games.
 
-## Build
+## Build from source
 
 1. Install the .NET SDK version specified in [`global.json`](./global.json).
-2. Clone the repository: `git clone https://github.com/sharpemu/sharpemu.git`
-3. Open the solution file (`SharpEmu.slnx`) in **VSCode**.
-4. Build the project: `dotnet build` or `dotnet publish`
-5. Build artifacts will be located in the `artifacts` directory.
+2. Clone the repository: `git clone https://github.com/Techx3/TouchePX5.git`
+3. Restore dependencies: `dotnet restore SharpEmu.slnx`
+4. Build: `dotnet build SharpEmu.slnx -c Release --no-restore`
+5. Test: `dotnet test SharpEmu.slnx -c Release --no-build`
+
+Build artifacts are written to the `artifacts` directory.
 
 ## Disclaimer
 
-SharpEmu is an experimental emulator intended for research and educational purposes.
+Touché PX5 is an experimental emulator intended for research and educational purposes.
 
 This project does not contain any copyrighted system firmware, game data, or proprietary PlayStation assets.
 
-## Special Thanks
+## Origins and acknowledgements
 
-The following projects were extremely helpful during development:
+Touché PX5 is independently maintained and has its own identity and direction.
+It originated from the GPL-licensed [SharpEmu](https://github.com/sharpemu/sharpemu)
+codebase, whose copyright and license notices are retained where required.
 
-* **[ShadPS4](https://github.com/shadps4-emu/shadPS4)**  
-Helped with understanding the basic architecture of the PlayStation 4.
+Public research and implementations from these projects have also been helpful:
 
-* **[Kyty](https://github.com/InoriRus/Kyty)**  
-One of the few PS5 emulator projects available and very useful for studying native code execution.
+* **[SharpEmu](https://github.com/sharpemu/sharpemu)** — Upstream project from which Touché PX5 originated.
+* **[shadPS4](https://github.com/shadps4-emu/shadPS4)** — Reference for PlayStation architecture and emulation research.
+* **[KytyPS5](https://github.com/KytyPS5/KytyPS5)** — Reference for PS5 native-code execution research.
+* **[Ryujinx](https://github.com/ryujinx-mirror/ryujinx)** — Reference for filesystem handling and low-level C# patterns.
+* **[vgmstream](https://github.com/vgmstream/vgmstream)** and **[FFmpeg](https://ffmpeg.org/)** — Media and audio compatibility work.
 
-* **Ryujinx**  
-Provided valuable references for filesystem handling and low-level C# implementation patterns.
+Touché PX5 is not affiliated with, endorsed by, or connected to Sony Interactive
+Entertainment. PlayStation is a trademark of Sony Interactive Entertainment.
 
-# License
+## License
 
-- [**GPL-2.0 license**](https://github.com/sharpemu/sharpemu/blob/main/LICENSE)
-
-## Support
-
-Support SharpEmu via GitHub Sponsors or cryptocurrency. Every contribution helps fund ongoing development and long-term maintenance. GitHub Sponsors is the preferred way to support the project, but cryptocurrency donations are also appreciated.
-
-### ETH/USDT
-
-`0xF315F5d986c790bB3A58DbE60F1B2760997dEd82`
-
-### BTC
-
-`bc1qmr9k8899njys5ny63xsues4jgmkk96erslrkmv`
+Touché PX5 is distributed under the [GNU General Public License v2.0 or later](./LICENSE).
+Third-party components and adapted code retain their respective copyright and license notices.
 
 ## Contributing
 
