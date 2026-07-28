@@ -136,6 +136,21 @@ Public research and implementations from these projects have also been helpful:
 Touché PX5 is not affiliated with, endorsed by, or connected to Sony Interactive
 Entertainment. PlayStation is a trademark of Sony Interactive Entertainment.
 
+## Support Touché PX5
+
+If you want to support development, voluntary Bitcoin contributions can be sent
+to the address below. Always verify the complete address before sending funds.
+
+<p align="center">
+  <img src="./assets/images/btc-donation-qr.png" width="280" alt="Bitcoin donation QR for Touché PX5">
+</p>
+
+**Bitcoin (BTC)**
+
+```text
+bc1qeur2u3qvnrczt90yfhjd58tc4uqnkqvp23kf5f
+```
+
 ## License
 
 Touché PX5 is distributed under the [GNU General Public License v2.0 or later](./LICENSE).
