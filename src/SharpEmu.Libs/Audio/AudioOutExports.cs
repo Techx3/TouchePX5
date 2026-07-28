@@ -21,7 +21,9 @@ public static class AudioOutExports
     internal const int AudioOutErrorInvalidSize = unchecked((int)0x80260006);
 
     private static readonly ConcurrentDictionary<int, PortState> Ports = new();
+    private static readonly ConcurrentDictionary<ulong, long> AvPlayerBufferSessions = new();
     private static int _nextPortHandle;
+    private static long _activeAvPlayerAudioSession;
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
 
     // Diagnostic: confirm sceAudioOutOutput is actually called and whether the
@@ -74,6 +76,8 @@ public static class AudioOutExports
         public IHostAudioStream? Backend { get; }
         public object SubmissionGate { get; } = new();
         public volatile float Volume = 1.0f;
+        public volatile bool Suppressed;
+        public long AvPlayerSessionGeneration;
         public int BufferByteLength =>
             checked((int)BufferLength * Channels * BytesPerSample);
 
@@ -321,6 +325,14 @@ public static class AudioOutExports
 
             TraceOutput(handle, port, source);
 
+            ActivateAvPlayerPortForBuffer(handle, port, sourceAddress);
+
+            if (port.Suppressed)
+            {
+                port.PaceSilence();
+                return ctx.SetReturn(0);
+            }
+
             if (port.Backend is null)
             {
                 port.PaceSilence();
@@ -409,6 +421,21 @@ public static class AudioOutExports
                 lockOrder[i] = i;
             }
 
+            // Claim the AVPlayer port before taking the batch's port locks.
+            // Session activation may drain an older port that is not part of
+            // this batch, so doing it while holding batch locks could invert
+            // the lock order against another audio thread.
+            for (var i = 0; i < resolved.Length; i++)
+            {
+                if (resolved[i].SourceAddress != 0)
+                {
+                    ActivateAvPlayerPortForBuffer(
+                        resolved[i].Handle,
+                        resolved[i].Port,
+                        resolved[i].SourceAddress);
+                }
+            }
+
             // Every batch takes port locks in handle order. Two guest threads can
             // submit overlapping batches in a different descriptor order without
             // deadlocking each other.
@@ -464,6 +491,11 @@ public static class AudioOutExports
                     }
 
                     TraceOutput(output.Handle, output.Port, source);
+
+                    if (output.Port.Suppressed)
+                    {
+                        continue;
+                    }
 
                     output.HostBufferLength = checked(
                         (int)output.Port.BufferLength * AudioPcmConversion.OutputFrameSize);
@@ -528,6 +560,110 @@ public static class AudioOutExports
     private static bool HasLongerBufferDuration(PortState candidate, PortState current) =>
         (ulong)candidate.BufferLength * current.Frequency >
         (ulong)current.BufferLength * candidate.Frequency;
+
+    /// <summary>Starts a movie-audio generation and drains every older movie port.</summary>
+    internal static void BeginAvPlayerAudioSession(long generation)
+    {
+        Volatile.Write(ref _activeAvPlayerAudioSession, generation);
+        foreach (var port in Ports.Values)
+        {
+            if (Volatile.Read(ref port.AvPlayerSessionGeneration) == 0)
+            {
+                continue;
+            }
+
+            lock (port.SubmissionGate)
+            {
+                port.Suppressed = true;
+                port.Backend?.Reset();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Associates the exact guest PCM buffer returned by AVPlayer with its
+    /// generation. This avoids guessing movie ports from format alone.
+    /// </summary>
+    internal static void RegisterAvPlayerAudioBuffer(long generation, ulong bufferAddress)
+    {
+        if (generation != 0 && bufferAddress != 0)
+        {
+            AvPlayerBufferSessions[bufferAddress] = generation;
+        }
+    }
+
+    internal static void EndAvPlayerAudioSession(long generation)
+    {
+        Interlocked.CompareExchange(ref _activeAvPlayerAudioSession, 0, generation);
+        foreach (var pair in AvPlayerBufferSessions)
+        {
+            if (pair.Value == generation)
+            {
+                AvPlayerBufferSessions.TryRemove(pair.Key, out _);
+            }
+        }
+
+        foreach (var port in Ports.Values)
+        {
+            lock (port.SubmissionGate)
+            {
+                if (port.AvPlayerSessionGeneration == generation)
+                {
+                    port.Suppressed = true;
+                    port.Backend?.Reset();
+                }
+            }
+        }
+    }
+
+    private static void ActivateAvPlayerPortForBuffer(
+        int handle,
+        PortState port,
+        ulong sourceAddress)
+    {
+        if (!AvPlayerBufferSessions.TryGetValue(sourceAddress, out var generation))
+        {
+            return;
+        }
+
+        if (generation != Volatile.Read(ref _activeAvPlayerAudioSession))
+        {
+            lock (port.SubmissionGate)
+            {
+                port.AvPlayerSessionGeneration = generation;
+                if (!port.Suppressed)
+                {
+                    port.Backend?.Reset();
+                    port.Suppressed = true;
+                }
+            }
+            return;
+        }
+
+        foreach (var pair in Ports)
+        {
+            var candidate = pair.Value;
+            lock (candidate.SubmissionGate)
+            {
+                if (pair.Key == handle)
+                {
+                    if (candidate.Suppressed ||
+                        candidate.AvPlayerSessionGeneration != generation)
+                    {
+                        candidate.Backend?.Reset();
+                    }
+
+                    candidate.AvPlayerSessionGeneration = generation;
+                    candidate.Suppressed = false;
+                }
+                else if (candidate.AvPlayerSessionGeneration != 0 && !candidate.Suppressed)
+                {
+                    candidate.Suppressed = true;
+                    candidate.Backend?.Reset();
+                }
+            }
+        }
+    }
 
     private static void TraceOutput(int handle, PortState port, ReadOnlySpan<byte> source)
     {
@@ -650,6 +786,8 @@ public static class AudioOutExports
 
         _nextPortHandle = 0;
         _outputCount = 0;
+        AvPlayerBufferSessions.Clear();
+        Volatile.Write(ref _activeAvPlayerAudioSession, 0);
         Volatile.Write(ref _shutdown, false);
         Volatile.Write(ref _streamFactoryForTests, null);
     }

@@ -82,6 +82,48 @@ public sealed class AudioOutExportsTests : IDisposable
     }
 
     [Fact]
+    public void AvPlayerSession_OnlyNewestMoviePortRemainsAudible()
+    {
+        var firstHandle = OpenPort(bufferLength: 1024);
+        AudioOutExports.BeginAvPlayerAudioSession(1);
+        AudioOutExports.RegisterAvPlayerAudioBuffer(1, FirstSourceAddress);
+        Assert.True(_memory.TryWrite(FirstSourceAddress, new byte[4096]));
+        SubmitSingle(firstHandle, FirstSourceAddress);
+
+        AudioOutExports.BeginAvPlayerAudioSession(2);
+        var secondHandle = OpenPort(bufferLength: 1024);
+        AudioOutExports.RegisterAvPlayerAudioBuffer(2, SecondSourceAddress);
+
+        Assert.True(_memory.TryWrite(SecondSourceAddress, new byte[4096]));
+
+        SubmitSingle(secondHandle, SecondSourceAddress);
+        SubmitSingle(firstHandle, FirstSourceAddress);
+
+        Assert.Single(_streams[0].Submissions);
+        Assert.Single(_streams[1].Submissions);
+        Assert.True(_streams[0].ResetCount > 0);
+    }
+
+    [Fact]
+    public void AvPlayerSession_ReactivatesReusedMoviePortWithNewBuffer()
+    {
+        var handle = OpenPort(bufferLength: 1024);
+        Assert.True(_memory.TryWrite(FirstSourceAddress, new byte[4096]));
+        Assert.True(_memory.TryWrite(SecondSourceAddress, new byte[4096]));
+
+        AudioOutExports.BeginAvPlayerAudioSession(1);
+        AudioOutExports.RegisterAvPlayerAudioBuffer(1, FirstSourceAddress);
+        SubmitSingle(handle, FirstSourceAddress);
+
+        AudioOutExports.BeginAvPlayerAudioSession(2);
+        AudioOutExports.RegisterAvPlayerAudioBuffer(2, SecondSourceAddress);
+        SubmitSingle(handle, SecondSourceAddress);
+
+        Assert.Equal(2, _streams[0].Submissions.Count);
+        Assert.True(_streams[0].ResetCount >= 2);
+    }
+
+    [Fact]
     public void Outputs_AcceptsNullBufferAsSynchronizationOnly()
     {
         var handle = OpenPort(bufferLength: 2);
@@ -203,6 +245,13 @@ public sealed class AudioOutExportsTests : IDisposable
         return AudioOutExports.AudioOutOutputs(_ctx);
     }
 
+    private int SubmitSingle(int handle, ulong sourceAddress)
+    {
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        _ctx[CpuRegister.Rsi] = sourceAddress;
+        return AudioOutExports.AudioOutOutput(_ctx);
+    }
+
     private void WriteDescriptor(int index, int handle, ulong sourceAddress)
     {
         Span<byte> descriptor = stackalloc byte[16];
@@ -217,12 +266,15 @@ public sealed class AudioOutExportsTests : IDisposable
     private sealed class RecordingAudioStream : IHostAudioStream
     {
         public List<byte[]> Submissions { get; } = [];
+        public int ResetCount { get; private set; }
 
         public bool Submit(ReadOnlySpan<byte> stereoPcm16)
         {
             Submissions.Add(stereoPcm16.ToArray());
             return true;
         }
+
+        public void Reset() => ResetCount++;
 
         public void Dispose()
         {

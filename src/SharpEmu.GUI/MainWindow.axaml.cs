@@ -562,7 +562,10 @@ public partial class MainWindow : Window
                 ? $" · {BuildInfo.CommitSha}"
                 : $" · UNOFFICIAL {BuildInfo.CommitSha}";
         VersionText.Text = display;
-        Title = $"SharpEmu {display}";
+        // The custom title bar owns the visible Touché PX5 identity. Keeping
+        // the native caption empty prevents Windows from painting a second,
+        // overlapping title over it on this Avalonia version.
+        Title = string.Empty;
         ToolTip.SetTip(VersionText, BuildInfo.Banner);
 
         _settings = GuiSettings.Load();
@@ -803,7 +806,7 @@ public partial class MainWindow : Window
                 Grid.SetRowSpan(MainContent, 1);
                 MainContent.Margin = _isRunning
                     ? new Thickness(0)
-                    : new Thickness(32, 24, 32, 20);
+                    : new Thickness(28, 18, 28, 18);
                 ContentToolbar.IsVisible = !_isRunning;
                 ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
                 LaunchBar.IsVisible = true;
@@ -1026,7 +1029,7 @@ public partial class MainWindow : Window
         SaveFilePickerResult result = await StorageProvider.SaveFilePickerWithResultAsync(new FilePickerSaveOptions
         {
             Title = loc.Get("Dialog.SaveLogFile"),
-            SuggestedFileName = "SharpEmuLog",
+            SuggestedFileName = "TouchePx5Log",
             DefaultExtension = "log",
             FileTypeChoices =
                 [
@@ -1046,7 +1049,8 @@ public partial class MainWindow : Window
 
     private void LocateEmulator()
     {
-        var exeName = OperatingSystem.IsWindows() ? "SharpEmu.exe" : "SharpEmu";
+        var exeName = OperatingSystem.IsWindows() ? "TouchePx5.exe" : "TouchePx5";
+        var legacyExeName = OperatingSystem.IsWindows() ? "SharpEmu.exe" : "SharpEmu";
         var baseDirectory = AppContext.BaseDirectory;
         var candidates = new List<string>();
         if (!string.IsNullOrWhiteSpace(_settings.EmulatorPath))
@@ -1057,7 +1061,8 @@ public partial class MainWindow : Window
         // The GUI and CLI share one executable. The selected path is the
         // isolated child executable and also defines the portable data root.
         if (Environment.ProcessPath is { } selfPath &&
-            Path.GetFileNameWithoutExtension(selfPath).Equals("SharpEmu", StringComparison.OrdinalIgnoreCase))
+            (Path.GetFileNameWithoutExtension(selfPath).Equals("TouchePx5", StringComparison.OrdinalIgnoreCase) ||
+             Path.GetFileNameWithoutExtension(selfPath).Equals("SharpEmu", StringComparison.OrdinalIgnoreCase)))
         {
             candidates.Add(selfPath);
         }
@@ -1065,6 +1070,9 @@ public partial class MainWindow : Window
         candidates.Add(Path.Combine(baseDirectory, exeName));
         candidates.Add(Path.Combine(baseDirectory, "win-x64", exeName));
         candidates.Add(Path.Combine(baseDirectory, "..", exeName));
+        candidates.Add(Path.Combine(baseDirectory, legacyExeName));
+        candidates.Add(Path.Combine(baseDirectory, "win-x64", legacyExeName));
+        candidates.Add(Path.Combine(baseDirectory, "..", legacyExeName));
 
         _emulatorExePath = candidates.FirstOrDefault(File.Exists) is { } found
             ? Path.GetFullPath(found)
@@ -2177,7 +2185,7 @@ public partial class MainWindow : Window
         SessionBarPopup.IsOpen = false;
         HideSessionLoading();
         AnimateLibraryBlur(0, clearWhenComplete: true);
-        MainContent.Margin = new Thickness(32, 24, 32, 20);
+        MainContent.Margin = new Thickness(28, 18, 28, 18);
         ContentToolbar.IsVisible = true;
         ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
         LaunchBar.IsVisible = true;
@@ -2288,7 +2296,7 @@ public partial class MainWindow : Window
         GameView.IsHitTestVisible = false;
         SessionBarPopup.IsOpen = false;
         AnimateLibraryBlur(LaunchBlurRadius);
-        MainContent.Margin = new Thickness(32, 24, 32, 20);
+        MainContent.Margin = new Thickness(28, 18, 28, 18);
         ContentToolbar.IsVisible = true;
         ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
         LaunchBar.IsVisible = true;

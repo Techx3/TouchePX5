@@ -52,6 +52,7 @@ public static class AudioOut2Exports
     private static long _pushTraceCount;
     private static long _submitTraceCount;
     private static long _attributePcmTraceCount;
+    private static long _pcmUpdateSequence;
 
     private static readonly ConcurrentDictionary<ulong, byte> SpeakerArrays = new();
     private static readonly ConcurrentDictionary<ulong, ContextState> Contexts = new();
@@ -126,6 +127,7 @@ public static class AudioOut2Exports
         public uint SamplingFrequency { get; }
         public uint GrainSamples { get; }
         public ulong PcmAddress;
+        public long LastPcmUpdateSequence;
     }
 
     // Two host streams: primary FMOD context (menus) and everything else
@@ -418,6 +420,7 @@ public static class AudioOut2Exports
             }
 
             port.PcmAddress = BinaryPrimitives.ReadUInt64LittleEndian(pcm);
+            port.LastPcmUpdateSequence = Interlocked.Increment(ref _pcmUpdateSequence);
             var n = Interlocked.Increment(ref _attributePcmTraceCount);
             if (n <= 8 || n % 500 == 0)
             {
@@ -923,6 +926,7 @@ public static class AudioOut2Exports
     {
         chosen = null;
         var chosenScore = int.MinValue;
+        var chosenSequence = long.MinValue;
         foreach (var port in Ports.Values)
         {
             if (port.ContextHandle != contextHandle ||
@@ -946,9 +950,11 @@ public static class AudioOut2Exports
                 score += 20; // MAIN over BGM
             }
 
-            if (score > chosenScore)
+            if (score > chosenScore ||
+                (score == chosenScore && port.LastPcmUpdateSequence > chosenSequence))
             {
                 chosenScore = score;
+                chosenSequence = port.LastPcmUpdateSequence;
                 chosen = port;
             }
         }
@@ -960,6 +966,7 @@ public static class AudioOut2Exports
     {
         chosen = null;
         var chosenScore = int.MinValue;
+        var chosenSequence = long.MinValue;
         foreach (var port in Ports.Values)
         {
             if (port.ContextHandle != contextHandle ||
@@ -978,9 +985,11 @@ public static class AudioOut2Exports
                 8 => 100,
                 _ => 50,
             };
-            if (score > chosenScore)
+            if (score > chosenScore ||
+                (score == chosenScore && port.LastPcmUpdateSequence > chosenSequence))
             {
                 chosenScore = score;
+                chosenSequence = port.LastPcmUpdateSequence;
                 chosen = port;
             }
         }

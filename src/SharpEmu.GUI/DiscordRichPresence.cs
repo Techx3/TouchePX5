@@ -170,7 +170,7 @@ public sealed class DiscordRichPresence : IDisposable
                     ["assets"] = new Dictionary<string, object?>
                     {
                         ["large_image"] = "logo",
-                        ["large_text"] = "SharpEmu",
+                        ["large_text"] = "Touché PX5",
                     },
                 },
             },

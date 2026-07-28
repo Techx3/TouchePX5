@@ -73,7 +73,7 @@ public static class VideoOutExports
     private static int _nextHandle = 1;
     private static int _frameDumpCount;
     private static long _nextFrameDumpIndex;
-    private static string _windowTitle = "SharpEmu VideoOut";
+    private static string _windowTitle = "Touché PX5 VideoOut";
     private static readonly bool _logFrameRate = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_FPS"),
         "1",
@@ -113,7 +113,7 @@ public static class VideoOutExports
         var versionSuffix = string.IsNullOrWhiteSpace(version) ? string.Empty : $" v{version.Trim()}";
         lock (_stateGate)
         {
-            _windowTitle = $"SharpEmu - {application}{versionSuffix}";
+            _windowTitle = $"Touché PX5 - {application}{versionSuffix}";
         }
     }
 

@@ -15,4 +15,12 @@ public interface IHostAudioStream : IDisposable
     /// audio, in which case the caller paces the guest itself.
     /// </summary>
     bool Submit(ReadOnlySpan<byte> stereoPcm16);
+
+    /// <summary>
+    /// Discards audio that has been queued but not yet played. Backends that do
+    /// not buffer audio may keep the default no-op implementation.
+    /// </summary>
+    void Reset()
+    {
+    }
 }

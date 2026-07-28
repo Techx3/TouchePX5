@@ -115,7 +115,7 @@ internal static partial class Program
                 }
             }, 32 * 1024 * 1024)
             {
-                Name = "SharpEmu Emulation",
+                Name = "TouchePx5 Emulation",
             };
             emulation.Start();
             HostMainThread.Pump();
@@ -146,7 +146,7 @@ internal static partial class Program
         Console.Error.WriteLine(
             $"[LOADER][ERROR] Unsupported process architecture " +
             $"{RuntimeInformation.ProcessArchitecture}: guest code executes " +
-            "natively, so SharpEmu must run as an x86-64 process.");
+            "natively, so TouchePx5 must run as an x86-64 process.");
         if (OperatingSystem.IsMacOS())
         {
             Console.Error.WriteLine(
@@ -210,7 +210,7 @@ internal static partial class Program
 
         Console.Error.WriteLine(
             "[LOADER][WARN] No x86-64 Vulkan loader found; video output will be unavailable. " +
-            "Place a universal libMoltenVK.dylib (from the MoltenVK releases) next to SharpEmu " +
+            "Place a universal libMoltenVK.dylib (from the MoltenVK releases) next to TouchePx5 " +
             "as libvulkan.1.dylib.");
     }
 
@@ -237,7 +237,7 @@ internal static partial class Program
 
     private static int RunEmulator(string[] args, bool isMitigatedChild)
     {
-        Console.Error.WriteLine($"[DEBUG] SharpEmu starting with {args.Length} args");
+        Console.Error.WriteLine($"[DEBUG] TouchePx5 starting with {args.Length} args");
 
         if (!isMitigatedChild && TryRunMitigatedChild(args, out var childExitCode))
         {
@@ -335,7 +335,7 @@ internal static partial class Program
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[DEBUG] Exception: {ex}");
-                Log.Error("SharpEmu failed to run.", ex);
+                Log.Error("TouchePx5 failed to run.", ex);
                 return 3;
             }
             finally
@@ -346,7 +346,7 @@ internal static partial class Program
                 }
             }
 
-            Log.Info($"SharpEmu execution completed. Result={result} (0x{(int)result:X8})");
+            Log.Info($"TouchePx5 execution completed. Result={result} (0x{(int)result:X8})");
             if (!string.IsNullOrWhiteSpace(runtime.LastSessionSummary))
             {
                 Log.Info(runtime.LastSessionSummary);
@@ -1042,8 +1042,8 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--debug-server[=host:port]] <path-to-eboot.bin>");
-        Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
+        Log.Info("Usage: TouchePx5 [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info(@"Example: TouchePx5 --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
 

@@ -568,6 +568,10 @@ internal static unsafe class VulkanVideoPresenter
     private static Presentation? _hostVideoOverlayPresentation;
     private static ulong _hostVideoOverlayOwner;
     private static long _hostVideoOverlaySequence;
+    private static readonly bool _traceHostVideoOverlay =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_HOST_VIDEO") == "1";
+    private static long _hostVideoPresentedFrames;
+    private static long _hostVideoPresentedSince;
     private static byte[]? _copyFragmentSpirv;
     private static uint _windowWidth;
     private static uint _windowHeight;
@@ -3364,6 +3368,14 @@ internal static unsafe class VulkanVideoPresenter
         private VkBuffer[] _frameUploadBuffers = [];
         private DeviceMemory[] _frameUploadMemory = [];
         private nint[] _frameUploadMapped = [];
+        private byte[] _scaledBgraScratch = [];
+        private int[] _scaleSourceX0 = [];
+        private int[] _scaleSourceX1 = [];
+        private int[] _scaleFractionX = [];
+        private uint _scaleMapSourceWidth;
+        private uint _scaleMapDestinationWidth;
+        private uint _scaleMapCropWidth;
+        private uint _scaleMapOffsetX;
         private Image _hostMovieImage;
         private DeviceMemory _hostMovieImageMemory;
         private ImageView _hostMovieImageView;
@@ -14182,14 +14194,37 @@ internal static unsafe class VulkanVideoPresenter
                 CollectCompletedGuestSubmissions(waitForOldest: false);
             }
 
+            bool hostVideoOverlayActive;
+            bool hostVideoFramePending;
+            lock (_gate)
+            {
+                hostVideoOverlayActive = _hostVideoOverlayPresentation is not null;
+                hostVideoFramePending =
+                    _hostVideoOverlayPresentation is { } overlay &&
+                    overlay.Sequence != _presentedSequence;
+            }
+
             DrainGuestImageCpuSync();
             var completedWork = 0;
             HashSet<string>? deferredOrderedQueues = null;
-            var workBudgetTicks = _renderWorkBudgetTicks;
+            // Full-screen host-decoded movies must not wait behind hundreds of
+            // hidden guest draws. Present a newly decoded frame immediately;
+            // between movie frames, drain a small bounded slice so ordered guest
+            // state continues progressing and is ready when the movie finishes.
+            var overlayWorkBudgetTicks = System.Diagnostics.Stopwatch.Frequency / 500L; // 2 ms
+            var workBudgetTicks = hostVideoOverlayActive
+                ? _renderWorkBudgetTicks > 0
+                    ? Math.Min(_renderWorkBudgetTicks, overlayWorkBudgetTicks)
+                    : overlayWorkBudgetTicks
+                : _renderWorkBudgetTicks;
             var renderWorkDeadline = workBudgetTicks > 0
                 ? System.Diagnostics.Stopwatch.GetTimestamp() + workBudgetTicks
                 : long.MaxValue;
-            var workLimit = _maxGuestWorkPerRender;
+            var workLimit = hostVideoFramePending
+                ? 0
+                : hostVideoOverlayActive
+                    ? Math.Min(_maxGuestWorkPerRender, 16)
+                    : _maxGuestWorkPerRender;
             // Prefer ordered sync / flip heads while the queue is elevated so
             // label wakeups are not starved behind fat compute/draw items on
             // sibling logical queues.
@@ -14701,6 +14736,26 @@ internal static unsafe class VulkanVideoPresenter
             recreateAfterPresent |= presentResult == Result.SuboptimalKhr;
             VideoOutExports.ReportPresentedFrame();
             PerfOverlay.RecordPresent();
+            if (_traceHostVideoOverlay && presentation.Sequence >= (1L << 62))
+            {
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (_hostVideoPresentedSince == 0)
+                {
+                    _hostVideoPresentedSince = now;
+                }
+                _hostVideoPresentedFrames++;
+                var elapsed = now - _hostVideoPresentedSince;
+                if (elapsed >= System.Diagnostics.Stopwatch.Frequency * 2L)
+                {
+                    var fps = _hostVideoPresentedFrames *
+                        (double)System.Diagnostics.Stopwatch.Frequency / elapsed;
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] vk.host_video_present fps={fps:F1} " +
+                        $"frames={_hostVideoPresentedFrames}");
+                    _hostVideoPresentedFrames = 0;
+                    _hostVideoPresentedSince = now;
+                }
+            }
             if (_hostSurface is not null && !_firstHostFramePresented)
             {
                 _firstHostFramePresented = true;
@@ -17368,32 +17423,85 @@ internal static unsafe class VulkanVideoPresenter
                 LayerCount = layerCount,
             };
 
-        private static byte[] ScaleBgra(byte[] source, uint sourceWidth, uint sourceHeight, uint width, uint height)
+        private byte[] GetScaledBgraScratch(uint width, uint height)
         {
-            var destination = new byte[checked((int)(width * height * 4))];
-            for (uint y = 0; y < height; y++)
+            var length = checked((int)(width * height * 4));
+            if (_scaledBgraScratch.Length != length)
             {
-                var sourceY = (uint)(((ulong)y * sourceHeight) / height);
+                _scaledBgraScratch = new byte[length];
+            }
+
+            return _scaledBgraScratch;
+        }
+
+        private byte[] ScaleBgra(byte[] source, uint sourceWidth, uint sourceHeight, uint width, uint height)
+        {
+            var destination = GetScaledBgraScratch(width, height);
+            Parallel.For(0, checked((int)height), y =>
+            {
+                var sourceY = (uint)(((ulong)(uint)y * sourceHeight) / height);
+                var sourceRow = checked((int)(sourceY * sourceWidth * 4));
+                var destinationRow = checked((int)((uint)y * width * 4));
                 for (uint x = 0; x < width; x++)
                 {
                     var sourceX = (uint)(((ulong)x * sourceWidth) / width);
-                    var sourceOffset = checked((int)(((ulong)sourceY * sourceWidth + sourceX) * 4));
-                    var destinationOffset = checked((int)(((ulong)y * width + x) * 4));
-                    source.AsSpan(sourceOffset, 4).CopyTo(destination.AsSpan(destinationOffset, 4));
+                    var sourceOffset = sourceRow + checked((int)(sourceX * 4));
+                    var destinationOffset = destinationRow + checked((int)(x * 4));
+                    destination[destinationOffset] = source[sourceOffset];
+                    destination[destinationOffset + 1] = source[sourceOffset + 1];
+                    destination[destinationOffset + 2] = source[sourceOffset + 2];
+                    destination[destinationOffset + 3] = source[sourceOffset + 3];
                 }
-            }
+            });
 
             return destination;
         }
 
-        private static byte[] ScaleBgraCoverBilinear(
+        private void EnsureScaleXMap(
+            uint sourceWidth,
+            uint destinationWidth,
+            uint cropWidth,
+            uint offsetX)
+        {
+            if (_scaleMapSourceWidth == sourceWidth &&
+                _scaleMapDestinationWidth == destinationWidth &&
+                _scaleMapCropWidth == cropWidth &&
+                _scaleMapOffsetX == offsetX)
+            {
+                return;
+            }
+
+            _scaleSourceX0 = new int[checked((int)destinationWidth)];
+            _scaleSourceX1 = new int[checked((int)destinationWidth)];
+            _scaleFractionX = new int[checked((int)destinationWidth)];
+            var maxSourceX = offsetX + cropWidth - 1;
+            for (var x = 0; x < _scaleSourceX0.Length; x++)
+            {
+                var scaledX = offsetX + (((x + 0.5) * cropWidth) / destinationWidth) - 0.5;
+                var floorX = Math.Floor(scaledX);
+                var sourceX0 = (int)Math.Clamp(floorX, offsetX, maxSourceX);
+                _scaleSourceX0[x] = checked(sourceX0 * 4);
+                _scaleSourceX1[x] = checked((int)Math.Min((uint)sourceX0 + 1, maxSourceX) * 4);
+                _scaleFractionX[x] = Math.Clamp(
+                    (int)Math.Round((scaledX - floorX) * 256.0),
+                    0,
+                    256);
+            }
+
+            _scaleMapSourceWidth = sourceWidth;
+            _scaleMapDestinationWidth = destinationWidth;
+            _scaleMapCropWidth = cropWidth;
+            _scaleMapOffsetX = offsetX;
+        }
+
+        private byte[] ScaleBgraCoverBilinear(
             byte[] source,
             uint sourceWidth,
             uint sourceHeight,
             uint width,
             uint height)
         {
-            var destination = new byte[checked((int)(width * height * 4))];
+            var destination = GetScaledBgraScratch(width, height);
             var sourceIsWider = (ulong)sourceWidth * height > (ulong)width * sourceHeight;
             var cropWidth = sourceIsWider
                 ? Math.Max(1u, (uint)((ulong)sourceHeight * width / height))
@@ -17403,67 +17511,51 @@ internal static unsafe class VulkanVideoPresenter
                 : Math.Max(1u, (uint)((ulong)sourceWidth * height / width));
             var offsetX = (sourceWidth - cropWidth) / 2;
             var offsetY = (sourceHeight - cropHeight) / 2;
-            var maxSourceX = offsetX + cropWidth - 1;
             var maxSourceY = offsetY + cropHeight - 1;
+            EnsureScaleXMap(sourceWidth, width, cropWidth, offsetX);
 
-            for (uint y = 0; y < height; y++)
+            // One conventional four-tap bilinear sample per destination pixel.
+            // The previous 2x2 supersampling loop performed sixteen source
+            // samples per pixel and limited 720p movies scaled to 1080p to
+            // roughly 6 FPS on otherwise fast hosts.
+            Parallel.For(0, checked((int)height), y =>
             {
-                for (uint x = 0; x < width; x++)
+                var scaledY = offsetY + (((y + 0.5) * cropHeight) / height) - 0.5;
+                var floorY = Math.Floor(scaledY);
+                var sourceY0 = (uint)Math.Clamp(floorY, offsetY, maxSourceY);
+                var sourceY1 = Math.Min(sourceY0 + 1, maxSourceY);
+                var fractionY = Math.Clamp(
+                    (int)Math.Round((scaledY - floorY) * 256.0),
+                    0,
+                    256);
+                var inverseY = 256 - fractionY;
+                var sourceRow0 = checked((int)(sourceY0 * sourceWidth * 4));
+                var sourceRow1 = checked((int)(sourceY1 * sourceWidth * 4));
+                var destinationRow = checked((int)((uint)y * width * 4));
+
+                for (var x = 0; x < _scaleSourceX0.Length; x++)
                 {
-                    var destinationOffset = checked((int)(((ulong)y * width + x) * 4));
-                    float blue = 0;
-                    float green = 0;
-                    float red = 0;
-                    float alpha = 0;
-                    for (var sampleY = 0; sampleY < 2; sampleY++)
+                    var sourceX0 = _scaleSourceX0[x];
+                    var sourceX1 = _scaleSourceX1[x];
+                    var fractionX = _scaleFractionX[x];
+                    var inverseX = 256 - fractionX;
+                    var sourceOffset00 = sourceRow0 + sourceX0;
+                    var sourceOffset10 = sourceRow0 + sourceX1;
+                    var sourceOffset01 = sourceRow1 + sourceX0;
+                    var sourceOffset11 = sourceRow1 + sourceX1;
+                    var destinationOffset = destinationRow + (x * 4);
+
+                    for (var component = 0; component < 4; component++)
                     {
-                        var scaledY = offsetY + (((y + ((sampleY + 0.5f) / 2)) * cropHeight) / height) - 0.5f;
-                        var sourceY0 = (uint)Math.Clamp((int)MathF.Floor(scaledY), (int)offsetY, (int)maxSourceY);
-                        var sourceY1 = Math.Min(sourceY0 + 1, maxSourceY);
-                        var fractionY = scaledY - MathF.Floor(scaledY);
-                        for (var sampleX = 0; sampleX < 2; sampleX++)
-                        {
-                            var scaledX = offsetX + (((x + ((sampleX + 0.5f) / 2)) * cropWidth) / width) - 0.5f;
-                            var sourceX0 = (uint)Math.Clamp((int)MathF.Floor(scaledX), (int)offsetX, (int)maxSourceX);
-                            var sourceX1 = Math.Min(sourceX0 + 1, maxSourceX);
-                            var fractionX = scaledX - MathF.Floor(scaledX);
-                            var sourceOffset00 = checked((int)(((ulong)sourceY0 * sourceWidth + sourceX0) * 4));
-                            var sourceOffset10 = checked((int)(((ulong)sourceY0 * sourceWidth + sourceX1) * 4));
-                            var sourceOffset01 = checked((int)(((ulong)sourceY1 * sourceWidth + sourceX0) * 4));
-                            var sourceOffset11 = checked((int)(((ulong)sourceY1 * sourceWidth + sourceX1) * 4));
-
-                            var topBlue = source[sourceOffset00] +
-                                          ((source[sourceOffset10] - source[sourceOffset00]) * fractionX);
-                            var bottomBlue = source[sourceOffset01] +
-                                             ((source[sourceOffset11] - source[sourceOffset01]) * fractionX);
-                            blue += topBlue + ((bottomBlue - topBlue) * fractionY);
-
-                            var topGreen = source[sourceOffset00 + 1] +
-                                           ((source[sourceOffset10 + 1] - source[sourceOffset00 + 1]) * fractionX);
-                            var bottomGreen = source[sourceOffset01 + 1] +
-                                              ((source[sourceOffset11 + 1] - source[sourceOffset01 + 1]) * fractionX);
-                            green += topGreen + ((bottomGreen - topGreen) * fractionY);
-
-                            var topRed = source[sourceOffset00 + 2] +
-                                         ((source[sourceOffset10 + 2] - source[sourceOffset00 + 2]) * fractionX);
-                            var bottomRed = source[sourceOffset01 + 2] +
-                                            ((source[sourceOffset11 + 2] - source[sourceOffset01 + 2]) * fractionX);
-                            red += topRed + ((bottomRed - topRed) * fractionY);
-
-                            var topAlpha = source[sourceOffset00 + 3] +
-                                           ((source[sourceOffset10 + 3] - source[sourceOffset00 + 3]) * fractionX);
-                            var bottomAlpha = source[sourceOffset01 + 3] +
-                                              ((source[sourceOffset11 + 3] - source[sourceOffset01 + 3]) * fractionX);
-                            alpha += topAlpha + ((bottomAlpha - topAlpha) * fractionY);
-                        }
+                        var top = source[sourceOffset00 + component] * inverseX +
+                                  source[sourceOffset10 + component] * fractionX;
+                        var bottom = source[sourceOffset01 + component] * inverseX +
+                                     source[sourceOffset11 + component] * fractionX;
+                        destination[destinationOffset + component] = (byte)(
+                            (top * inverseY + bottom * fractionY + 32_768) >> 16);
                     }
-
-                    destination[destinationOffset] = (byte)MathF.Round(blue * 0.25f);
-                    destination[destinationOffset + 1] = (byte)MathF.Round(green * 0.25f);
-                    destination[destinationOffset + 2] = (byte)MathF.Round(red * 0.25f);
-                    destination[destinationOffset + 3] = (byte)MathF.Round(alpha * 0.25f);
                 }
-            }
+            });
 
             return destination;
         }

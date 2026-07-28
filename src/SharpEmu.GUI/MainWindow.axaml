@@ -8,7 +8,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         xmlns:local="clr-namespace:SharpEmu.GUI"
         xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
         x:Class="SharpEmu.GUI.MainWindow"
-        Title="SharpEmu"
+        Title=""
         Width="1280" Height="820"
         MinWidth="980" MinHeight="640"
         WindowState="Maximized"
@@ -16,7 +16,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         Background="{StaticResource BgBrush}"
         ExtendClientAreaToDecorationsHint="True"
         WindowDecorations="Full"
-        ExtendClientAreaTitleBarHeightHint="44"
+        ExtendClientAreaTitleBarHeightHint="58"
         Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
         KeyDown="OnKeyDown">
 
@@ -36,9 +36,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Border>
         <Border.Background>
           <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
-            <GradientStop Offset="0" Color="#730D1017" />
-            <GradientStop Offset="0.55" Color="#BF0D1017" />
-            <GradientStop Offset="1" Color="#EB0D1017" />
+            <GradientStop Offset="0" Color="#66080B14" />
+            <GradientStop Offset="0.48" Color="#C2080B14" />
+            <GradientStop Offset="1" Color="#F2080B14" />
           </LinearGradientBrush>
         </Border.Background>
       </Border>
@@ -46,19 +46,46 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
     <!-- Title bar; hidden in fullscreen (F11) along with the status bar, so
          the game gets the whole screen. -->
-    <Grid x:Name="TitleBar" Grid.Row="0" Height="44" Background="{StaticResource ChromeBrush}">
-      <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
-        <Image Source="avares://SharpEmu.GUI/Assets/SharpEmu.ico" Width="20" Height="20"
-               RenderOptions.BitmapInterpolationMode="HighQuality" />
-        <TextBlock Text="SharpEmu" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+    <Grid x:Name="TitleBar" Grid.Row="0" Height="58" Background="{StaticResource ChromeBrush}"
+          ColumnDefinitions="Auto,Auto,*,Auto">
+      <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="20,0,0,0" VerticalAlignment="Center">
+        <StackPanel Spacing="1" VerticalAlignment="Center">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <TextBlock Text="TOUCHÉ" FontSize="15" FontWeight="Bold" LetterSpacing="1.2"
+                       Foreground="{StaticResource TextBrush}" />
+            <TextBlock Text="PX5" FontSize="15" FontWeight="Bold" LetterSpacing="1.2"
+                       Foreground="{StaticResource AccentHoverBrush}" />
+          </StackPanel>
+          <TextBlock Text="COMPATIBILITY LAYER" FontSize="8" FontWeight="SemiBold" LetterSpacing="1.8"
+                     Foreground="{StaticResource FaintBrush}" />
+        </StackPanel>
+      </StackPanel>
+
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" Margin="40,0,0,0"
+                  VerticalAlignment="Center">
+        <Border Classes="padHint" VerticalAlignment="Center">
+          <TextBlock Text="LB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
+        </Border>
+        <Button x:Name="LibraryTabButton" Classes="segment active" Content="Biblioteca" />
+        <Button x:Name="OptionsTabButton" Classes="segment" Content="Opciones" />
+        <Border Classes="padHint" VerticalAlignment="Center">
+          <TextBlock Text="RB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
+        </Border>
+      </StackPanel>
+
+      <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="8" Margin="0,0,148,0"
+                  VerticalAlignment="Center">
+        <Border Width="6" Height="6" CornerRadius="3" Background="{StaticResource SuccessBrush}" />
+        <TextBlock Text="VULKAN" FontSize="10" FontWeight="SemiBold" LetterSpacing="1"
+                   Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" />
         <Border Classes="pill">
-          <TextBlock x:Name="VersionText" Text="v0.0.1" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+          <TextBlock x:Name="VersionText" Text="v0.0.1" FontSize="10" Foreground="{StaticResource MutedBrush}" />
         </Border>
       </StackPanel>
     </Grid>
 
     <!-- Main content -->
-    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto,Auto">
+    <Grid x:Name="MainContent" Grid.Row="1" Margin="28,18,28,18" RowDefinitions="Auto,*,Auto,Auto">
 
       <!-- The game owns the full client area while running. Session controls
            use a native popup so they can stay above this native child surface. -->
@@ -70,19 +97,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
            the same row on the right. Plain buttons (not TabItem) so there is
            no underline; LB/RB hint chips flank the pair and the gamepad's
            shoulder buttons actually switch pages from anywhere. -->
-      <Grid x:Name="ContentToolbar" Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,20">
-        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-          <Border Classes="padHint" VerticalAlignment="Center">
-            <TextBlock Text="LB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
-          </Border>
-          <Button x:Name="LibraryTabButton" Classes="segment active" Content="Library" />
-          <Button x:Name="OptionsTabButton" Classes="segment" Content="Options" />
-          <Border Classes="padHint" VerticalAlignment="Center">
-            <TextBlock Text="RB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
-          </Border>
-        </StackPanel>
-
-        <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="8"
+      <Grid x:Name="ContentToolbar" Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,20">
+        <StackPanel Grid.Column="1" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="8"
                     VerticalAlignment="Center">
           <TextBox x:Name="SearchBox" PlaceholderText="Search library…" Width="240" VerticalAlignment="Center" />
           <Button x:Name="AddFolderButton" Classes="ghost" Content="＋ Add folder" VerticalAlignment="Center" />
@@ -96,9 +112,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <!-- Library page. The tile row gets extra top margin so it sits
              closer to eye level (PS5 home-screen style) instead of hugging
              the Library/Options switcher above it. -->
-        <Panel x:Name="LibraryPage" Margin="0,64,0,0">
+        <Panel x:Name="LibraryPage" Margin="0,24,0,0">
           <ListBox x:Name="GameList" Classes="tileGrid" Background="Transparent"
-                   SelectionMode="Single" Padding="0">
+                   SelectionMode="Single" Padding="0" Height="220"
+                   VerticalAlignment="Bottom"
+                   ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                   ScrollViewer.VerticalScrollBarVisibility="Disabled">
             <ListBox.ContextMenu>
               <ContextMenu x:Name="GameContextMenu" Placement="Pointer">
                 <MenuItem x:Name="CtxLaunch" Header="Launch" FontWeight="SemiBold">
@@ -144,7 +163,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </ListBox.ContextMenu>
             <ListBox.ItemsPanel>
               <ItemsPanelTemplate>
-                <WrapPanel />
+                <StackPanel Orientation="Horizontal" />
               </ItemsPanelTemplate>
             </ListBox.ItemsPanel>
             <ListBox.ItemTemplate>

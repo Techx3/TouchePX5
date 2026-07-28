@@ -11,6 +11,8 @@ namespace SharpEmu.Libs.Tests.AvPlayer;
 public sealed class AvPlayerStreamInfoTests
 {
     private const string StreamInfoExNid = "ctTAcF5DiKQ";
+    private const string DisableStreamNid = "BOVKAzRmuTQ";
+    private const string ChangeStreamNid = "buMCiJftcfw";
     private const ulong BaseAddress = 0x1_0000_0000;
     private const int MemorySize = 0x2000;
     private const ulong InfoAddress = BaseAddress + 0x100;
@@ -48,7 +50,7 @@ public sealed class AvPlayerStreamInfoTests
 
             Span<byte> result = stackalloc byte[40];
             Assert.True(memory.TryRead(InfoAddress, result));
-            Assert.Equal(streamIndex, BinaryPrimitives.ReadUInt32LittleEndian(result));
+            Assert.Equal(streamIndex + 1, BinaryPrimitives.ReadUInt32LittleEndian(result));
             if (streamIndex == 0)
             {
                 Assert.Equal(1280u, BinaryPrimitives.ReadUInt32LittleEndian(result[8..]));
@@ -117,6 +119,20 @@ public sealed class AvPlayerStreamInfoTests
         Assert.Equal("sceAvPlayerGetStreamInfoEx", export.Name);
         Assert.Equal("libSceAvPlayer", export.LibraryName);
         Assert.Equal(Generation.Gen5, export.Target);
+    }
+
+    [Theory]
+    [InlineData(DisableStreamNid, "sceAvPlayerDisableStream")]
+    [InlineData(ChangeStreamNid, "sceAvPlayerChangeStream")]
+    public void StreamLifecycleExportsAreRegistered(string nid, string name)
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(
+            SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.True(manager.TryGetExport(nid, out var export));
+        Assert.Equal(name, export.Name);
+        Assert.Equal("libSceAvPlayer", export.LibraryName);
     }
 
     private static int InvokeGetStreamInfo(CpuContext context, bool useExtendedFunction) =>

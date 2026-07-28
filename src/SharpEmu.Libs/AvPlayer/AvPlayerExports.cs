@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Audio;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
@@ -25,6 +26,8 @@ public static class AvPlayerExports
     private static readonly object StateGate = new();
     private static readonly Dictionary<ulong, PlayerState> Players = new();
     private static int _traceCount;
+    private static long _nextAudioSessionGeneration;
+    private static long _activeAudioSessionGeneration;
 
     private sealed class PlayerState : IDisposable
     {
@@ -43,6 +46,8 @@ public static class AvPlayerExports
         public bool Paused { get; set; }
         public bool Looping { get; set; }
         public bool EndOfStream { get; set; }
+        public bool VideoEnabled { get; set; } = true;
+        public bool AudioEnabled { get; set; } = true;
         public Process? Decoder { get; set; }
         public Stream? DecoderOutput { get; set; }
         public Process? AudioDecoder { get; set; }
@@ -62,13 +67,18 @@ public static class AvPlayerExports
         public ulong AudioBufferBase { get; set; }
         public int NextAudioBuffer { get; set; }
         public long NextAudioFrameIndex { get; set; }
+        public long AudioSessionGeneration { get; set; }
 
         public void Dispose()
         {
+            ResetVideoDecoder();
+            ResetAudioDecoder();
+        }
+
+        public void ResetVideoDecoder()
+        {
             DecoderOutput?.Dispose();
             DecoderOutput = null;
-            AudioDecoderOutput?.Dispose();
-            AudioDecoderOutput = null;
             if (Decoder is not null)
             {
                 try
@@ -87,6 +97,18 @@ public static class AvPlayerExports
                     Decoder = null;
                 }
             }
+
+            RawFrame = null;
+            PaddedFrame = null;
+            HostBgraFrame = null;
+            NextFrameIndex = 0;
+            NextVideoFrameDueTimestamp = 0;
+        }
+
+        public void ResetAudioDecoder()
+        {
+            AudioDecoderOutput?.Dispose();
+            AudioDecoderOutput = null;
             if (AudioDecoder is not null)
             {
                 try
@@ -105,15 +127,16 @@ public static class AvPlayerExports
                     AudioDecoder = null;
                 }
             }
+
+            RawAudioFrame = null;
+            NextAudioBuffer = 0;
+            NextAudioFrameIndex = 0;
         }
 
         public void ResetPlayback()
         {
             Dispose();
             PlaybackClock.Reset();
-            NextFrameIndex = 0;
-            NextVideoFrameDueTimestamp = 0;
-            NextAudioFrameIndex = 0;
             EndOfStream = false;
         }
     }
@@ -234,6 +257,7 @@ public static class AvPlayerExports
         }
 
         VideoOutExports.ClearHostVideoOverlay(player.Handle);
+        InvalidateAudioSession(player);
         player.Dispose();
         return SetReturn(ctx, 0);
     }
@@ -323,6 +347,8 @@ public static class AvPlayerExports
             player.Started = false;
         }
 
+        VideoOutExports.ClearHostVideoOverlay(player.Handle);
+        InvalidateAudioSession(player);
         NotifyEvent(ctx, player, 1); // StateStop
         return SetReturn(ctx, 0);
     }
@@ -399,7 +425,48 @@ public static class AvPlayerExports
         ExportName = "sceAvPlayerEnableStream",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAvPlayer")]
-    public static int AvPlayerEnableStream(CpuContext ctx) => ValidatePlayer(ctx);
+    public static int AvPlayerEnableStream(CpuContext ctx) =>
+        SetStreamEnabled(ctx, enabled: true);
+
+    [SysAbiExport(
+        Nid = "BOVKAzRmuTQ",
+        ExportName = "sceAvPlayerDisableStream",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerDisableStream(CpuContext ctx) =>
+        SetStreamEnabled(ctx, enabled: false);
+
+    [SysAbiExport(
+        Nid = "buMCiJftcfw",
+        ExportName = "sceAvPlayerChangeStream",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerChangeStream(CpuContext ctx)
+    {
+        var oldStream = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var newStream = unchecked((uint)ctx[CpuRegister.Rdx]);
+        lock (StateGate)
+        {
+            if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
+                player.SourcePath is null || oldStream > 1 || newStream > 1 ||
+                oldStream != newStream)
+            {
+                return SetReturn(ctx, OperationFailed);
+            }
+
+            if (newStream == 0)
+            {
+                player.VideoEnabled = true;
+            }
+            else
+            {
+                player.AudioEnabled = true;
+            }
+
+            Trace($"change_stream handle=0x{player.Handle:X16} old={oldStream} new={newStream}");
+            return SetReturn(ctx, 0);
+        }
+    }
 
     [SysAbiExport(
         Nid = "k-q+xOxdc3E",
@@ -434,6 +501,7 @@ public static class AvPlayerExports
                 return SetReturn(ctx, InvalidParameters);
             }
 
+            VideoOutExports.ClearHostVideoOverlay(player.Handle);
             player.ResetPlayback();
             player.Started = true;
             return SetReturn(ctx, 0);
@@ -489,7 +557,9 @@ public static class AvPlayerExports
         {
             if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
                 infoAddress == 0 || !player.Started || player.Paused || player.EndOfStream ||
-                player.SourcePath is null || !EnsureAudioDecoder(player))
+                !player.AudioEnabled || player.SourcePath is null ||
+                player.AudioSessionGeneration != Volatile.Read(ref _activeAudioSessionGeneration) ||
+                !EnsureAudioDecoder(player))
             {
                 return SetReturn(ctx, 0);
             }
@@ -537,6 +607,9 @@ public static class AvPlayerExports
             {
                 return SetReturn(ctx, 0);
             }
+            AudioOutExports.RegisterAvPlayerAudioBuffer(
+                player.AudioSessionGeneration,
+                bufferAddress);
             Trace($"audio_frame handle=0x{player.Handle:X16} ts={timestamp} data=0x{bufferAddress:X16}");
             return SetReturn(ctx, 1);
         }
@@ -630,7 +703,9 @@ public static class AvPlayerExports
 
             Span<byte> info = stackalloc byte[infoSize];
             info.Clear();
-            BinaryPrimitives.WriteUInt32LittleEndian(info[0..], streamIndex); // 0=video, 1=audio
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                info[0..],
+                streamIndex == 0 ? 1u : 2u); // 1=video, 2=audio
             if (streamIndex == 0)
             {
                 BinaryPrimitives.WriteUInt32LittleEndian(info[8..], checked((uint)player.Width));
@@ -671,6 +746,10 @@ public static class AvPlayerExports
                 return SetReturn(ctx, OperationFailed);
             }
 
+            // A player may be reused for consecutive menu previews. Remove the
+            // last host-composited frame before replacing its decoders so video
+            // and audio cannot bleed into the next source.
+            VideoOutExports.ClearHostVideoOverlay(player.Handle);
             player.ResetPlayback();
             player.SourcePath = hostPath;
             player.Width = width;
@@ -678,11 +757,13 @@ public static class AvPlayerExports
             player.FramesPerSecond = fps;
             player.DurationMilliseconds = duration;
             player.Started = player.AutoStart;
+            player.AudioSessionGeneration = Interlocked.Increment(ref _nextAudioSessionGeneration);
+            Volatile.Write(ref _activeAudioSessionGeneration, player.AudioSessionGeneration);
             autoStart = player.AutoStart;
             Trace($"source guest='{guestPath}' host='{hostPath}' {width}x{height} fps={fps:F3} duration_ms={duration} auto_start={player.AutoStart}");
         }
 
-
+        AudioOutExports.BeginAvPlayerAudioSession(player.AudioSessionGeneration);
         NotifyEvent(ctx, player, 2); // StateReady
         if (autoStart)
         {
@@ -691,14 +772,31 @@ public static class AvPlayerExports
         return SetReturn(ctx, 0);
     }
 
+    private static readonly Stopwatch _gvdDiagClock = Stopwatch.StartNew();
+    private static long _gvdCalls;
+    private static long _gvdFrames;
+    private static long _gvdReadTicks;
+
     private static int GetVideoData(CpuContext ctx, bool extended)
     {
+        Interlocked.Increment(ref _gvdCalls);
+        if (_gvdDiagClock.ElapsedMilliseconds >= 2000)
+        {
+            var secs = _gvdDiagClock.Elapsed.TotalSeconds;
+            var calls = Interlocked.Exchange(ref _gvdCalls, 0);
+            var frames = Interlocked.Exchange(ref _gvdFrames, 0);
+            var readMs = Interlocked.Exchange(ref _gvdReadTicks, 0) * 1000.0 / Stopwatch.Frequency;
+            _gvdDiagClock.Restart();
+            Console.Error.WriteLine(
+                $"[AVPLAYER][DIAG] gvd calls/s={calls / secs:F1} frames/s={frames / secs:F1} readMs_total={readMs:F0}");
+        }
+
         var infoAddress = ctx[CpuRegister.Rsi];
         lock (StateGate)
         {
             if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
                 infoAddress == 0 || !player.Started || player.Paused || player.EndOfStream ||
-                player.SourcePath is null)
+                !player.VideoEnabled || player.SourcePath is null)
             {
                 return SetReturn(ctx, 0);
             }
@@ -717,10 +815,13 @@ public static class AvPlayerExports
                 return SetReturn(ctx, 0);
             }
 
+            var _rf0 = Stopwatch.GetTimestamp();
             if (!ReadFrame(player))
             {
                 return FinishStream(ctx, player);
             }
+            Interlocked.Add(ref _gvdReadTicks, Stopwatch.GetTimestamp() - _rf0);
+            Interlocked.Increment(ref _gvdFrames);
 
             var timestamp = checked((ulong)Math.Round(player.NextFrameIndex * 1000.0 / fps));
             player.NextFrameIndex++;
@@ -1671,6 +1772,61 @@ public static class AvPlayerExports
 
     private static int AlignUp(int value, int alignment) =>
         checked((value + alignment - 1) & -alignment);
+
+    private static int SetStreamEnabled(CpuContext ctx, bool enabled)
+    {
+        var streamIndex = unchecked((uint)ctx[CpuRegister.Rsi]);
+        ulong overlayToClear = 0;
+        lock (StateGate)
+        {
+            if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
+                player.SourcePath is null || streamIndex > 1)
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+
+            if (streamIndex == 0)
+            {
+                player.VideoEnabled = enabled;
+                if (!enabled)
+                {
+                    player.ResetVideoDecoder();
+                    overlayToClear = player.Handle;
+                }
+            }
+            else
+            {
+                player.AudioEnabled = enabled;
+                if (!enabled)
+                {
+                    player.ResetAudioDecoder();
+                }
+            }
+
+            Trace($"{(enabled ? "enable" : "disable")}_stream handle=0x{player.Handle:X16} stream={streamIndex}");
+        }
+
+        if (overlayToClear != 0)
+        {
+            VideoOutExports.ClearHostVideoOverlay(overlayToClear);
+        }
+
+        return SetReturn(ctx, 0);
+    }
+
+    private static void InvalidateAudioSession(PlayerState player)
+    {
+        var generation = player.AudioSessionGeneration;
+        if (generation != 0)
+        {
+            Interlocked.CompareExchange(
+                ref _activeAudioSessionGeneration,
+                0,
+                generation);
+            AudioOutExports.EndAvPlayerAudioSession(generation);
+            player.AudioSessionGeneration = 0;
+        }
+    }
 
     private static int ValidatePlayer(CpuContext ctx)
     {

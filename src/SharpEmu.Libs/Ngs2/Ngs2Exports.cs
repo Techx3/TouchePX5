@@ -272,7 +272,10 @@ public static class Ngs2Exports
             TraceVoiceParamList(ctx, voiceHandle, paramList);
         }
 
-        HandleVoiceParams(ctx, voiceHandle, paramList);
+        if (UseSoftwareMixer())
+        {
+            HandleVoiceParams(ctx, voiceHandle, paramList);
+        }
         return SetReturn(ctx, 0);
     }
 
@@ -527,7 +530,10 @@ public static class Ngs2Exports
                     channels = (int)declaredChannels;
                 }
 
-                MixVoicesIntoGrain(ctx, systemHandle, bufferAddress, bufferSize, channels);
+                if (UseSoftwareMixer())
+                {
+                    MixVoicesIntoGrain(ctx, systemHandle, bufferAddress, bufferSize, channels);
+                }
 
                 if (ShouldTrace() && Interlocked.Increment(ref _renderInfoDumps) <= 4)
                 {
@@ -898,6 +904,14 @@ public static class Ngs2Exports
         string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_NGS2"),
             "1",
+            StringComparison.Ordinal);
+
+    // Keep a diagnostic escape hatch, but use the mixer by default now that
+    // Vita/PS4 HEVAG streams are decoded with their native predictor table.
+    private static bool UseSoftwareMixer() =>
+        !string.Equals(
+            Environment.GetEnvironmentVariable("TOUCHEPX5_NGS2_SOFTWARE_MIXER"),
+            "0",
             StringComparison.Ordinal);
 
     private static int SetReturn(CpuContext ctx, int result)

@@ -530,6 +530,11 @@ public static class PadExports
             buttons |= 0x4000;
         }
 
+        if (IsAutoDownActive())
+        {
+            buttons |= OrbisPadButton.Down;
+        }
+
         _cachedInputState = new PadState(
             Connected: true,
             Buttons: buttons,
@@ -545,12 +550,18 @@ public static class PadExports
 
     private static readonly long PadStartTimestamp = Stopwatch.GetTimestamp();
     private static readonly double[] AutoCrossTimes = ParseAutoCrossTimes();
+    private static readonly double[] AutoDownTimes = ParseAutoButtonTimes("SHARPEMU_AUTO_DOWN");
 
     private static double[] ParseAutoCrossTimes()
     {
         // SHARPEMU_AUTO_CROSS="40,52,64": presses Cross for 0.4s at each
         // second offset from process start. Debug aid for unattended runs.
-        var raw = Environment.GetEnvironmentVariable("SHARPEMU_AUTO_CROSS");
+        return ParseAutoButtonTimes("SHARPEMU_AUTO_CROSS");
+    }
+
+    private static double[] ParseAutoButtonTimes(string environmentVariable)
+    {
+        var raw = Environment.GetEnvironmentVariable(environmentVariable);
         if (string.IsNullOrWhiteSpace(raw))
         {
             return [];
@@ -570,7 +581,16 @@ public static class PadExports
 
     private static bool IsAutoCrossActive()
     {
-        var times = AutoCrossTimes;
+        return IsAutoButtonActive(AutoCrossTimes);
+    }
+
+    private static bool IsAutoDownActive()
+    {
+        return IsAutoButtonActive(AutoDownTimes);
+    }
+
+    private static bool IsAutoButtonActive(double[] times)
+    {
         if (times.Length == 0)
         {
             return false;

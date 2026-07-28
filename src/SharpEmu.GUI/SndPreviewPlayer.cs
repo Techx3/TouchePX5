@@ -41,6 +41,10 @@ internal sealed class SndPreviewPlayer
         lock (_sync)
         {
             generation = ++_generation;
+            // Silence the previous selection immediately. Waiting until the new
+            // AT9 finishes decoding lets the old track keep looping when the
+            // next preview is slow, missing, or unsupported.
+            StopLocked();
         }
 
         _ = Task.Run(async () =>

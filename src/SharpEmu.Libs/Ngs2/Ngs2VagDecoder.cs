@@ -18,6 +18,8 @@ public static class Ngs2VagDecoder
 
     public const int VagHeaderSize = 0x30;
     private const uint VagMagic = 0x56414770; // "VAGp"
+    private const uint HevagVersion2 = 0x00020001;
+    private const uint HevagVersion3 = 0x00030000;
 
     public readonly struct Waveform
     {
@@ -55,6 +57,7 @@ public static class Ngs2VagDecoder
         // Header (big-endian): +0x0C dataSize, +0x10 sampleRate, +0x1E channel
         // count (0 or 1 = mono; 2 = stereo with L/R frames interleaved per
         // 16-byte block, as shipped by e.g. Castlevania: Dominus Collection).
+        var version = BinaryPrimitives.ReadUInt32BigEndian(data[0x04..]);
         var declaredSize = (int)BinaryPrimitives.ReadUInt32BigEndian(data[0x0C..]);
         var sampleRate = (int)BinaryPrimitives.ReadUInt32BigEndian(data[0x10..]);
         var channels = data[0x1E] == 2 ? 2 : 1;
@@ -73,7 +76,9 @@ public static class Ngs2VagDecoder
             return false;
         }
 
-        waveform = Decode(body[..frameBytes], sampleRate, channels);
+        waveform = version is HevagVersion2 or HevagVersion3
+            ? Ngs2HevagDecoder.Decode(body[..frameBytes], sampleRate, channels)
+            : Decode(body[..frameBytes], sampleRate, channels);
         return waveform.Samples.Length > 0;
     }
 
@@ -116,12 +121,12 @@ public static class Ngs2VagDecoder
             }
 
             // Per-frame loop marker (exact PS-ADPCM values, not bit masks):
-            //   3 = loop start, 6 = loop end + jump back, 1/7 = one-shot end.
+            //   6 = loop start, 3 = loop end + jump back, 1/7 = one-shot end.
             // Stereo pairs carry the same flags on both frames; track loop
             // positions from the left channel only so they stay in per-channel
             // sample units.
             var flags = frames[offset + 1];
-            if (flags == 0x03 && channel == 0)
+            if (flags == 0x06 && channel == 0)
             {
                 loopStart = outIndex[0];
             }
@@ -151,7 +156,7 @@ public static class Ngs2VagDecoder
             hist2[channel] = h2;
             outIndex[channel] = writeIndex;
 
-            if (flags == 0x06 && channel == 0)
+            if (flags == 0x03 && channel == 0)
             {
                 loopEnd = outIndex[0];
             }

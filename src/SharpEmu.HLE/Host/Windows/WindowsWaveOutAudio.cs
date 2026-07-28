@@ -78,6 +78,25 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
             }
         }
 
+        public void Reset()
+        {
+            lock (_gate)
+            {
+                if (_disposed || _device == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                WaveOutReset(_device);
+                while (_buffers.TryDequeue(out var buffer))
+                {
+                    ReleaseBuffer(buffer);
+                }
+
+                _queuedPcmBytes = 0;
+            }
+        }
+
         public void Dispose()
         {
             lock (_gate)

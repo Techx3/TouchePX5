@@ -12,8 +12,8 @@ namespace SharpEmu.Logging;
 /// </summary>
 public static class BuildInfo
 {
-    private const string ProjectUrl = "https://github.com/sharpemu/sharpemu";
-    private const string CanonicalRepository = "sharpemu/sharpemu";
+    private const string ProjectUrl = "https://github.com/Techx3/TouchePX5";
+    private const string CanonicalRepository = "Techx3/TouchePX5";
 
     /// <summary>Short commit hash the build was produced from, or <c>null</c>.</summary>
     public static string? CommitSha { get; }
@@ -76,7 +76,7 @@ public static class BuildInfo
     /// <summary>
     /// The multi-line banner, e.g.
     /// <code>
-    /// SharpEmu UNOFFICIAL f11ac59 — https://github.com/sharpemu/sharpemu
+    /// Touché PX5 UNOFFICIAL f11ac59 — https://github.com/Techx3/TouchePX5
     ///
     /// Built from branch "main" of "sharpemu/sharpemu" by GitHub Actions workflow run https://github.com/sharpemu/sharpemu/actions/runs/123.
     /// </code>
@@ -101,7 +101,7 @@ public static class BuildInfo
                 version = $"UNOFFICIAL {CommitSha}";
             }
 
-            var header = $"SharpEmu {version} — {ProjectUrl}";
+            var header = $"Touché PX5 {version} — {ProjectUrl}";
 
             if (Branch is null || Repository is null || WorkflowRunUrl is null)
             {

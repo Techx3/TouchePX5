@@ -239,7 +239,13 @@ public sealed class Localization
             return false;
         }
 
-        result = loaded;
+        // Keep upstream translation files merge-friendly while ensuring no
+        // legacy product name leaks into visible console/status messages.
+        result = loaded.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value
+                .Replace("SharpEmu.CLI", "TouchePx5", StringComparison.Ordinal)
+                .Replace("SharpEmu", "Touché PX5", StringComparison.Ordinal));
         return true;
     }
 
