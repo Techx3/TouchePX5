@@ -1,0 +1,31 @@
+﻿<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="Avalonia" Version="12.1.0" />
+    <PackageVersion Include="Avalonia.Desktop" Version="12.1.0" />
+    <PackageVersion Include="Avalonia.Fonts.Inter" Version="12.1.0" />
+    <PackageVersion Include="Avalonia.Themes.Fluent" Version="12.1.0" />
+    <PackageVersion Include="FFmpeg.AutoGen" Version="7.1.1" />
+    <PackageVersion Include="Iced" Version="1.21.0" />
+    <PackageVersion Include="Microsoft.Build.Framework" Version="17.14.8" />
+    <PackageVersion Include="Microsoft.CodeAnalysis.Analyzers" Version="3.11.0" />
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.12.0" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="NLayer" Version="1.14.0" />
+    <PackageVersion Include="Silk.NET.Input" Version="2.23.0" />
+    <PackageVersion Include="Silk.NET.Vulkan" Version="2.23.0" />
+    <PackageVersion Include="Silk.NET.Vulkan.Extensions.EXT" Version="2.23.0" />
+    <PackageVersion Include="Silk.NET.Vulkan.Extensions.KHR" Version="2.23.0" />
+    <PackageVersion Include="Silk.NET.Windowing" Version="2.23.0" />
+    <!-- Transitive of Avalonia.Desktop; pinned. Avalonia 12 requires 0.94.1+. -->
+    <PackageVersion Include="Tmds.DBus.Protocol" Version="0.94.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.1" />
+  </ItemGroup>
+</Project>

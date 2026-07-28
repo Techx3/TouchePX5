@@ -1,0 +1,820 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.InteropServices;
+
+namespace SharpEmu.HLE;
+
+/// <summary>
+/// Detects guest CPU writes into memory that backs a host GPU image. On PS5
+/// render targets alias unified memory, so games freely mix CPU writes and GPU
+/// draws on the same surface (Chowdren titles memset their fog layers every
+/// frame). Host GPU images are separate storage, so the video backend needs to
+/// know when the guest CPU rewrote a surface to re-upload it. Ranges are
+/// write-protected; the first write faults, the fault handler restores write
+/// access and marks the range dirty, and the video backend consumes the dirty
+/// flag once per flip and re-arms protection after re-uploading.
+/// </summary>
+public static unsafe class GuestImageWriteTracker
+{
+    private const int ProtRead = 0x1;
+    private const int ProtWrite = 0x2;
+    private const int ClockMonotonicRaw = 4;
+
+    private sealed class TrackedRange
+    {
+        public ulong Address;
+        public ulong ByteCount;
+        public ulong Start;
+        public ulong End;
+        public int Dirty;
+        public int Armed;
+        /// <summary>
+        /// When false the range is watch-only: managed writes still dirty it via
+        /// <see cref="NotifyManagedWrite"/>, but pages are never write-protected
+        /// so native CPU stores do not fault.
+        /// </summary>
+        public bool Protect;
+        public int FirstCpuWriteSeen;
+        public int PendingFirstCpuWrite;
+        public long WriteGeneration;
+        public bool TraceLifetime;
+        public long SourceSequence;
+        public long FirstCpuWriteTraceSequence;
+        public long FirstCpuWriteTimestampNanoseconds;
+        public ulong FirstCpuWriteAddress;
+        public ulong FirstCpuWritePage;
+        public string Source = "unspecified";
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Timespec
+    {
+        public long Seconds;
+        public long Nanoseconds;
+    }
+
+    private static readonly object _gate = new();
+    private static readonly Dictionary<ulong, TrackedRange> _rangesByAddress = new();
+
+    /// <summary>Immutable snapshot read lock-free from the signal handler and
+    /// the managed-write pre-visit; rebuilt on every mutation under the gate
+    /// (signal handlers must not take managed locks). Carrying the overall
+    /// bounds inside the same object keeps the hot-path intersection test
+    /// consistent with the array it guards.</summary>
+    private sealed class RangeSnapshot
+    {
+        public static readonly RangeSnapshot Empty = new([]);
+
+        public readonly TrackedRange[] Ranges;
+        public readonly ulong Start;
+        public readonly ulong End;
+
+        public RangeSnapshot(TrackedRange[] ranges)
+        {
+            Ranges = ranges;
+            Start = ulong.MaxValue;
+            End = 0;
+            foreach (var range in ranges)
+            {
+                Start = Math.Min(Start, range.Start);
+                End = Math.Max(End, range.End);
+            }
+        }
+    }
+
+    private static RangeSnapshot _rangeSnapshot = RangeSnapshot.Empty;
+
+    // Windows defaults off: VirtualProtect fault sync still regresses titles
+    // like Dead Cells / Demon's Souls. Opt in with SHARPEMU_GUEST_IMAGE_CPU_SYNC=1
+    // when a title needs CPU-written guest planes (e.g. GTA intro). Linux/macOS
+    // keep the historical opt-out (=0 disables).
+    private static readonly bool _enabled =
+        OperatingSystem.IsWindows()
+            ? string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC"),
+                "1",
+                StringComparison.Ordinal)
+            : Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC") != "0";
+    private static readonly (bool Wildcard, ulong[] Addresses) _lifetimeTraceFilter =
+        ParseAddressList(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_ADDRS"));
+    private static readonly (bool Wildcard, string[] Sources) _lifetimeSourceTraceFilter =
+        ParseSourceList(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_MEMORY_LIFETIME"));
+    private static readonly bool _lifetimeTraceEnabled =
+        _lifetimeTraceFilter.Wildcard ||
+        _lifetimeTraceFilter.Addresses.Length != 0 ||
+        _lifetimeSourceTraceFilter.Wildcard ||
+        _lifetimeSourceTraceFilter.Sources.Length != 0;
+    private static readonly long _lifetimeTraceEpochNanoseconds =
+        _enabled && _lifetimeTraceEnabled ? GetMonotonicNanoseconds() : 0;
+    private static long _lifetimeTraceSequence;
+
+    private const uint PageReadonly = 0x02;
+    private const uint PageReadWrite = 0x04;
+
+    [DllImport("libc", EntryPoint = "mprotect", SetLastError = true)]
+    private static extern int Mprotect(nint address, nuint length, int protection);
+
+    [DllImport("libc", EntryPoint = "clock_gettime", SetLastError = false)]
+    private static extern int ClockGetTime(int clockId, Timespec* time);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int VirtualProtect(
+        nint lpAddress,
+        nuint dwSize,
+        uint flNewProtect,
+        out uint lpflOldProtect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint VirtualAlloc(
+        nint lpAddress,
+        nuint dwSize,
+        uint flAllocationType,
+        uint flProtect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int VirtualFree(nint lpAddress, nuint dwSize, uint dwFreeType);
+
+    private const uint MemCommit = 0x1000;
+    private const uint MemReserve = 0x2000;
+    private const uint MemRelease = 0x8000;
+
+    public static bool Enabled => _enabled;
+
+    /// <summary>
+    /// Test/diagnostics helper: whether <paramref name="address"/> is tracked
+    /// with write protection armed (watch-only ranges report protect=false).
+    /// </summary>
+    public static bool TryGetProtectionState(
+        ulong address,
+        out bool protect,
+        out bool armed)
+    {
+        protect = false;
+        armed = false;
+        if (!_enabled)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (!_rangesByAddress.TryGetValue(address, out var range))
+            {
+                return false;
+            }
+
+            protect = range.Protect;
+            armed = Volatile.Read(ref range.Armed) != 0;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Exercises the fault-handling path once outside signal context so every
+    /// branch is JIT-compiled (and, under Rosetta 2, translated) before a real
+    /// fault arrives — a cold signal path is silently never entered there.
+    /// </summary>
+    public static void WarmUp()
+    {
+        if (!_enabled)
+        {
+            return;
+        }
+
+        // VirtualProtect only belongs on VirtualAlloc/mmap pages. Warming on
+        // CRT heap memory makes neighbouring heap metadata read-only and
+        // crashes the process on Windows.
+        var scratch = OperatingSystem.IsWindows()
+            ? VirtualAlloc(0, 4096, MemCommit | MemReserve, PageReadWrite)
+            : (nint)NativeMemory.AllocZeroed(4096);
+        if (scratch == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            // Warm the timestamp P/Invoke used by the signal-safe scalar
+            // capture path before a real protected-page write reaches it.
+            _ = GetMonotonicNanoseconds();
+            var address = (ulong)scratch;
+            Track(address, 4096);
+            _ = TryHandleWriteFault(address);
+            _ = ConsumeDirty(address);
+            Untrack(address);
+        }
+        finally
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                _ = VirtualFree(scratch, 0, MemRelease);
+            }
+            else
+            {
+                NativeMemory.Free((void*)scratch);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Registers a range. When <paramref name="protect"/> is true, arms write
+    /// protection so native stores fault and mark the range dirty. When false,
+    /// the range is watch-only (managed HLE writes still dirty via
+    /// <see cref="NotifyManagedWrite"/>) and never <c>VirtualProtect</c>'d.
+    /// </summary>
+    public static void Track(
+        ulong address,
+        ulong byteCount,
+        long sourceSequence = 0,
+        string source = "unspecified",
+        bool protect = true)
+    {
+        if (!_enabled || address == 0 || byteCount == 0)
+        {
+            return;
+        }
+
+        var (start, length) = PageAlign(address, byteCount);
+        lock (_gate)
+        {
+            _rangesByAddress.TryGetValue(address, out var range);
+            if (range is not null &&
+                (range.Start != start ||
+                 range.End != start + length ||
+                 range.ByteCount != byteCount))
+            {
+                // Never resize an object that is still reachable from the
+                // signal handler's lock-free snapshot. Retire it and publish
+                // a fresh immutable range, carrying the write generation so
+                // resizes do not hide guest CPU rewrites from cache owners.
+                var writeGeneration = Volatile.Read(ref range.WriteGeneration);
+                var keepProtect = range.Protect || protect;
+                DisarmLocked(range, "replace-range");
+                _rangesByAddress.Remove(address);
+                range = new TrackedRange
+                {
+                    Address = address,
+                    ByteCount = byteCount,
+                    Start = start,
+                    End = start + length,
+                    Protect = keepProtect,
+                    WriteGeneration = writeGeneration,
+                };
+                _rangesByAddress[address] = range;
+                RebuildSnapshotLocked();
+            }
+
+            if (range is null)
+            {
+                range = new TrackedRange
+                {
+                    Address = address,
+                    ByteCount = byteCount,
+                    Start = start,
+                    End = start + length,
+                    Protect = protect,
+                    TraceLifetime =
+                        ShouldTraceRange(start, start + length) || ShouldTraceSource(source),
+                    SourceSequence = sourceSequence,
+                    Source = source,
+                };
+                _rangesByAddress[address] = range;
+                RebuildSnapshotLocked();
+            }
+            else
+            {
+                FlushPendingFirstCpuWrite(range);
+                // Protect is sticky: a later watch-only Track (texture cache)
+                // must not disarm an RT that already needs page faults.
+                if (protect && !range.Protect)
+                {
+                    range.Protect = true;
+                }
+            }
+
+            range.SourceSequence = sourceSequence;
+            range.Source = source;
+            range.TraceLifetime =
+                ShouldTraceRange(range.Start, range.End) || ShouldTraceSource(source);
+            if (range.Protect)
+            {
+                ArmLocked(range, "arm");
+            }
+        }
+    }
+
+    public static void Untrack(ulong address)
+    {
+        if (!_enabled)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_rangesByAddress.TryGetValue(address, out var range))
+            {
+                DisarmLocked(range, "untrack");
+                _rangesByAddress.Remove(address);
+                RebuildSnapshotLocked();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns true when the guest CPU wrote the range since the last call,
+    /// clearing the flag. The caller re-arms via <see cref="Rearm"/> after it
+    /// finished reading the guest bytes.
+    /// </summary>
+    public static bool ConsumeDirty(ulong address)
+    {
+        if (!_enabled)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (!_rangesByAddress.TryGetValue(address, out var range))
+            {
+                return false;
+            }
+
+            FlushPendingFirstCpuWrite(range);
+            return Interlocked.Exchange(ref range.Dirty, 0) != 0;
+        }
+    }
+
+    /// <summary>
+    /// Non-consuming variant of <see cref="ConsumeDirty"/>: reports whether
+    /// the range has been written since it was last re-armed, leaving the
+    /// flag for the owner that evicts and re-uploads.
+    /// </summary>
+    public static bool PeekDirty(ulong address)
+    {
+        if (!_enabled)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (!_rangesByAddress.TryGetValue(address, out var range))
+            {
+                return false;
+            }
+
+            FlushPendingFirstCpuWrite(range);
+            return Volatile.Read(ref range.Dirty) != 0;
+        }
+    }
+
+    public static void Rearm(ulong address)
+    {
+        if (!_enabled)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_rangesByAddress.TryGetValue(address, out var range) &&
+                range.Protect)
+            {
+                ArmLocked(range, "rearm");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns the monotonic first-write generation for a tracked allocation.
+    /// Unlike the consuming dirty flag, this remains changed after another
+    /// cache owner consumes and re-arms the range.
+    /// </summary>
+    public static bool TryGetWriteGeneration(ulong address, out long generation)
+    {
+        generation = 0;
+        if (!_enabled)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (!_rangesByAddress.TryGetValue(address, out var range))
+            {
+                return false;
+            }
+
+            generation = Volatile.Read(ref range.WriteGeneration);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Prepares pages touched by a managed HLE memory write. Native guest
+    /// stores fault and enter <see cref="TryHandleWriteFault"/> through the
+    /// POSIX signal bridge, but a managed Buffer.MemoryCopy into a protected
+    /// page is surfaced by the runtime as a fatal AccessViolation instead of
+    /// a resumable guest fault. Visit every page in the write span up front so
+    /// all overlapping texture owners are dirtied and made writable.
+    /// </summary>
+    public static void NotifyManagedWrite(ulong address, ulong byteCount)
+    {
+        if (!_enabled || address == 0 || byteCount == 0)
+        {
+            return;
+        }
+
+        var end = address > ulong.MaxValue - byteCount
+            ? ulong.MaxValue
+            : address + byteCount;
+
+        // Fast rejection for the hot path: this runs on every managed guest
+        // write, and almost none of them touch tracked texture pages. The
+        // bounds live inside the snapshot so they are always consistent with
+        // the ranges the per-page visit below would consult.
+        var snapshot = Volatile.Read(ref _rangeSnapshot);
+        if (snapshot.Ranges.Length == 0 || end <= snapshot.Start || address >= snapshot.End)
+        {
+            return;
+        }
+
+        var candidate = address;
+        while (candidate < end)
+        {
+            _ = TryHandleWriteFault(candidate);
+            var nextPage = (candidate & ~0xFFFUL) + 0x1000UL;
+            if (nextPage <= candidate)
+            {
+                break;
+            }
+            candidate = nextPage;
+        }
+    }
+
+    /// <summary>
+    /// Flushes scalar first-write records captured by the POSIX signal handler.
+    /// Call only from ordinary managed execution, never from signal context.
+    /// </summary>
+    public static void FlushPendingDiagnostics()
+    {
+        if (!_enabled || !_lifetimeTraceEnabled)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            foreach (var range in _rangesByAddress.Values)
+            {
+                FlushPendingFirstCpuWrite(range);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Signal-handler entry: if the fault address lies in a tracked, armed
+    /// range, restore write access, mark the range dirty, and return true so
+    /// the faulting write can be retried. Must not allocate or lock.
+    /// </summary>
+    public static bool TryHandleWriteFault(ulong faultAddress)
+    {
+        if (!_enabled || faultAddress == 0)
+        {
+            return false;
+        }
+
+        var ranges = Volatile.Read(ref _rangeSnapshot).Ranges;
+        var writableStart = ulong.MaxValue;
+        var writableEnd = 0UL;
+        for (var index = 0; index < ranges.Length; index++)
+        {
+            var range = ranges[index];
+            if (faultAddress < range.Start || faultAddress >= range.End)
+            {
+                continue;
+            }
+
+            writableStart = Math.Min(writableStart, range.Start);
+            writableEnd = Math.Max(writableEnd, range.End);
+        }
+
+        if (writableStart == ulong.MaxValue)
+        {
+            return false;
+        }
+
+        // Ranges are page-aligned and may overlap (font atlases and other
+        // suballocations commonly share pages). Unprotecting one range also
+        // makes every overlapping tracked page writable. Expand to the full
+        // transitive overlap and dirty/disarm every owner, otherwise only the
+        // first dictionary entry observes the write and the others retain a
+        // stale cached texture indefinitely.
+        var expanded = true;
+        while (expanded)
+        {
+            expanded = false;
+            for (var index = 0; index < ranges.Length; index++)
+            {
+                var range = ranges[index];
+                if (range.Start >= writableEnd || range.End <= writableStart)
+                {
+                    continue;
+                }
+
+                var start = Math.Min(writableStart, range.Start);
+                var end = Math.Max(writableEnd, range.End);
+                if (start != writableStart || end != writableEnd)
+                {
+                    writableStart = start;
+                    writableEnd = end;
+                    expanded = true;
+                }
+            }
+        }
+
+        var needsUnprotect = false;
+        for (var index = 0; index < ranges.Length; index++)
+        {
+            var range = ranges[index];
+            if (range.Start < writableEnd && range.End > writableStart &&
+                Volatile.Read(ref range.Armed) != 0)
+            {
+                needsUnprotect = true;
+                break;
+            }
+        }
+
+        if (needsUnprotect &&
+            !TrySetProtection(writableStart, writableEnd - writableStart, writable: true))
+        {
+            return false;
+        }
+
+        for (var index = 0; index < ranges.Length; index++)
+        {
+            var range = ranges[index];
+            if (range.Start >= writableEnd || range.End <= writableStart)
+            {
+                continue;
+            }
+
+            var wasArmed = Interlocked.Exchange(ref range.Armed, 0) != 0;
+            var wasDirty = Interlocked.Exchange(ref range.Dirty, 1) != 0;
+            // Protected ranges bump generation once per arm/fault cycle.
+            // Watch-only ranges never arm, so bump on the first dirty mark
+            // (NotifyManagedWrite) so cache owners still see a rewrite.
+            if (wasArmed || (!range.Protect && !wasDirty))
+            {
+                Interlocked.Increment(ref range.WriteGeneration);
+            }
+            if (wasArmed &&
+                range.TraceLifetime &&
+                Interlocked.CompareExchange(ref range.FirstCpuWriteSeen, 1, 0) == 0)
+            {
+                // Signal context: capture preallocated scalar fields only.
+                // Formatting and I/O are deferred to a locked safe path.
+                range.FirstCpuWriteTraceSequence =
+                    Interlocked.Increment(ref _lifetimeTraceSequence);
+                range.FirstCpuWriteTimestampNanoseconds = GetMonotonicNanoseconds();
+                range.FirstCpuWriteAddress = faultAddress;
+                range.FirstCpuWritePage = faultAddress & ~0xFFFUL;
+                Volatile.Write(ref range.PendingFirstCpuWrite, 1);
+                Volatile.Write(ref range.FirstCpuWriteSeen, 2);
+            }
+        }
+
+        return true;
+    }
+
+    private static void ArmLocked(TrackedRange range, string operation)
+    {
+        FlushPendingFirstCpuWrite(range);
+        if (Interlocked.Exchange(ref range.Armed, 1) == 1)
+        {
+            return;
+        }
+
+        // A new publication/rearm starts a new first-write lifetime.
+        Volatile.Write(ref range.FirstCpuWriteSeen, 0);
+        var failed = !TrySetProtection(range.Start, range.End - range.Start, writable: false);
+        if (failed)
+        {
+            Volatile.Write(ref range.Armed, 0);
+        }
+
+        if (range.TraceLifetime)
+        {
+            TraceLifetime(
+                range,
+                failed ? $"{operation}-failed-errno-{Marshal.GetLastPInvokeError()}" : operation);
+        }
+    }
+
+    private static void DisarmLocked(TrackedRange range, string operation)
+    {
+        FlushPendingFirstCpuWrite(range);
+        var wasArmed = Interlocked.Exchange(ref range.Armed, 0) == 1;
+        if (wasArmed)
+        {
+            _ = TrySetProtection(range.Start, range.End - range.Start, writable: true);
+        }
+
+        if (range.TraceLifetime)
+        {
+            TraceLifetime(range, wasArmed ? operation : $"{operation}-already-disarmed");
+        }
+    }
+
+    private static void RebuildSnapshotLocked()
+    {
+        // Fault / NotifyManagedWrite hot paths must only see protected ranges.
+        // Watch-only texture-cache registrations used to widen Start..End across
+        // nearly all GPU memory so every managed guest write walked this path.
+        var protectedRanges = _rangesByAddress.Values
+            .Where(static range => range.Protect)
+            .ToArray();
+        Volatile.Write(ref _rangeSnapshot, new RangeSnapshot(protectedRanges));
+    }
+
+    private static (ulong Start, ulong Length) PageAlign(ulong address, ulong byteCount)
+    {
+        const ulong pageMask = 0xFFFUL;
+        var start = address & ~pageMask;
+        var end = (address + byteCount + pageMask) & ~pageMask;
+        return (start, end - start);
+    }
+
+    private static bool ShouldTraceRange(ulong start, ulong end)
+    {
+        if (_lifetimeTraceFilter.Wildcard)
+        {
+            return true;
+        }
+
+        var addresses = _lifetimeTraceFilter.Addresses;
+        for (var index = 0; index < addresses.Length; index++)
+        {
+            if (addresses[index] >= start && addresses[index] < end)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static (bool Wildcard, ulong[] Addresses) ParseAddressList(string? addresses)
+    {
+        if (string.IsNullOrWhiteSpace(addresses))
+        {
+            return (false, []);
+        }
+
+        var parsedAddresses = new List<ulong>();
+        foreach (var token in addresses.Split(
+                     [',', ';', ' ', '\t'],
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (token == "*")
+            {
+                return (true, []);
+            }
+
+            var span = token.AsSpan();
+            if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                span = span[2..];
+            }
+
+            if (ulong.TryParse(span, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var parsed))
+            {
+                parsedAddresses.Add(parsed);
+            }
+        }
+
+        return (false, parsedAddresses.ToArray());
+    }
+
+    private static bool ShouldTraceSource(string source)
+    {
+        if (_lifetimeSourceTraceFilter.Wildcard)
+        {
+            return true;
+        }
+
+        return Array.IndexOf(_lifetimeSourceTraceFilter.Sources, source) >= 0;
+    }
+
+    private static (bool Wildcard, string[] Sources) ParseSourceList(string? sources)
+    {
+        if (string.IsNullOrWhiteSpace(sources))
+        {
+            return (false, []);
+        }
+
+        var parsedSources = new List<string>();
+        foreach (var token in sources.Split(
+                     [',', ';'],
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (token == "*")
+            {
+                return (true, []);
+            }
+
+            parsedSources.Add(token);
+        }
+
+        return (false, parsedSources.ToArray());
+    }
+
+    private static void FlushPendingFirstCpuWrite(TrackedRange range)
+    {
+        var spin = new SpinWait();
+        while (Volatile.Read(ref range.FirstCpuWriteSeen) == 1)
+        {
+            spin.SpinOnce();
+        }
+
+        if (!range.TraceLifetime || Interlocked.Exchange(ref range.PendingFirstCpuWrite, 0) == 0)
+        {
+            return;
+        }
+
+        TraceLifetime(
+            range,
+            "first-cpu-write-disarm",
+            range.FirstCpuWriteAddress,
+            range.FirstCpuWritePage,
+            range.FirstCpuWriteTraceSequence,
+            range.FirstCpuWriteTimestampNanoseconds);
+    }
+
+    private static void TraceLifetime(
+        TrackedRange range,
+        string operation,
+        ulong faultAddress = 0,
+        ulong faultPage = 0,
+        long traceSequence = 0,
+        long timestampNanoseconds = 0)
+    {
+        if (traceSequence == 0)
+        {
+            traceSequence = Interlocked.Increment(ref _lifetimeTraceSequence);
+        }
+
+        if (timestampNanoseconds == 0)
+        {
+            timestampNanoseconds = GetMonotonicNanoseconds();
+        }
+
+        var elapsedMilliseconds =
+            (timestampNanoseconds - _lifetimeTraceEpochNanoseconds) / 1_000_000.0;
+        Console.Error.WriteLine(
+            $"[WT][LIFETIME] seq={traceSequence} t_ms={elapsedMilliseconds:F3} " +
+            $"event={operation} source_seq={range.SourceSequence} source='{range.Source}' " +
+            $"requested=0x{range.Address:X16}+0x{range.ByteCount:X} " +
+            $"range=0x{range.Start:X16}..0x{range.End:X16} " +
+            $"fault=0x{faultAddress:X16} page=0x{faultPage:X16}");
+    }
+
+    private static bool TrySetProtection(ulong start, ulong length, bool writable)
+    {
+        if (length == 0)
+        {
+            return true;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return VirtualProtect(
+                (nint)start,
+                (nuint)length,
+                writable ? PageReadWrite : PageReadonly,
+                out _) != 0;
+        }
+
+        return Mprotect(
+            (nint)start,
+            (nuint)length,
+            writable ? ProtRead | ProtWrite : ProtRead) == 0;
+    }
+
+    private static long GetMonotonicNanoseconds()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return Stopwatch.GetTimestamp() * 1_000_000_000L / Stopwatch.Frequency;
+        }
+
+        Timespec time;
+        return ClockGetTime(ClockMonotonicRaw, &time) == 0
+            ? unchecked((time.Seconds * 1_000_000_000L) + time.Nanoseconds)
+            : 0;
+    }
+}

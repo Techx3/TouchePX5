@@ -1,0 +1,286 @@
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.png"
+      - "**/*.jpeg"
+      - "**/*.jpg"
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.png"
+      - "**/*.jpeg"
+      - "**/*.jpg"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+jobs:
+  init:
+    name: Init
+    runs-on: ubuntu-latest
+    outputs:
+      release-name: ${{ steps.vars.outputs.release-name }}
+      release-tag: ${{ steps.vars.outputs.release-tag }}
+      safe-ref: ${{ steps.vars.outputs.safe-ref }}
+      short-sha: ${{ steps.vars.outputs.short-sha }}
+      version: ${{ steps.vars.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Compute workflow variables
+        id: vars
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          safe_ref="$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g')"
+          version="$(python3 -c 'import sys, xml.etree.ElementTree as ET; version = ET.parse("Directory.Build.props").getroot().findtext(".//SharpEmuVersion"); sys.exit("Directory.Build.props is missing SharpEmuVersion") if not version or not version.strip() else print(version.strip())')"
+          release_tag="v${version}"
+          release_name="SharpEmu v${version}"
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "${release_tag}" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match project version ${release_tag}." >&2
+            exit 1
+          fi
+
+          {
+            echo "short-sha=${short_sha}"
+            echo "safe-ref=${safe_ref}"
+            echo "release-tag=${release_tag}"
+            echo "release-name=${release_name}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
+
+  reuse:
+    name: REUSE Compliance
+    needs: init
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run REUSE lint
+        uses: fsfe/reuse-action@v6
+
+  build:
+    name: Build Archive
+    needs:
+      - init
+      - reuse
+    runs-on: windows-latest
+    env:
+      DOTNET_NOLOGO: true
+      NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages
+      PUBLISH_DIR: ${{ github.workspace }}\artifacts\publish\win-x64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.103
+          cache: true
+          cache-dependency-path: |
+            Directory.Packages.props
+            Directory.Build.props
+
+      - name: Restore solution
+        run: dotnet restore SharpEmu.slnx
+
+      - name: Build solution
+        run: dotnet build SharpEmu.slnx -c Release --no-restore
+
+      # Runs every test project in the solution; a test failure fails the build, as
+      # does an aerolib.bin generation failure in the build step above (the MSBuild
+      # task logs an error and returns false).
+      - name: Run tests
+        run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
+
+      - name: Validate synthetic shaders
+        run: dotnet run --project tools/SharpEmu.Tools.ShaderDump/SharpEmu.Tools.ShaderDump.csproj -c Release -- artifacts/shader-dump
+
+      - name: Publish win-x64 CLI
+        run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r win-x64 --self-contained true --no-restore -p:PublishDir="${env:PUBLISH_DIR}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sharpemu-win-x64-${{ needs.init.outputs.short-sha }}
+          path: ${{ env.PUBLISH_DIR }}
+          if-no-files-found: error
+          include-hidden-files: true
+
+  build-posix:
+    name: Build ${{ matrix.rid }}
+    needs:
+      - init
+      - reuse
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-x64
+    env:
+      DOTNET_NOLOGO: true
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+      PUBLISH_DIR: ${{ github.workspace }}/artifacts/publish/${{ matrix.rid }}
+      SPIRV_HEADERS_COMMIT: ad9184e76a66b1001c29db9b0a3e87f646c64de0
+      # SpirvModuleBuilder emits SPIR-V 1.5 and VulkanVideoPresenter requests Vulkan 1.2.
+      SPIRV_TARGET_ENV: vulkan1.2
+      SPIRV_TOOLS_COMMIT: 0539c81f69a3daeb706fd3477dca61435b475156
+      SPIRV_TOOLS_VERSION: v2026.2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.103
+          cache: true
+          cache-dependency-path: |
+            Directory.Packages.props
+            Directory.Build.props
+
+      - name: Restore solution
+        run: dotnet restore SharpEmu.slnx
+
+      - name: Build solution
+        run: dotnet build SharpEmu.slnx -c Release --no-restore
+
+      # Also runs on Linux/macOS: the aerolib.bin MSBuild task does platform-sensitive
+      # path handling, so a cross-platform generation regression surfaces here.
+      - name: Run tests
+        run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
+
+      - name: Build pinned SPIRV-Tools
+        if: matrix.rid == 'linux-x64'
+        run: |
+          git clone --no-checkout --filter=blob:none https://github.com/KhronosGroup/SPIRV-Tools.git "$RUNNER_TEMP/spirv-tools"
+          git -C "$RUNNER_TEMP/spirv-tools" checkout --detach "$SPIRV_TOOLS_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/spirv-tools" rev-parse HEAD)" = "$SPIRV_TOOLS_COMMIT"
+
+          git clone --no-checkout --filter=blob:none https://github.com/KhronosGroup/SPIRV-Headers.git "$RUNNER_TEMP/spirv-tools/external/spirv-headers"
+          git -C "$RUNNER_TEMP/spirv-tools/external/spirv-headers" checkout --detach "$SPIRV_HEADERS_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/spirv-tools/external/spirv-headers" rev-parse HEAD)" = "$SPIRV_HEADERS_COMMIT"
+
+          cmake -S "$RUNNER_TEMP/spirv-tools" -B "$RUNNER_TEMP/spirv-tools-build" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPIRV_SKIP_TESTS=ON \
+            -DSPIRV_WERROR=OFF
+          cmake --build "$RUNNER_TEMP/spirv-tools-build" --target spirv-val
+
+      - name: Generate and validate synthetic SPIR-V
+        if: matrix.rid == 'linux-x64'
+        run: |
+          dotnet run --project tools/SharpEmu.Tools.ShaderDump/SharpEmu.Tools.ShaderDump.csproj -c Release -- artifacts/shader-dump
+          scripts/validate-synthetic-spirv.sh \
+            "$RUNNER_TEMP/spirv-tools-build/tools/spirv-val" \
+            "$SPIRV_TOOLS_VERSION" \
+            "$SPIRV_TARGET_ENV" \
+            artifacts/shader-dump
+
+      - name: Publish ${{ matrix.rid }} CLI
+        run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r ${{ matrix.rid }} --self-contained true --no-restore -p:PublishDir="$PUBLISH_DIR"
+
+      - name: Stage MoltenVK next to the build
+        if: matrix.rid == 'osx-x64'
+        run: scripts/fetch-macos-moltenvk.sh "$PUBLISH_DIR"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sharpemu-${{ matrix.rid }}-${{ needs.init.outputs.short-sha }}
+          path: ${{ env.PUBLISH_DIR }}
+          if-no-files-found: error
+          include-hidden-files: true
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - init
+      - build
+      - build-posix
+    # Versioned releases are immutable and tag-driven. Branch and manual runs
+    # still produce Actions artifacts without modifying a published release.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release
+
+      - name: Package release assets
+        shell: bash
+        env:
+          SHORT_SHA: ${{ needs.init.outputs.short-sha }}
+          VERSION: ${{ needs.init.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          win_dir="release/sharpemu-win-x64-${SHORT_SHA}"
+          linux_dir="release/sharpemu-linux-x64-${SHORT_SHA}"
+          macos_dir="release/sharpemu-osx-x64-${SHORT_SHA}"
+          for package_dir in "${win_dir}" "${linux_dir}" "${macos_dir}"; do
+            test -d "${package_dir}"
+          done
+
+          mkdir -p release-assets
+          (cd "${win_dir}" && zip -q -r "../../release-assets/sharpemu-${VERSION}-win-x64.zip" .)
+
+          chmod +x "${linux_dir}/SharpEmu" "${macos_dir}/SharpEmu"
+          tar -czf "release-assets/sharpemu-${VERSION}-linux-x64.tar.gz" -C "${linux_dir}" .
+          tar -czf "release-assets/sharpemu-${VERSION}-osx-x64.tar.gz" -C "${macos_dir}" .
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NAME: ${{ needs.init.outputs.release-name }}
+          RELEASE_TAG: ${{ needs.init.outputs.release-tag }}
+          VERSION: ${{ needs.init.outputs.version }}
+        run: |
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) | sort)
+          if [ "${#assets[@]}" -ne 3 ]; then
+            echo "Expected 3 release assets, found ${#assets[@]}." >&2
+            exit 1
+          fi
+
+          notes="Automated SharpEmu v${VERSION} build for commit ${GITHUB_SHA}."
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists and will not be modified." >&2
+            exit 1
+          fi
+
+          gh release create "${RELEASE_TAG}" "${assets[@]}" \
+            --verify-tag \
+            --title "${RELEASE_NAME}" \
+            --notes "${notes}"

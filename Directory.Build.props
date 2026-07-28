@@ -1,0 +1,57 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <SharpEmuVersion>0.0.2-beta.5</SharpEmuVersion>
+    <Version>$(SharpEmuVersion)</Version>
+
+    <RepoRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)'))</RepoRoot>
+
+    <_HostRidOSPrefix Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.CLI' And $([MSBuild]::IsOSPlatform('Windows'))">win</_HostRidOSPrefix>
+    <_HostRidOSPrefix Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.CLI' And '$(_HostRidOSPrefix)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">linux</_HostRidOSPrefix>
+    <_HostRidOSPrefix Condition="'$(RuntimeIdentifier)' == '' And '$(MSBuildProjectName)' == 'SharpEmu.CLI' And '$(_HostRidOSPrefix)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">osx</_HostRidOSPrefix>
+    <_HostRidArch Condition="'$(_HostRidOSPrefix)' != '' And '$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)' == 'Arm64'">arm64</_HostRidArch>
+    <_HostRidArch Condition="'$(_HostRidOSPrefix)' != '' And '$(_HostRidArch)' == ''">x64</_HostRidArch>
+    <RuntimeIdentifier Condition="'$(_HostRidOSPrefix)' != ''">$(_HostRidOSPrefix)-$(_HostRidArch)</RuntimeIdentifier>
+
+    <BaseIntermediateOutputPath>$(RepoRoot)artifacts/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(RepoRoot)artifacts/bin/</BaseOutputPath>
+
+    <AppendConfigurationToOutputPath>true</AppendConfigurationToOutputPath>
+    <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>true</AppendRuntimeIdentifierToOutputPath>
+
+    <PublishDir>$(RepoRoot)artifacts/publish/$(MSBuildProjectName)/$(Configuration)/$(TargetFramework)/</PublishDir>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <PublishDir>$(RepoRoot)artifacts/publish/$(MSBuildProjectName)/$(Configuration)/$(TargetFramework)/$(RuntimeIdentifier)/</PublishDir>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <!-- Build provenance surfaced by SharpEmu.Logging.BuildInfo as a banner at the
+       top of the log. Populated from GitHub Actions environment variables when
+       building in CI; empty locally. -->
+  <ItemGroup>
+    <AssemblyMetadata Include="SharpEmu.BuildConfiguration" Value="$(Configuration)" />
+    <AssemblyMetadata Condition="'$(GITHUB_SHA)' != ''" Include="SharpEmu.BuildSha" Value="$(GITHUB_SHA)" />
+    <AssemblyMetadata Condition="'$(GITHUB_REF_NAME)' != ''" Include="SharpEmu.BuildBranch" Value="$(GITHUB_REF_NAME)" />
+    <AssemblyMetadata Condition="'$(GITHUB_REF)' != ''" Include="SharpEmu.BuildRef" Value="$(GITHUB_REF)" />
+    <AssemblyMetadata Condition="'$(GITHUB_EVENT_NAME)' != ''" Include="SharpEmu.BuildEventName" Value="$(GITHUB_EVENT_NAME)" />
+    <AssemblyMetadata Condition="'$(GITHUB_REPOSITORY)' != ''" Include="SharpEmu.BuildRepository" Value="$(GITHUB_REPOSITORY)" />
+    <AssemblyMetadata Condition="'$(GITHUB_SERVER_URL)' != ''" Include="SharpEmu.BuildServerUrl" Value="$(GITHUB_SERVER_URL)" />
+    <AssemblyMetadata Condition="'$(GITHUB_RUN_ID)' != ''" Include="SharpEmu.BuildRunId" Value="$(GITHUB_RUN_ID)" />
+  </ItemGroup>
+</Project>
