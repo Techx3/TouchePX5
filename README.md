@@ -138,17 +138,28 @@ Entertainment. PlayStation is a trademark of Sony Interactive Entertainment.
 
 ## Support Touché PX5
 
-If you want to support development, voluntary Bitcoin contributions can be sent
-to the address below. Always verify the complete address before sending funds.
+If you want to support development, voluntary cryptocurrency contributions can
+be sent to the addresses below. Always verify the address and network before
+sending funds.
+
+### Bitcoin (BTC)
 
 <p align="center">
   <img src="./assets/images/btc-donation-qr.png" width="280" alt="Bitcoin donation QR for Touché PX5">
 </p>
 
-**Bitcoin (BTC)**
-
 ```text
 bc1qeur2u3qvnrczt90yfhjd58tc4uqnkqvp23kf5f
+```
+
+### Ethereum (ETH)
+
+<p align="center">
+  <img src="./assets/images/eth-donation-qr.png" width="280" alt="Ethereum donation QR for Touché PX5">
+</p>
+
+```text
+0x8e2Fbc640DBCaf01BA314CaD3F619811136f2505
 ```
 
 ## License
