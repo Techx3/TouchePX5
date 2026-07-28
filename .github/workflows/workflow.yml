@@ -53,7 +53,7 @@ jobs:
           safe_ref="$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g')"
           version="$(python3 -c 'import sys, xml.etree.ElementTree as ET; version = ET.parse("Directory.Build.props").getroot().findtext(".//SharpEmuVersion"); sys.exit("Directory.Build.props is missing SharpEmuVersion") if not version or not version.strip() else print(version.strip())')"
           release_tag="v${version}"
-          release_name="SharpEmu v${version}"
+          release_name="Touché PX5 v${version}"
 
           if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "${release_tag}" ]; then
             echo "Release tag ${GITHUB_REF_NAME} does not match project version ${release_tag}." >&2
@@ -123,7 +123,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: sharpemu-win-x64-${{ needs.init.outputs.short-sha }}
+          name: touchepx5-win-x64-${{ needs.init.outputs.short-sha }}
           path: ${{ env.PUBLISH_DIR }}
           if-no-files-found: error
           include-hidden-files: true
@@ -213,7 +213,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: sharpemu-${{ matrix.rid }}-${{ needs.init.outputs.short-sha }}
+          name: touchepx5-${{ matrix.rid }}-${{ needs.init.outputs.short-sha }}
           path: ${{ env.PUBLISH_DIR }}
           if-no-files-found: error
           include-hidden-files: true
@@ -244,19 +244,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          win_dir="release/sharpemu-win-x64-${SHORT_SHA}"
-          linux_dir="release/sharpemu-linux-x64-${SHORT_SHA}"
-          macos_dir="release/sharpemu-osx-x64-${SHORT_SHA}"
+          win_dir="release/touchepx5-win-x64-${SHORT_SHA}"
+          linux_dir="release/touchepx5-linux-x64-${SHORT_SHA}"
+          macos_dir="release/touchepx5-osx-x64-${SHORT_SHA}"
           for package_dir in "${win_dir}" "${linux_dir}" "${macos_dir}"; do
             test -d "${package_dir}"
           done
 
           mkdir -p release-assets
-          (cd "${win_dir}" && zip -q -r "../../release-assets/sharpemu-${VERSION}-win-x64.zip" .)
+          (cd "${win_dir}" && zip -q -r "../../release-assets/touchepx5-${VERSION}-win-x64.zip" .)
 
-          chmod +x "${linux_dir}/SharpEmu" "${macos_dir}/SharpEmu"
-          tar -czf "release-assets/sharpemu-${VERSION}-linux-x64.tar.gz" -C "${linux_dir}" .
-          tar -czf "release-assets/sharpemu-${VERSION}-osx-x64.tar.gz" -C "${macos_dir}" .
+          chmod +x "${linux_dir}/TouchePx5" "${macos_dir}/TouchePx5"
+          tar -czf "release-assets/touchepx5-${VERSION}-linux-x64.tar.gz" -C "${linux_dir}" .
+          tar -czf "release-assets/touchepx5-${VERSION}-osx-x64.tar.gz" -C "${macos_dir}" .
 
       - name: Create release
         shell: bash
@@ -273,7 +273,7 @@ jobs:
             exit 1
           fi
 
-          notes="Automated SharpEmu v${VERSION} build for commit ${GITHUB_SHA}."
+          notes="Automated Touché PX5 v${VERSION} build for commit ${GITHUB_SHA}."
 
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             echo "Release ${RELEASE_TAG} already exists and will not be modified." >&2
