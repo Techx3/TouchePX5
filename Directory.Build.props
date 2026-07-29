@@ -9,7 +9,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <TouchePx5Version>0.0.2-beta.5</TouchePx5Version>
+    <TouchePx5Version>0.0.2-beta.6</TouchePx5Version>
     <Version>$(TouchePx5Version)</Version>
 
     <RepoRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)'))</RepoRoot>
