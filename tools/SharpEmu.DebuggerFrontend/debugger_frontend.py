@@ -458,7 +458,7 @@ class EmulatorProcessManager:
         if not candidate.is_file():
             raise BridgeError(
                 "The SharpEmu Release executable was not found. Build the solution first with "
-                "'dotnet build SharpEmu.slnx --configuration Release'."
+                "'dotnet build TouchePx5.slnx --configuration Release'."
             )
         if os.name != "nt" and not os.access(candidate, os.X_OK):
             raise BridgeError(f"The SharpEmu executable is not runnable: {candidate}")

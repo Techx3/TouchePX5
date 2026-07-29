@@ -245,7 +245,8 @@ public sealed class Localization
             pair => pair.Key,
             pair => pair.Value
                 .Replace("SharpEmu.CLI", "TouchePx5", StringComparison.Ordinal)
-                .Replace("SharpEmu", "Touché PX5", StringComparison.Ordinal));
+                .Replace("SharpEmu", "Touché PX5", StringComparison.Ordinal)
+                .Replace("SHARPEMU_", "TOUCHEPX5_", StringComparison.Ordinal));
         return true;
     }
 

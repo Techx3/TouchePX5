@@ -19,7 +19,7 @@ public sealed class PerGameSettingsTests
         var settings = PerGameSettings.NormalizeFromJson(json);
 
         Assert.NotNull(settings);
-        Assert.Equal(["SHARPEMU_TRACE"], settings.EnvironmentToggles);
+        Assert.Equal(["TOUCHEPX5_TRACE"], settings.EnvironmentToggles);
     }
 
     // A null list means that the global setting should be inherited.
@@ -55,6 +55,6 @@ public sealed class PerGameSettingsTests
         var settings = PerGameSettings.NormalizeFromJson(json);
 
         Assert.NotNull(settings);
-        Assert.Equal(["SHARPEMU_TRACE", "SHARPEMU_NO_JIT"], settings.EnvironmentToggles);
+        Assert.Equal(["TOUCHEPX5_TRACE", "TOUCHEPX5_NO_JIT"], settings.EnvironmentToggles);
     }
 }

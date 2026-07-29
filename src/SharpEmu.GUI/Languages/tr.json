@@ -77,7 +77,7 @@
   "Console.Split": "Ayır",
   "Console.Copy": "Kopyala",
   "Console.Clear": "Temizle",
-  "Console.WindowTitle": "SharpEmu Konsol",
+  "Console.WindowTitle": "Touché PX5 Konsol",
 
   "Launch.NoGameSelected": "Oyun seçilmedi",
   "Launch.NoGameHint": "Kütüphaneden bir oyun seçin veya doğrudan bir eboot.bin açın.",
@@ -88,9 +88,9 @@
   "Launch.Running": "Çalışıyor — {0}",
   "Launch.Stopping": "Durduruluyor…",
   "Launch.Exited": "Çıkış kodu {0} ({1})",
-  "Launch.ExeNotFound": "SharpEmu çalıştırılabilir dosyası bulunamadı. Önce SharpEmu.CLI projesini derleyin (dotnet build).",
+  "Launch.ExeNotFound": "Touché PX5 çalıştırılabilir dosyası bulunamadı. Önce TouchePx5 projesini derleyin (dotnet build).",
   "Launch.LogFile": "Günlük dosyası: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "Emülatör başlatılamadı: {0}",
   "Launch.ProcessExited": "İşlem {0} kodla sonlandı ({1}).",
 
@@ -103,7 +103,7 @@
 
   "Status.EmulatorLocating": "Emülatör: bulunuyor…",
   "Status.EmulatorPath": "Emülatör: {0}",
-  "Status.EmulatorNotFound": "Emülatör: SharpEmu çalıştırılabilir dosyası bulunamadı — önce SharpEmu.CLI'yi derleyin.",
+  "Status.EmulatorNotFound": "Emülatör: Touché PX5 çalıştırılabilir dosyası bulunamadı — önce TouchePx5'yi derleyin.",
   "Status.ScanningLibrary": "Kütüphane taranıyor…",
   "Status.AddFolderPrompt": "Kütüphaneyi doldurmak için bir oyun klasörü ekleyin.",
   "Status.LibraryScanned": "Kütüphane tarandı: {1} klasörde {0} oyun.",
@@ -160,7 +160,7 @@
   "PerGame.Title": "Oyuna özel ayarlar — {0} ({1})",
   "PerGame.InheritNote": "İşaretlenmemiş satırlar genel varsayılanları kullanır.",
   "PerGame.EnvToggles.Label": "Ortam anahtarları",
-  "PerGame.EnvToggles.Desc": "Bu oyun için genel SHARPEMU_* anahtar kümesini geçersiz kıl.",
+  "PerGame.EnvToggles.Desc": "Bu oyun için genel TOUCHEPX5_* anahtar kümesini geçersiz kıl.",
   "Options.About": "Hakkında",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Kaynak kodu, hata kayıtları ve proje geliştirme.",

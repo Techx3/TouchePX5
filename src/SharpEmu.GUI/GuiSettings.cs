@@ -46,22 +46,24 @@ public sealed class GuiSettings
     public string Language { get; set; } = "en";
 
     /// <summary>Publish launcher/game status to Discord Rich Presence.</summary>
-    public bool DiscordRichPresence { get; set; } = true;
+    public bool DiscordRichPresence { get; set; }
 
     public bool CheckForUpdatesOnStartup { get; set; } = true;
 
-    /// <summary>Names of SHARPEMU_* switches set to "1" in the emulator's environment at launch.</summary>
+    /// <summary>Names of TOUCHEPX5_* switches set to "1" in the emulator's environment at launch.</summary>
     public List<string> EnvironmentToggles { get; set; } = new();
 
     /// <summary>Internal render resolution scale (1.0 = native, 0.5 = half).</summary>
     public double RenderResolutionScale { get; set; } = 1.0;
 
+    /// <summary>Vulkan physical-device name override; null selects automatically.</summary>
+    public string? VulkanDevice { get; set; }
+
     /// <summary>
-    /// Discord application ID used for Rich Presence; the default is the
-    /// SharpEmu application. Override to rebrand what Discord shows as
-    /// "Playing …" (register at discord.com/developers/applications).
+    /// Discord application ID used for Rich Presence. Configure an application
+    /// owned by the Touché PX5 project before enabling this integration.
     /// </summary>
-    public string DiscordClientId { get; set; } = "1525606762248540221";
+    public string DiscordClientId { get; set; } = "";
 
     // The emulator is portable and keeps its data next to the executable;
     // the GUI follows the same convention.
@@ -95,10 +97,21 @@ public sealed class GuiSettings
 
         settings.GameFolders = FilterNullOrEmpty(settings.GameFolders);
         settings.ExcludedGames = FilterNullOrEmpty(settings.ExcludedGames);
-        settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles);
+        settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles)
+            .Select(NormalizeEnvironmentToggle)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
         settings.LogLevel ??= "Info";
         settings.Language ??= "en";
-        settings.DiscordClientId ??= "1525606762248540221";
+        settings.DiscordClientId ??= "";
+        settings.VulkanDevice = string.IsNullOrWhiteSpace(settings.VulkanDevice)
+            ? null
+            : settings.VulkanDevice.Trim();
+        if (settings.DiscordClientId == "1525606762248540221")
+        {
+            settings.DiscordClientId = "";
+            settings.DiscordRichPresence = false;
+        }
         if (settings.RenderResolutionScale <= 0 || settings.RenderResolutionScale > 2.0)
         {
             settings.RenderResolutionScale = 1.0;
@@ -106,6 +119,11 @@ public sealed class GuiSettings
 
         return settings;
     }
+
+    internal static string NormalizeEnvironmentToggle(string name) =>
+        name.StartsWith("SHARPEMU_", StringComparison.OrdinalIgnoreCase)
+            ? "TOUCHEPX5_" + name["SHARPEMU_".Length..]
+            : name;
 
     // JSON can populate non-nullable lists with null references and entries.
     private static List<string> FilterNullOrEmpty(List<string>? source)

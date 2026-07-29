@@ -27,6 +27,13 @@
   "Library.Loading": "Loading library…",
 
   "Options.General": "General",
+  "Options.Graphics": "Graphics",
+  "Options.Section.Rendering": "RENDERING",
+  "Options.Gpu.Label": "Graphics device",
+  "Options.Gpu.Desc": "GPU used by Vulkan. Takes effect on the next game launch.",
+  "Options.Gpu.Automatic": "Automatic (recommended)",
+  "Options.RenderResolution.Label": "Internal resolution",
+  "Options.RenderResolution.Desc": "Render below native resolution and upscale on presentation. Lower values reduce GPU load.",
   "Options.Env.Tab": "Environment",
   "Options.Section.Environment": "ENVIRONMENT VARIABLES",
   "Options.Env.Desc": "Switches passed to the emulator as environment variables at launch.",
@@ -88,7 +95,7 @@
   "PerGame.Title": "Per-game settings — {0} ({1})",
   "PerGame.InheritNote": "Unchecked rows inherit the global defaults.",
   "PerGame.EnvToggles.Label": "Environment toggles",
-  "PerGame.EnvToggles.Desc": "Override the global set of SHARPEMU_* switches for this game.",
+  "PerGame.EnvToggles.Desc": "Override the global set of TOUCHEPX5_* switches for this game.",
 
   "Console.Title": "CONSOLE",
   "Console.SearchWatermark": "Search...",
@@ -96,7 +103,7 @@
   "Console.Split": "Split",
   "Console.Copy": "Copy",
   "Console.Clear": "Clear",
-  "Console.WindowTitle": "SharpEmu Console",
+  "Console.WindowTitle": "Touché PX5 Console",
 
   "Launch.NoGameSelected": "No game selected",
   "Launch.NoGameHint": "Pick a game from the library, or open an eboot.bin directly.",
@@ -107,9 +114,9 @@
   "Launch.Running": "Running — {0}",
   "Launch.Stopping": "Stopping…",
   "Launch.Exited": "Exited with code {0} ({1})",
-  "Launch.ExeNotFound": "SharpEmu executable not found. Build the SharpEmu.CLI project first (dotnet build).",
+  "Launch.ExeNotFound": "Touché PX5 executable not found. Build the TouchePx5 project first (dotnet build).",
   "Launch.LogFile": "Log file: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "Failed to start the emulator: {0}",
   "Launch.ProcessExited": "Process exited with code {0} ({1}).",
 
@@ -122,7 +129,7 @@
 
   "Status.EmulatorLocating": "Emulator: locating…",
   "Status.EmulatorPath": "Emulator: {0}",
-  "Status.EmulatorNotFound": "Emulator: SharpEmu executable not found — build SharpEmu.CLI first.",
+  "Status.EmulatorNotFound": "Emulator: Touché PX5 executable not found — build TouchePx5 first.",
   "Status.ScanningLibrary": "Scanning library…",
   "Status.AddFolderPrompt": "Add a game folder to populate the library.",
   "Status.LibraryScanned": "Library scanned: {0} game(s) in {1} folder(s).",

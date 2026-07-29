@@ -845,7 +845,9 @@ public static class VideoOutExports
         ulong owner,
         ReadOnlySpan<byte> bgraFrame,
         uint width,
-        uint height)
+        uint height,
+        ulong lumaAddress,
+        ulong chromaAddress)
     {
         if (owner == 0 || bgraFrame.Length != checked((int)(width * height * 4)))
         {
@@ -856,7 +858,13 @@ public static class VideoOutExports
         // until the Vulkan presentation thread has uploaded this frame.
         var snapshot = bgraFrame.ToArray();
         Volatile.Write(ref _hostVideoOverlay, new HostVideoOverlayFrame(owner, snapshot, width, height));
-        VulkanVideoPresenter.SetHostVideoOverlayFrame(owner, snapshot, width, height);
+        VulkanVideoPresenter.SetHostVideoOverlayFrame(
+            owner,
+            snapshot,
+            width,
+            height,
+            lumaAddress,
+            chromaAddress);
     }
 
     internal static void ClearHostVideoOverlay(ulong owner)
@@ -1976,7 +1984,7 @@ public static class VideoOutExports
         var current = new DirectoryInfo(AppContext.BaseDirectory);
         while (current is not null)
         {
-            if (File.Exists(Path.Combine(current.FullName, "SharpEmu.slnx")))
+            if (File.Exists(Path.Combine(current.FullName, "TouchePx5.slnx")))
             {
                 return Path.Combine(current.FullName, "logs");
             }

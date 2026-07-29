@@ -11,6 +11,7 @@ namespace SharpEmu.Logging;
 public static class HostSystemInfo
 {
     private static readonly Lazy<string> CpuNameValue = new(GetCpuName);
+    private static readonly Lazy<IReadOnlyList<string>> GpuNamesValue = new(GetGpuNames);
     private static readonly Lazy<string> GpuNameValue = new(GetPreferredGpuName);
     private static readonly Lazy<string> MemoryDescriptionValue = new(GetMemoryDescription);
 
@@ -19,6 +20,49 @@ public static class HostSystemInfo
 
     /// <summary>Preferred physical GPU name, or a safe fallback when it cannot be determined.</summary>
     public static string GpuName => GpuNameValue.Value;
+
+    /// <summary>Physical display adapters visible to the host, in enumeration order.</summary>
+    public static IReadOnlyList<string> GpuNames => GpuNamesValue.Value;
+
+    /// <summary>
+    /// Finds the 64-bit Vulkan ICD manifest installed with a Windows display
+    /// driver when the system Vulkan registry entry is missing.
+    /// </summary>
+    public static string? FindVulkanDriverManifest(string? gpuName)
+    {
+        if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(gpuName))
+        {
+            return null;
+        }
+
+        var manifestName = gpuName.Contains("nvidia", StringComparison.OrdinalIgnoreCase) ||
+            gpuName.Contains("geforce", StringComparison.OrdinalIgnoreCase)
+                ? "nv-vk64.json"
+                : null;
+        if (manifestName is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var windowsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            var driverStore = Path.Combine(
+                windowsDirectory,
+                "System32",
+                "DriverStore",
+                "FileRepository");
+            return Directory
+                .EnumerateFiles(driverStore, manifestName, SearchOption.AllDirectories)
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault();
+        }
+        catch (Exception)
+        {
+            // The selector remains usable through the system Vulkan registry.
+            return null;
+        }
+    }
 
     /// <summary>Returns a concise description of the host hardware for diagnostic logs.</summary>
     public static string Summary =>
@@ -58,15 +102,31 @@ public static class HostSystemInfo
 
     private static string GetPreferredGpuName()
     {
+        var preferredName = "unknown";
+        var preferredScore = int.MinValue;
+        foreach (var name in GpuNames)
+        {
+            var score = ScoreGpu(name);
+            if (score > preferredScore)
+            {
+                preferredName = name;
+                preferredScore = score;
+            }
+        }
+
+        return preferredScore > 0 ? preferredName : "unknown";
+    }
+
+    private static IReadOnlyList<string> GetGpuNames()
+    {
         if (!OperatingSystem.IsWindows())
         {
-            return "unknown";
+            return [];
         }
 
         try
         {
-            var preferredName = "unknown";
-            var preferredScore = int.MinValue;
+            var names = new List<string>();
             for (uint index = 0; ; index++)
             {
                 var device = new DisplayDevice
@@ -80,20 +140,18 @@ public static class HostSystemInfo
                 }
 
                 var name = device.DeviceString?.Trim();
-                var score = ScoreGpu(name);
-                if (score > preferredScore)
+                if (ScoreGpu(name) > 0 &&
+                    !names.Contains(name!, StringComparer.OrdinalIgnoreCase))
                 {
-                    preferredName = name!;
-                    preferredScore = score;
+                    names.Add(name!);
                 }
             }
 
-            return preferredScore > 0 ? preferredName : "unknown";
+            return names;
         }
         catch (Exception)
         {
-            // Hardware information is diagnostic only.
-            return "unknown";
+            return [];
         }
     }
 

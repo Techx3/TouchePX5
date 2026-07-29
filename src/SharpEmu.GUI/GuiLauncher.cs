@@ -6,7 +6,7 @@ using Avalonia;
 namespace SharpEmu.GUI;
 
 /// <summary>
-/// Entry point for the desktop frontend, hosted by the SharpEmu executable
+/// Entry point for the desktop frontend, hosted by the Touché PX5 executable
 /// when it is started without command-line arguments.
 /// </summary>
 public static class GuiLauncher

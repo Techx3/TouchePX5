@@ -77,7 +77,7 @@
   "Console.Split": "Splitsen",
   "Console.Copy": "Kopiëren",
   "Console.Clear": "Wissen",
-  "Console.WindowTitle": "SharpEmu-console",
+  "Console.WindowTitle": "Touché PX5-console",
 
   "Launch.NoGameSelected": "Geen game geselecteerd",
   "Launch.NoGameHint": "Kies een game uit de bibliotheek, of open direct een eboot.bin-bestand.",
@@ -88,9 +88,9 @@
   "Launch.Running": "Actief — {0}",
   "Launch.Stopping": "Stoppen…",
   "Launch.Exited": "Afgesloten met code {0} ({1})",
-  "Launch.ExeNotFound": "SharpEmu-uitvoerbaar bestand niet gevonden. Bouw eerst het SharpEmu.CLI-project (dotnet build).",
+  "Launch.ExeNotFound": "Touché PX5-uitvoerbaar bestand niet gevonden. Bouw eerst het TouchePx5-project (dotnet build).",
   "Launch.LogFile": "Logbestand: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "Starten van de emulator mislukt: {0}",
   "Launch.ProcessExited": "Proces afgesloten met code {0} ({1}).",
 
@@ -103,7 +103,7 @@
 
   "Status.EmulatorLocating": "Emulator: zoeken…",
   "Status.EmulatorPath": "Emulator: {0}",
-  "Status.EmulatorNotFound": "Emulator: SharpEmu-uitvoerbaar bestand niet gevonden — bouw eerst SharpEmu.CLI.",
+  "Status.EmulatorNotFound": "Emulator: Touché PX5-uitvoerbaar bestand niet gevonden — bouw eerst TouchePx5.",
   "Status.ScanningLibrary": "Bibliotheek scannen…",
   "Status.AddFolderPrompt": "Voeg een gamemap toe om de bibliotheek te vullen.",
   "Status.LibraryScanned": "Bibliotheek gescand: {0} game(s) in {1} map(pen).",
@@ -144,7 +144,7 @@
   "PerGame.Title": "Instellingen per game — {0} ({1})",
   "PerGame.InheritNote": "Niet-aangevinkte rijen erven de globale standaardwaarden.",
   "PerGame.EnvToggles.Label": "Omgevingsschakelaars",
-  "PerGame.EnvToggles.Desc": "Overschrijf de globale set SHARPEMU_*-schakelaars voor deze game.",
+  "PerGame.EnvToggles.Desc": "Overschrijf de globale set TOUCHEPX5_*-schakelaars voor deze game.",
   "Options.About": "Over",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Broncode, issues en projectontwikkeling.",

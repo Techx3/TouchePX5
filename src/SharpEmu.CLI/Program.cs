@@ -47,12 +47,33 @@ internal static partial class Program
     {
         try
         {
+            PromoteTouchePx5EnvironmentVariables();
             return Run(args);
         }
         finally
         {
             DropConsoleFileMirror();
             SharpEmuLog.Shutdown();
+        }
+    }
+
+    private static void PromoteTouchePx5EnvironmentVariables()
+    {
+        const string publicPrefix = "TOUCHEPX5_";
+        const string compatibilityPrefix = "SHARPEMU_";
+        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            if (entry.Key is not string name || entry.Value is not string value ||
+                !name.StartsWith(publicPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var compatibilityName = compatibilityPrefix + name[publicPrefix.Length..];
+            if (Environment.GetEnvironmentVariable(compatibilityName) is null)
+            {
+                Environment.SetEnvironmentVariable(compatibilityName, value);
+            }
         }
     }
 

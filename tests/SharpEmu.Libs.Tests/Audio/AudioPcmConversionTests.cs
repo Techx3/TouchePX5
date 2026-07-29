@@ -50,6 +50,30 @@ public sealed class AudioPcmConversionTests
         Assert.Equal(0, BinaryPrimitives.ReadInt16LittleEndian(destination[2..]));
     }
 
+    [Fact]
+    public void SurroundDownmixHonorsIndependentChannelVolumes()
+    {
+        Span<byte> source = stackalloc byte[sizeof(float) * 8];
+        WriteFloat(source, 0, 1.0f); // muted front left music
+        WriteFloat(source, 6, 0.5f); // audible side-left effect
+        Span<byte> destination = stackalloc byte[AudioPcmConversion.OutputFrameSize];
+        Span<float> volumes = stackalloc float[8];
+        volumes.Fill(1.0f);
+        volumes[0] = 0.0f;
+
+        AudioPcmConversion.ConvertToStereoPcm16(
+            source,
+            destination,
+            frames: 1,
+            channels: 8,
+            bytesPerSample: sizeof(float),
+            isFloat: true,
+            volumes);
+
+        Assert.InRange(BinaryPrimitives.ReadInt16LittleEndian(destination), 11580, 11590);
+        Assert.Equal(0, BinaryPrimitives.ReadInt16LittleEndian(destination[2..]));
+    }
+
     private static void WriteFloat(Span<byte> destination, int sample, float value) =>
         BinaryPrimitives.WriteInt32LittleEndian(
             destination[(sample * sizeof(float))..],

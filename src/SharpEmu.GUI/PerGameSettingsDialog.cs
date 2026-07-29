@@ -15,14 +15,14 @@ public sealed class PerGameSettingsDialog : Window
 
     private static readonly string[] EnvToggles =
     {
-        "SHARPEMU_BTHID_UNAVAILABLE",
-        "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
-        "SHARPEMU_WRITABLE_APP0",
-        "SHARPEMU_VK_VALIDATION",
-        "SHARPEMU_DUMP_SPIRV",
-        "SHARPEMU_LOG_DIRECT_MEMORY",
-        "SHARPEMU_LOG_IO",
-        "SHARPEMU_LOG_NP",
+        "TOUCHEPX5_BTHID_UNAVAILABLE",
+        "TOUCHEPX5_DISABLE_IMPORT_LOOP_GUARD",
+        "TOUCHEPX5_WRITABLE_APP0",
+        "TOUCHEPX5_VK_VALIDATION",
+        "TOUCHEPX5_DUMP_SPIRV",
+        "TOUCHEPX5_LOG_DIRECT_MEMORY",
+        "TOUCHEPX5_LOG_IO",
+        "TOUCHEPX5_LOG_NP",
     };
 
     private readonly string _titleId;

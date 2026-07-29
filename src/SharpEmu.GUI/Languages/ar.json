@@ -77,7 +77,7 @@
   "Console.Split": "تقسيم",
   "Console.Copy": "نسخ",
   "Console.Clear": "مسح",
-  "Console.WindowTitle": "نافذة سجلات SharpEmu",
+  "Console.WindowTitle": "نافذة سجلات Touché PX5",
 
   "Launch.NoGameSelected": "لم تُحدد أي لعبة",
   "Launch.NoGameHint": "اختر لعبة من المكتبة، أو افتح ملف eboot.bin مباشرة.",
@@ -88,9 +88,9 @@
   "Launch.Running": "قيد التشغيل — {0}",
   "Launch.Stopping": "جارٍ الإيقاف...",
   "Launch.Exited": "انتهى برمز {0} ({1})",
-  "Launch.ExeNotFound": "لم يُعثر على الملف التنفيذي SharpEmu. ابنِ مشروع SharpEmu.CLI أولاً (dotnet build).",
+  "Launch.ExeNotFound": "لم يُعثر على الملف التنفيذي Touché PX5. ابنِ مشروع TouchePx5 أولاً (dotnet build).",
   "Launch.LogFile": "ملف السجل: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "فشل بدء تشغيل المحاكي: {0}",
   "Launch.ProcessExited": "انتهت العملية برمز {0} ({1}).",
 
@@ -103,7 +103,7 @@
 
   "Status.EmulatorLocating": "المحاكي: جارٍ تحديد الموقع...",
   "Status.EmulatorPath": "المحاكي: {0}",
-  "Status.EmulatorNotFound": "المحاكي: لم يُعثر على الملف التنفيذي SharpEmu — ابنِ SharpEmu.CLI أولاً.",
+  "Status.EmulatorNotFound": "المحاكي: لم يُعثر على الملف التنفيذي Touché PX5 — ابنِ TouchePx5 أولاً.",
   "Status.ScanningLibrary": "جارٍ فحص المكتبة...",
   "Status.AddFolderPrompt": "أضف مجلد ألعاب لملء المكتبة.",
   "Status.LibraryScanned": "فُحصت المكتبة: {0} لعبة في {1} مجلد.",
@@ -144,7 +144,7 @@
   "PerGame.Title": "إعدادات خاصة باللعبة — {0} ({1})",
   "PerGame.InheritNote": "الصفوف غير المحددة ترث الإعدادات الافتراضية العامة.",
   "PerGame.EnvToggles.Label": "مفاتيح البيئة",
-  "PerGame.EnvToggles.Desc": "تجاوز المجموعة العامة من مفاتيح ‎SHARPEMU_*‎ لهذه اللعبة.",
+  "PerGame.EnvToggles.Desc": "تجاوز المجموعة العامة من مفاتيح ‎TOUCHEPX5_*‎ لهذه اللعبة.",
   "Options.About": "حول",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "الكود المصدري والمشكلات وتطوير المشروع.",

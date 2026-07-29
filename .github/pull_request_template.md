@@ -2,7 +2,7 @@
 
 Please read our contribution guidelines before opening a pull request:
 
-➡️ [**CONTRIBUTING.md**](https://github.com/sharpemu/sharpemu/blob/main/CONTRIBUTING.md)
+➡️ [**CONTRIBUTING.md**](https://github.com/Techx3/TouchePX5/blob/main/CONTRIBUTING.md)
 
 By opening this pull request, you confirm that you have read and agree to follow the contribution guidelines.
 

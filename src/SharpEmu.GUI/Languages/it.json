@@ -80,7 +80,7 @@
   "Console.Split": "Dividi",
   "Console.Copy": "Copia",
   "Console.Clear": "Cancella",
-  "Console.WindowTitle": "Console SharpEmu",
+  "Console.WindowTitle": "Console Touché PX5",
 
   "Launch.NoGameSelected": "Nessun gioco selezionato",
   "Launch.NoGameHint": "Scegli un gioco dalla libreria, oppure apri direttamente un eboot.bin.",
@@ -91,9 +91,9 @@
   "Launch.Running": "In esecuzione — {0}",
   "Launch.Stopping": "Arresto in corso…",
   "Launch.Exited": "Terminato con codice {0} ({1})",
-  "Launch.ExeNotFound": "Eseguibile SharpEmu non trovato. Compila prima il progetto SharpEmu.CLI (dotnet build).",
+  "Launch.ExeNotFound": "Eseguibile Touché PX5 non trovato. Compila prima il progetto TouchePx5 (dotnet build).",
   "Launch.LogFile": "File di log: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "Impossibile avviare l'emulatore: {0}",
   "Launch.ProcessExited": "Processo terminato con codice {0} ({1}).",
 
@@ -108,7 +108,7 @@
   
   "Status.EmulatorLocating": "Emulatore: ricerca in corso…",
   "Status.EmulatorPath": "Emulatore: {0}",
-  "Status.EmulatorNotFound": "Emulatore: eseguibile SharpEmu non trovato — compila prima SharpEmu.CLI.",
+  "Status.EmulatorNotFound": "Emulatore: eseguibile Touché PX5 non trovato — compila prima TouchePx5.",
   "Status.ScanningLibrary": "Scansione della libreria…",
   "Status.AddFolderPrompt": "Aggiungi una cartella di giochi per popolare la libreria.",
   "Status.LibraryScanned": "Libreria scansionata: {0} gioco/giochi in {1} cartella/e.",
@@ -149,7 +149,7 @@
   "PerGame.Title": "Impostazioni per gioco — {0} ({1})",
   "PerGame.InheritNote": "Le righe non selezionate ereditano i valori globali.",
   "PerGame.EnvToggles.Label": "Variabili d'ambiente",
-  "PerGame.EnvToggles.Desc": "Sovrascrivi l'insieme globale delle opzioni SHARPEMU_* per questo gioco.",
+  "PerGame.EnvToggles.Desc": "Sovrascrivi l'insieme globale delle opzioni TOUCHEPX5_* per questo gioco.",
   "Options.About": "Informazioni",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Codice sorgente, issue e sviluppo del progetto.",

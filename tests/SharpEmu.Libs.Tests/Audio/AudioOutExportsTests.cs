@@ -124,6 +124,84 @@ public sealed class AudioOutExportsTests : IDisposable
     }
 
     [Fact]
+    public void AvPlayerSession_EndDrainsAndSilencesThePreviousMovie()
+    {
+        var handle = OpenPort(bufferLength: 1024);
+        Assert.True(_memory.TryWrite(FirstSourceAddress, new byte[4096]));
+
+        AudioOutExports.BeginAvPlayerAudioSession(1);
+        AudioOutExports.RegisterAvPlayerAudioBuffer(1, FirstSourceAddress);
+        SubmitSingle(handle, FirstSourceAddress);
+
+        AudioOutExports.EndAvPlayerAudioSession(1);
+        SubmitSingle(handle, FirstSourceAddress);
+
+        Assert.Single(_streams[0].Submissions);
+        Assert.True(_streams[0].ResetCount > 0);
+    }
+
+    [Fact]
+    public void AvPlayerSession_SuppressesRegularMixDuringTheMovie()
+    {
+        var gameHandle = OpenPort(bufferLength: 1024);
+        Assert.True(_memory.TryWrite(FirstSourceAddress, new byte[4096]));
+        SubmitSingle(gameHandle, FirstSourceAddress);
+
+        AudioOutExports.BeginAvPlayerAudioSession(1);
+        SubmitSingle(gameHandle, FirstSourceAddress);
+
+        var movieHandle = OpenPort(bufferLength: 1024);
+        AudioOutExports.RegisterAvPlayerAudioBuffer(1, SecondSourceAddress);
+        Assert.True(_memory.TryWrite(SecondSourceAddress, new byte[4096]));
+        SubmitSingle(movieHandle, SecondSourceAddress);
+
+        AudioOutExports.EndAvPlayerAudioSession(1);
+        SubmitSingle(gameHandle, FirstSourceAddress);
+
+        Assert.Equal(2, _streams[0].Submissions.Count);
+        Assert.Single(_streams[1].Submissions);
+        Assert.True(_streams[0].ResetCount > 0);
+    }
+
+    [Fact]
+    public void AvPlayerSession_DirectMovieAudioSuppressesRegularMix()
+    {
+        var gameHandle = OpenPort(bufferLength: 1024);
+        Assert.True(_memory.TryWrite(FirstSourceAddress, new byte[4096]));
+
+        AudioOutExports.BeginAvPlayerAudioSession(1);
+        Assert.True(AudioOutExports.SubmitAvPlayerAudioFrame(1, new byte[4096]));
+        SubmitSingle(gameHandle, FirstSourceAddress);
+
+        Assert.Empty(_streams[0].Submissions);
+        Assert.Single(_streams[1].Submissions);
+
+        AudioOutExports.EndAvPlayerAudioSession(1);
+        SubmitSingle(gameHandle, FirstSourceAddress);
+
+        Assert.Single(_streams[0].Submissions);
+        Assert.True(_streams[1].ResetCount > 0);
+    }
+
+    [Fact]
+    public void AvPlayerSession_NewGameplayPortIsAudibleAfterMovieEnds()
+    {
+        var menuHandle = OpenPort(bufferLength: 1024);
+        Assert.True(_memory.TryWrite(FirstSourceAddress, new byte[4096]));
+
+        AudioOutExports.BeginAvPlayerAudioSession(1);
+        Assert.True(AudioOutExports.SubmitAvPlayerAudioFrame(1, new byte[4096]));
+        SubmitSingle(menuHandle, FirstSourceAddress);
+        AudioOutExports.EndAvPlayerAudioSession(1);
+
+        var gameplayHandle = OpenPort(bufferLength: 1024);
+        SubmitSingle(gameplayHandle, FirstSourceAddress);
+
+        Assert.Empty(_streams[0].Submissions);
+        Assert.Single(_streams[2].Submissions);
+    }
+
+    [Fact]
     public void Outputs_AcceptsNullBufferAsSynchronizationOnly()
     {
         var handle = OpenPort(bufferLength: 2);

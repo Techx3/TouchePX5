@@ -1,4 +1,4 @@
-﻿{
+{
   "_languageName": "Русский",
 
   "Page.Library": "Библиотека",
@@ -88,7 +88,7 @@
   "PerGame.Title": "Настройки игры — {0} ({1})",
   "PerGame.InheritNote": "Неотмеченные строки наследуют глобальные настройки.",
   "PerGame.EnvToggles.Label": "Переключатели окружения",
-  "PerGame.EnvToggles.Desc": "Переопределить глобальный набор переключателей SHARPEMU_* для этой игры.",
+  "PerGame.EnvToggles.Desc": "Переопределить глобальный набор переключателей TOUCHEPX5_* для этой игры.",
 
   "Console.Title": "КОНСОЛЬ",
   "Console.SearchWatermark": "Поиск...",
@@ -96,7 +96,7 @@
   "Console.Split": "Разделить",
   "Console.Copy": "Скопировать",
   "Console.Clear": "Очистить",
-  "Console.WindowTitle": "Консоль SharpEmu",
+  "Console.WindowTitle": "Консоль Touché PX5",
 
   "Launch.NoGameSelected": "Ничего не выбрано",
   "Launch.NoGameHint": "Выберите игру из библиотеки или откройте eboot.bin напрямую.",
@@ -107,9 +107,9 @@
   "Launch.Running": "Запущено - {0}",
   "Launch.Stopping": "Остановка…",
   "Launch.Exited": "Завершено с кодом {0} ({1})",
-  "Launch.ExeNotFound": "Исполняемый файл SharpEmu не найден. Скомпилируйте сначала проект SharpEmu.CLI (dotnet build).",
+  "Launch.ExeNotFound": "Исполняемый файл Touché PX5 не найден. Скомпилируйте сначала проект TouchePx5 (dotnet build).",
   "Launch.LogFile": "Лог: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "Не удалось запустить эмулятор: {0}",
   "Launch.ProcessExited": "Процесс завершился с кодом {0} ({1}).",
 
@@ -122,7 +122,7 @@
 
   "Status.EmulatorLocating": "Эмулятор: поиск…",
   "Status.EmulatorPath": "Эмулятор: {0}",
-  "Status.EmulatorNotFound": "Эмулятор: исполняемый файл SharpEmu не был найден - скомпилируйте сначала SharpEmu.CLI.",
+  "Status.EmulatorNotFound": "Эмулятор: исполняемый файл Touché PX5 не был найден - скомпилируйте сначала TouchePx5.",
   "Status.ScanningLibrary": "Сканирование библиотеки…",
   "Status.AddFolderPrompt": "Добавьте папку с играми, чтобы заполнить библиотеку.",
   "Status.LibraryScanned": "Сканирование библиотеки завершено: игр: {0}, папок: {1}.",

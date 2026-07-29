@@ -77,7 +77,7 @@
   "Console.Split": "ウィンドウを分離",
   "Console.Copy": "コピー",
   "Console.Clear": "消去",
-  "Console.WindowTitle": "SharpEmu コンソール",
+  "Console.WindowTitle": "Touché PX5 コンソール",
 
   "Launch.NoGameSelected": "ゲームが選択されていません",
   "Launch.NoGameHint": "ライブラリからゲームを選択するか、eboot.bin ファイルを直接開いてください。",
@@ -88,9 +88,9 @@
   "Launch.Running": "実行中 — {0}",
   "Launch.Stopping": "停止中…",
   "Launch.Exited": "プロセスがコード {0} ({1}) で終了しました",
-  "Launch.ExeNotFound": "SharpEmuの実行ファイルが見つかりません。先に SharpEmu.CLI プロジェクトをビルドしてください（dotnet build）。",
+  "Launch.ExeNotFound": "Touché PX5の実行ファイルが見つかりません。先に TouchePx5 プロジェクトをビルドしてください（dotnet build）。",
   "Launch.LogFile": "ログファイル: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "エミュレータを起動できませんでした: {0}",
   "Launch.ProcessExited": "プロセスがコード {0} ({1}) で終了しました。",
 
@@ -103,7 +103,7 @@
 
   "Status.EmulatorLocating": "エミュレータ: 位置を検索中…",
   "Status.EmulatorPath": "エミュレータ: {0}",
-  "Status.EmulatorNotFound": "エミュレータ: SharpEmuの実行ファイルが見つかりません — 先に SharpEmu.CLI をビルドしてください。",
+  "Status.EmulatorNotFound": "エミュレータ: Touché PX5の実行ファイルが見つかりません — 先に TouchePx5 をビルドしてください。",
   "Status.ScanningLibrary": "ライブラリをスキャン中…",
   "Status.AddFolderPrompt": "ライブラリに表示するゲームフォルダーを追加してください。",
   "Status.LibraryScanned": "ライブラリのスキャン完了: {1} 個のフォルダーから {0} 本のゲームを検出。",
@@ -144,7 +144,7 @@
   "PerGame.Title": "ゲームごとの設定 — {0} ({1})",
   "PerGame.InheritNote": "チェックされていない行はグローバルの既定値を継承します。",
   "PerGame.EnvToggles.Label": "環境スイッチ",
-  "PerGame.EnvToggles.Desc": "このゲームに対してグローバルのSHARPEMU_*スイッチを上書きします。",
+  "PerGame.EnvToggles.Desc": "このゲームに対してグローバルのTOUCHEPX5_*スイッチを上書きします。",
   "Options.About": "情報",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "ソースコード、Issue、プロジェクトの開発。",

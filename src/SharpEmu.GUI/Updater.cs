@@ -16,8 +16,8 @@ namespace SharpEmu.GUI;
 /// <summary>Self-contained Windows updater; the emulator layers do not depend on it.</summary>
 public static class Updater
 {
-    private const string ApplyArgument = "--sharpemu-apply-update";
-    private const string LatestReleaseUrl = "https://api.github.com/repos/sharpemu/sharpemu/releases/latest";
+    private const string ApplyArgument = "--touchepx5-apply-update";
+    private const string ReleasesUrl = "https://api.github.com/repos/Techx3/TouchePX5/releases?per_page=20";
     private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(10);
     private static readonly HttpClient Http = CreateHttpClient();
 
@@ -29,7 +29,7 @@ public static class Updater
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(CheckTimeout);
 
-        using var response = await Http.GetAsync(LatestReleaseUrl, timeout.Token);
+        using var response = await Http.GetAsync(ReleasesUrl, timeout.Token);
         response.EnsureSuccessStatusCode();
         var update = ParseRelease(
             await response.Content.ReadAsStringAsync(timeout.Token),
@@ -63,7 +63,7 @@ public static class Updater
         IProgress<int>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        var root = Path.Combine(Path.GetTempPath(), "SharpEmu.Update");
+        var root = Path.Combine(Path.GetTempPath(), "TouchePx5.Update");
         var payload = Path.Combine(root, "payload");
         if (Directory.Exists(root))
         {
@@ -138,7 +138,7 @@ public static class Updater
             return false;
         }
 
-        var backup = Path.Combine(Path.GetTempPath(), $"SharpEmu.UpdateBackup-{Environment.ProcessId}");
+        var backup = Path.Combine(Path.GetTempPath(), $"TouchePx5.UpdateBackup-{Environment.ProcessId}");
         var changed = new List<(string Destination, string? Backup)>();
         try
         {
@@ -148,7 +148,7 @@ public static class Updater
                 {
                     if (!Process.GetProcessById(oldPid).WaitForExit(30_000))
                     {
-                        throw new TimeoutException("SharpEmu did not close within 30 seconds.");
+                        throw new TimeoutException("Touché PX5 did not close within 30 seconds.");
                     }
                 }
                 catch (ArgumentException)
@@ -193,7 +193,7 @@ public static class Updater
             {
                 UseShellExecute = false,
                 WorkingDirectory = target,
-            }) ?? throw new InvalidOperationException("The updated SharpEmu could not be started.");
+            }) ?? throw new InvalidOperationException("The updated Touché PX5 could not be started.");
             TryDeleteDirectory(backup);
         }
         catch (Exception ex)
@@ -239,9 +239,37 @@ public static class Updater
         string extension)
     {
         using var document = JsonDocument.Parse(json);
-        var releaseSha = ExtractReleaseSha(document.RootElement);
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var release in document.RootElement.EnumerateArray())
+        {
+            if (release.TryGetProperty("draft", out var draft) && draft.GetBoolean())
+            {
+                continue;
+            }
+
+            var update = ParseRelease(release, currentSha, rid, extension);
+            if (update is not null)
+            {
+                return update;
+            }
+        }
+
+        return null;
+    }
+
+    private static UpdateInfo? ParseRelease(
+        JsonElement release,
+        string? currentSha,
+        string rid,
+        string extension)
+    {
+        var releaseSha = ExtractReleaseSha(release);
         var candidates = new List<(DateTimeOffset Created, UpdateInfo Update)>();
-        foreach (var asset in document.RootElement.GetProperty("assets").EnumerateArray())
+        foreach (var asset in release.GetProperty("assets").EnumerateArray())
         {
             var name = asset.GetProperty("name").GetString() ?? "";
             var marker = $"-{rid}";
@@ -279,7 +307,7 @@ public static class Updater
                     asset.GetProperty("browser_download_url").GetString()!,
                     asset.GetProperty("size").GetInt64(),
                     digest["sha256:".Length..],
-                    document.RootElement.GetProperty("tag_name").GetString() ?? "")));
+                    release.GetProperty("tag_name").GetString() ?? "")));
         }
 
         var latest = candidates.OrderByDescending(candidate => candidate.Created).FirstOrDefault().Update;
@@ -293,7 +321,7 @@ public static class Updater
         string releaseSha,
         CancellationToken cancellationToken)
     {
-        var url = $"https://api.github.com/repos/sharpemu/sharpemu/compare/{currentSha}...{releaseSha}";
+        var url = $"https://api.github.com/repos/Techx3/TouchePX5/compare/{currentSha}...{releaseSha}";
         using var response = await Http.GetAsync(url, cancellationToken);
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
@@ -390,7 +418,7 @@ public static class Updater
     private static HttpClient CreateHttpClient()
     {
         var client = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("SharpEmu", "0.0.1"));
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("TouchePx5", "0.0.1"));
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         return client;
     }
@@ -399,12 +427,12 @@ public static class Updater
     {
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
-            throw new PlatformNotSupportedException("SharpEmu releases require an x64 process.");
+            throw new PlatformNotSupportedException("Touché PX5 releases require an x64 process.");
         }
 
-        if (OperatingSystem.IsWindows()) return new("win-x64", ".zip", "SharpEmu.exe");
-        if (OperatingSystem.IsLinux()) return new("linux-x64", ".tar.gz", "SharpEmu");
-        if (OperatingSystem.IsMacOS()) return new("osx-x64", ".tar.gz", "SharpEmu");
+        if (OperatingSystem.IsWindows()) return new("win-x64", ".zip", "TouchePx5.exe");
+        if (OperatingSystem.IsLinux()) return new("linux-x64", ".tar.gz", "TouchePx5");
+        if (OperatingSystem.IsMacOS()) return new("osx-x64", ".tar.gz", "TouchePx5");
         throw new PlatformNotSupportedException();
     }
 

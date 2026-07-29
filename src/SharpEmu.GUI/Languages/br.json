@@ -86,7 +86,7 @@
   "Console.Split": "Dividir",
   "Console.Copy": "Copiar",
   "Console.Clear": "Limpar",
-  "Console.WindowTitle": "Console do SharpEmu",
+  "Console.WindowTitle": "Console do Touché PX5",
 
   "Launch.NoGameSelected": "Nenhum jogo selecionado",
   "Launch.NoGameHint": "Selecione um jogo na biblioteca ou abra um arquivo eboot.bin diretamente.",
@@ -97,9 +97,9 @@
   "Launch.Running": "Em execução — {0}",
   "Launch.Stopping": "Encerrando…",
   "Launch.Exited": "Encerrado com código {0} ({1})",
-  "Launch.ExeNotFound": "Executável do SharpEmu não encontrado. Compile primeiro o projeto SharpEmu.CLI (dotnet build).",
+  "Launch.ExeNotFound": "Executável do Touché PX5 não encontrado. Compile primeiro o projeto TouchePx5 (dotnet build).",
   "Launch.LogFile": "Arquivo de log: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "Falha ao iniciar o emulador: {0}",
   "Launch.ProcessExited": "O processo foi encerrado com código {0} ({1}).",
 
@@ -112,7 +112,7 @@
 
   "Status.EmulatorLocating": "Emulador: localizando…",
   "Status.EmulatorPath": "Emulador: {0}",
-  "Status.EmulatorNotFound": "Emulador: executável do SharpEmu não encontrado — compile o SharpEmu.CLI primeiro.",
+  "Status.EmulatorNotFound": "Emulador: executável do Touché PX5 não encontrado — compile o TouchePx5 primeiro.",
   "Status.ScanningLibrary": "Verificando biblioteca…",
   "Status.AddFolderPrompt": "Adicione uma pasta de jogos para preencher a biblioteca.",
   "Status.LibraryScanned": "Biblioteca verificada: {0} jogo(s) em {1} pasta(s).",
@@ -152,7 +152,7 @@
   "PerGame.Title": "Configurações por jogo — {0} ({1})",
   "PerGame.InheritNote": "As linhas desmarcadas herdam os padrões globais.",
   "PerGame.EnvToggles.Label": "Variáveis de ambiente",
-  "PerGame.EnvToggles.Desc": "Substitui o conjunto global de opções SHARPEMU_* para este jogo.",
+  "PerGame.EnvToggles.Desc": "Substitui o conjunto global de opções TOUCHEPX5_* para este jogo.",
   "About.Github.LatestCommitLabel": "Último commit",
   "About.Github.LatestCommitDescription": "Último commit na branch main",
   "Updater.Auto.Label": "Verificar atualizações ao iniciar",

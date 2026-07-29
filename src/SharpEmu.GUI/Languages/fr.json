@@ -86,7 +86,7 @@
   "Console.Split": "Détacher",
   "Console.Copy": "Copier",
   "Console.Clear": "Effacer",
-  "Console.WindowTitle": "Console SharpEmu",
+  "Console.WindowTitle": "Console Touché PX5",
 
   "Launch.NoGameSelected": "Aucun jeu sélectionné",
   "Launch.NoGameHint": "Choisissez un jeu dans la bibliothèque ou ouvrez directement un fichier eboot.bin.",
@@ -97,9 +97,9 @@
   "Launch.Running": "En cours d’exécution — {0}",
   "Launch.Stopping": "Arrêt en cours…",
   "Launch.Exited": "Processus terminé avec le code {0} ({1})",
-  "Launch.ExeNotFound": "L’exécutable SharpEmu est introuvable. Compilez d’abord le projet SharpEmu.CLI (dotnet build).",
+  "Launch.ExeNotFound": "L’exécutable Touché PX5 est introuvable. Compilez d’abord le projet TouchePx5 (dotnet build).",
   "Launch.LogFile": "Fichier journal : {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "Impossible de démarrer l’émulateur : {0}",
   "Launch.ProcessExited": "Le processus s’est terminé avec le code {0} ({1}).",
 
@@ -112,7 +112,7 @@
 
   "Status.EmulatorLocating": "Émulateur : recherche en cours…",
   "Status.EmulatorPath": "Émulateur : {0}",
-  "Status.EmulatorNotFound": "Émulateur : l’exécutable SharpEmu est introuvable — compilez d’abord SharpEmu.CLI.",
+  "Status.EmulatorNotFound": "Émulateur : l’exécutable Touché PX5 est introuvable — compilez d’abord TouchePx5.",
   "Status.ScanningLibrary": "Analyse de la bibliothèque…",
   "Status.AddFolderPrompt": "Ajoutez un dossier de jeux pour remplir la bibliothèque.",
   "Status.LibraryScanned": "Bibliothèque analysée : {0} jeu(x) dans {1} dossier(s).",
@@ -152,7 +152,7 @@
   "PerGame.Title": "Paramètres par jeu — {0} ({1})",
   "PerGame.InheritNote": "Les lignes non cochées héritent des valeurs globales par défaut.",
   "PerGame.EnvToggles.Label": "Variables d’environnement",
-  "PerGame.EnvToggles.Desc": "Remplacer l’ensemble global des options SHARPEMU_* pour ce jeu.",
+  "PerGame.EnvToggles.Desc": "Remplacer l’ensemble global des options TOUCHEPX5_* pour ce jeu.",
   "About.Github.LatestCommitLabel": "Dernier commit",
   "About.Github.LatestCommitDescription": "Dernier commit sur la branche main",
   "Updater.Auto.Label": "Vérifier les mises à jour au démarrage",

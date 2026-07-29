@@ -77,7 +77,7 @@
   "Console.Split": "Opdel",
   "Console.Copy": "Kopiér",
   "Console.Clear": "Ryd",
-  "Console.WindowTitle": "SharpEmu-konsol",
+  "Console.WindowTitle": "Touché PX5-konsol",
 
   "Launch.NoGameSelected": "Intet spil valgt",
   "Launch.NoGameHint": "Vælg et spil fra biblioteket, eller åbn en eboot.bin direkte.",
@@ -88,9 +88,9 @@
   "Launch.Running": "Kører — {0}",
   "Launch.Stopping": "Stopper…",
   "Launch.Exited": "Afsluttet med kode {0} ({1})",
-  "Launch.ExeNotFound": "SharpEmu-programmet blev ikke fundet. Byg SharpEmu.CLI-projektet først (dotnet build).",
+  "Launch.ExeNotFound": "Touché PX5-programmet blev ikke fundet. Byg TouchePx5-projektet først (dotnet build).",
   "Launch.LogFile": "Logfil: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "Kunne ikke starte emulatoren: {0}",
   "Launch.ProcessExited": "Processen afsluttede med kode {0} ({1}).",
 
@@ -103,7 +103,7 @@
 
   "Status.EmulatorLocating": "Emulator: lokaliserer…",
   "Status.EmulatorPath": "Emulator: {0}",
-  "Status.EmulatorNotFound": "Emulator: SharpEmu-programmet blev ikke fundet — byg SharpEmu.CLI først.",
+  "Status.EmulatorNotFound": "Emulator: Touché PX5-programmet blev ikke fundet — byg TouchePx5 først.",
   "Status.ScanningLibrary": "Skanner bibliotek…",
   "Status.AddFolderPrompt": "Tilføj en spilmappe for at udfylde biblioteket.",
   "Status.LibraryScanned": "Bibliotek skannet: {0} spil i {1} mappe(r).",
@@ -144,7 +144,7 @@
   "PerGame.Title": "Indstillinger pr. spil — {0} ({1})",
   "PerGame.InheritNote": "Umarkerede rækker arver de globale standardværdier.",
   "PerGame.EnvToggles.Label": "Miljøkontakter",
-  "PerGame.EnvToggles.Desc": "Tilsidesæt det globale sæt SHARPEMU_*-kontakter for dette spil.",
+  "PerGame.EnvToggles.Desc": "Tilsidesæt det globale sæt TOUCHEPX5_*-kontakter for dette spil.",
   "Options.About": "Om",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Kildekode, issues og projektudvikling.",

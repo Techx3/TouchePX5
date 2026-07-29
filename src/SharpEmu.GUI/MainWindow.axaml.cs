@@ -117,6 +117,11 @@ public partial class MainWindow : Window
         string LogLevel,
         SharpEmuRuntimeOptions RuntimeOptions);
 
+    private sealed record GpuChoice(string DisplayName, string? DeviceName)
+    {
+        public override string ToString() => DisplayName;
+    }
+
     public MainWindow()
     {
         InitializeComponent();
@@ -205,6 +210,13 @@ public partial class MainWindow : Window
                 _settings.RenderResolutionScale = scale;
             }
         };
+        GpuDeviceBox.SelectionChanged += (_, _) =>
+        {
+            if (GpuDeviceBox.SelectedItem is GpuChoice choice)
+            {
+                _settings.VulkanDevice = choice.DeviceName;
+            }
+        };
         StrictToggle.IsCheckedChanged += (_, _) => _settings.StrictDynlibResolution = StrictToggle.IsChecked == true;
         LogToFileToggle.IsCheckedChanged += (_, _) => _settings.LogToFile = LogToFileToggle.IsChecked == true;
         OverrideLogFileToggle.IsCheckedChanged += (_, _) =>
@@ -224,21 +236,21 @@ public partial class MainWindow : Window
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
         EnvBthidToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_BTHID_UNAVAILABLE", EnvBthidToggle.IsChecked == true);
+            SetEnvironmentToggle("TOUCHEPX5_BTHID_UNAVAILABLE", EnvBthidToggle.IsChecked == true);
         EnvLoopGuardToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", EnvLoopGuardToggle.IsChecked == true);
+            SetEnvironmentToggle("TOUCHEPX5_DISABLE_IMPORT_LOOP_GUARD", EnvLoopGuardToggle.IsChecked == true);
         EnvWritableApp0Toggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_WRITABLE_APP0", EnvWritableApp0Toggle.IsChecked == true);
+            SetEnvironmentToggle("TOUCHEPX5_WRITABLE_APP0", EnvWritableApp0Toggle.IsChecked == true);
         EnvVkValidationToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_VK_VALIDATION", EnvVkValidationToggle.IsChecked == true);
+            SetEnvironmentToggle("TOUCHEPX5_VK_VALIDATION", EnvVkValidationToggle.IsChecked == true);
         EnvDumpSpirvToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_DUMP_SPIRV", EnvDumpSpirvToggle.IsChecked == true);
+            SetEnvironmentToggle("TOUCHEPX5_DUMP_SPIRV", EnvDumpSpirvToggle.IsChecked == true);
         EnvLogDirectMemoryToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_LOG_DIRECT_MEMORY", EnvLogDirectMemoryToggle.IsChecked == true);
+            SetEnvironmentToggle("TOUCHEPX5_LOG_DIRECT_MEMORY", EnvLogDirectMemoryToggle.IsChecked == true);
         EnvLogIoToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_LOG_IO", EnvLogIoToggle.IsChecked == true);
+            SetEnvironmentToggle("TOUCHEPX5_LOG_IO", EnvLogIoToggle.IsChecked == true);
         EnvLogNpToggle.IsCheckedChanged += (_, _) =>
-            SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
+            SetEnvironmentToggle("TOUCHEPX5_LOG_NP", EnvLogNpToggle.IsChecked == true);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
@@ -269,16 +281,7 @@ public partial class MainWindow : Window
         {
             Process.Start(new ProcessStartInfo
             {
-                FileName = "https://github.com/sharpemu/sharpemu",
-                UseShellExecute = true
-            });
-        };
-
-        DiscordButton.Click += (_, _) =>
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "https://discord.com/invite/6GejPEDqpc",
+                FileName = "https://github.com/Techx3/TouchePX5",
                 UseShellExecute = true
             });
         };
@@ -293,7 +296,7 @@ public partial class MainWindow : Window
             Process.Start(new ProcessStartInfo
             {
                 FileName =
-                    $"https://github.com/sharpemu/sharpemu/commit/{_latestCommitSha}",
+                    $"https://github.com/Techx3/TouchePX5/commit/{_latestCommitSha}",
                 UseShellExecute = true
             });
         };
@@ -347,7 +350,7 @@ public partial class MainWindow : Window
             Timeout = TimeSpan.FromSeconds(15)
         };
 
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("SharpEmu/1.0");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("TouchePx5/1.0");
         client.DefaultRequestHeaders.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/vnd.github.sha"));
 
@@ -360,7 +363,7 @@ public partial class MainWindow : Window
     private async Task LoadLatestCommitAsync()
     {
         const string apiUrl =
-            "https://api.github.com/repos/sharpemu/sharpemu/commits/main";
+            "https://api.github.com/repos/Techx3/TouchePX5/commits/main";
 
         _latestCommitSha = null;
         LatestCommitHashText.Content = "Loading…";
@@ -605,6 +608,19 @@ public partial class MainWindow : Window
         ApplyLocalization();
     }
 
+    private void PopulateGpuDeviceBox()
+    {
+        var choices = new List<GpuChoice>
+        {
+            new(Localization.Instance.Get("Options.Gpu.Automatic"), null),
+        };
+        choices.AddRange(HostSystemInfo.GpuNames.Select(name => new GpuChoice(name, name)));
+        GpuDeviceBox.ItemsSource = choices;
+        GpuDeviceBox.SelectedItem = choices.FirstOrDefault(choice =>
+            string.Equals(choice.DeviceName, _settings.VulkanDevice, StringComparison.OrdinalIgnoreCase))
+            ?? choices[0];
+    }
+
     /// <summary>
     /// Re-applies every UI string from the current language, so switching
     /// languages in Options takes effect immediately without reopening the
@@ -633,6 +649,7 @@ public partial class MainWindow : Window
         LoadingStateText.Text = loc.Get("Library.Loading");
 
         GeneralTabItem.Header = loc.Get("Options.General");
+        GraphicsTabItem.Header = loc.Get("Options.Graphics");
         EnvTabItem.Header = loc.Get("Options.Env.Tab");
         EnvSectionTitle.Text = loc.Get("Options.Section.Environment");
         EnvDesc.Text = loc.Get("Options.Env.Desc");
@@ -647,6 +664,12 @@ public partial class MainWindow : Window
         EmulationSectionTitle.Text = loc.Get("Options.Section.Emulation");
         LoggingSectionTitle.Text = loc.Get("Options.Section.Logging");
         LauncherSectionTitle.Text = loc.Get("Options.Section.Launcher");
+        RenderingSectionTitle.Text = loc.Get("Options.Section.Rendering");
+        GpuDeviceRow.Label = loc.Get("Options.Gpu.Label");
+        GpuDeviceRow.Description = loc.Get("Options.Gpu.Desc");
+        RenderResolutionRow.Label = loc.Get("Options.RenderResolution.Label");
+        RenderResolutionRow.Description = loc.Get("Options.RenderResolution.Desc");
+        PopulateGpuDeviceBox();
 
         CpuEngineRow.Label = loc.Get("Options.CpuEngine.Label");
         CpuEngineRow.Description = loc.Get("Options.CpuEngine.Desc");
@@ -708,10 +731,7 @@ public partial class MainWindow : Window
         AboutSectionTitle.Text = loc.Get("Options.About");
         GithubLabel.Text = loc.Get("About.Github.Label");
         GithubDesc.Text = loc.Get("About.Github.Desc");
-        DiscordServerLabel.Text = loc.Get("About.Discord.Label");
-        DiscordServerDesc.Text = loc.Get("About.Discord.Desc");
         GithubButton.Content = loc.Get("About.GithubButton");
-        DiscordButton.Content = loc.Get("About.DiscordButton");
         UpdateLabel.Text = loc.Get("Updater.Label");
         LatestCommitLabel.Text = loc.Get("About.Github.LatestCommitLabel");
         LatestCommitDescription.Text = loc.Get("About.Github.LatestCommitDescription");
@@ -898,14 +918,14 @@ public partial class MainWindow : Window
         TitleMusicToggle.IsChecked = _settings.PlayTitleMusic;
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
         AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
-        EnvBthidToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_BTHID_UNAVAILABLE");
-        EnvLoopGuardToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
-        EnvWritableApp0Toggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_WRITABLE_APP0");
-        EnvVkValidationToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_VK_VALIDATION");
-        EnvDumpSpirvToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DUMP_SPIRV");
-        EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
-        EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
-        EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
+        EnvBthidToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_BTHID_UNAVAILABLE");
+        EnvLoopGuardToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_DISABLE_IMPORT_LOOP_GUARD");
+        EnvWritableApp0Toggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_WRITABLE_APP0");
+        EnvVkValidationToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_VK_VALIDATION");
+        EnvDumpSpirvToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_DUMP_SPIRV");
+        EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_DIRECT_MEMORY");
+        EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_IO");
+        EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_NP");
         UpdateLogFilePathText();
     }
 
@@ -1805,22 +1825,24 @@ public partial class MainWindow : Window
         {
             if (!effective.EnvironmentToggles.Contains(staleName))
             {
-                Environment.SetEnvironmentVariable(staleName, null);
+                SetRuntimeEnvironmentVariable(staleName, null);
             }
         }
 
         _appliedEnvironmentVariables.Clear();
         foreach (var name in effective.EnvironmentToggles)
         {
-            Environment.SetEnvironmentVariable(name, "1");
+            SetRuntimeEnvironmentVariable(name, "1");
             _appliedEnvironmentVariables.Add(name);
         }
 
-        Environment.SetEnvironmentVariable(
-            "SHARPEMU_RENDER_SCALE",
+        SetRuntimeEnvironmentVariable(
+            "TOUCHEPX5_RENDER_SCALE",
             _settings.RenderResolutionScale.ToString(
                 "0.###",
                 System.Globalization.CultureInfo.InvariantCulture));
+        AddSelectedVulkanDriverManifest(_settings.VulkanDevice);
+        SetRuntimeEnvironmentVariable("TOUCHEPX5_VK_DEVICE", _settings.VulkanDevice);
 
         if (SharpEmuLog.TryParseLevel(effective.LogLevel, out var logLevel))
         {
@@ -1856,6 +1878,38 @@ public partial class MainWindow : Window
         if (_gameSurfaceHost?.Surface is { } surface)
         {
             StartPendingSession(surface);
+        }
+    }
+
+    private static void SetRuntimeEnvironmentVariable(string name, string? value)
+    {
+        Environment.SetEnvironmentVariable(name, value);
+        const string publicPrefix = "TOUCHEPX5_";
+        if (name.StartsWith(publicPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            Environment.SetEnvironmentVariable(
+                "SHARPEMU_" + name[publicPrefix.Length..],
+                value);
+        }
+    }
+
+    private static void AddSelectedVulkanDriverManifest(string? deviceName)
+    {
+        var manifest = HostSystemInfo.FindVulkanDriverManifest(deviceName);
+        if (string.IsNullOrWhiteSpace(manifest))
+        {
+            return;
+        }
+
+        const string variableName = "VK_ADD_DRIVER_FILES";
+        var current = Environment.GetEnvironmentVariable(variableName);
+        var manifests = (current ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+        if (!manifests.Contains(manifest, StringComparer.OrdinalIgnoreCase))
+        {
+            manifests.Add(manifest);
+            Environment.SetEnvironmentVariable(variableName, string.Join(Path.PathSeparator, manifests));
         }
     }
 

@@ -390,35 +390,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                 VerticalAlignment="Center" />
                       </Grid>
 
-                      <!--Discord-->
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0"
-                                        Orientation="Horizontal"
-                                        Spacing="8"
-                                        VerticalAlignment="Center">
-                          <Image Source="avares://SharpEmu.GUI/Assets/discord.png"
-                                  Width="20"
-                                  Height="20"
-                                  VerticalAlignment="Center" />
-                          <StackPanel VerticalAlignment="Center"
-                                      Spacing="2">
-                            <TextBlock x:Name="DiscordServerLabel"
-                                      Text="Discord"
-                                      FontSize="13" />
-                            <TextBlock x:Name="DiscordServerDesc"
-                                      Text="Join the community, get support and follow development."
-                                      FontSize="11"
-                                      Foreground="{StaticResource MutedBrush}"
-                                      TextWrapping="Wrap" />
-                          </StackPanel>
-                        </StackPanel>
-
-                        <Button Grid.Column="1"
-                                x:Name="DiscordButton"
-                                Classes="ghost"
-                                Content="Join"
-                                VerticalAlignment="Center" />
-                      </Grid>
                     </StackPanel>
                   </Border>
                 </StackPanel>
@@ -431,6 +402,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   <Border Classes="card">
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="RenderingSectionTitle" Classes="sectionTitle" Text="RENDERING" />
+
+                      <local:SettingRow x:Name="GpuDeviceRow" Label="Graphics device"
+                                        Description="GPU used by Vulkan. Takes effect on next launch.">
+                        <ComboBox x:Name="GpuDeviceBox" Width="300"
+                                  VerticalAlignment="Center" CornerRadius="8" />
+                      </local:SettingRow>
 
                       <local:SettingRow x:Name="RenderResolutionRow" Label="Internal resolution"
                                         Description="Render offscreen targets below native resolution and upscale on present. Lower values trade image quality for GPU headroom; takes effect on next launch.">
@@ -458,49 +435,49 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Text="Switches passed to the emulator as environment variables at launch."
                                  FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
 
-                      <local:SettingRow x:Name="EnvBthidRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_BTHID_UNAVAILABLE"
+                      <local:SettingRow x:Name="EnvBthidRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_BTHID_UNAVAILABLE"
                                         Description="Report Bluetooth HID as unavailable for titles whose wheel/FFB middleware polls forever.&#10;Leave off normally. Some titles freeze when init fails.">
                         <ToggleSwitch x:Name="EnvBthidToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLoopGuardRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
+                      <local:SettingRow x:Name="EnvLoopGuardRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_DISABLE_IMPORT_LOOP_GUARD"
                                         Description="Do not force quit titles that repeat the same call for too long.&#10;Try this when a game exits on its own while loading.">
                         <ToggleSwitch x:Name="EnvLoopGuardToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvWritableApp0Row" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_WRITABLE_APP0"
+                      <local:SettingRow x:Name="EnvWritableApp0Row" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_WRITABLE_APP0"
                                         Description="Allow titles to create and write files inside their install folder.&#10;Needed by unpackaged dumps that write their save or config data under /app0.">
                         <ToggleSwitch x:Name="EnvWritableApp0Toggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvVkValidationRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_VK_VALIDATION"
+                      <local:SettingRow x:Name="EnvVkValidationRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_VK_VALIDATION"
                                         Description="Enable Vulkan validation layers for GPU debugging.&#10;Slow. Requires the Vulkan SDK to be installed.">
                         <ToggleSwitch x:Name="EnvVkValidationToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvDumpSpirvRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DUMP_SPIRV"
+                      <local:SettingRow x:Name="EnvDumpSpirvRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_DUMP_SPIRV"
                                         Description="Dump AGC shaders and their SPIR-V translations to the shader-dumps folder.&#10;Use when reporting shader or rendering bugs.">
                         <ToggleSwitch x:Name="EnvDumpSpirvToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLogDirectMemoryRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_DIRECT_MEMORY"
+                      <local:SettingRow x:Name="EnvLogDirectMemoryRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_LOG_DIRECT_MEMORY"
                                         Description="Log direct memory allocations and failures to the console.&#10;Use when a game aborts or exits during boot.">
                         <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLogIoRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_IO"
+                      <local:SettingRow x:Name="EnvLogIoRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_LOG_IO"
                                         Description="Log file open, read, and path-resolve activity to the console.&#10;Use when a game cannot find its data files during boot.">
                         <ToggleSwitch x:Name="EnvLogIoToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLogNpRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_NP"
+                      <local:SettingRow x:Name="EnvLogNpRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_LOG_NP"
                                         Description="Log NP (PlayStation Network) library calls to the console.">
                         <ToggleSwitch x:Name="EnvLogNpToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />

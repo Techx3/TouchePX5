@@ -140,6 +140,27 @@ public static class AudioOut2Exports
     private static string SecondaryBackendName = "none";
     private static ulong PrimaryContextHandle;
     private static readonly object HostSubmitGate = new();
+    private static int _avPlayerAudioExclusive;
+
+    internal static void SetAvPlayerAudioExclusive(bool exclusive)
+    {
+        Volatile.Write(ref _avPlayerAudioExclusive, exclusive ? 1 : 0);
+        if (!exclusive)
+        {
+            return;
+        }
+
+        // Discard music already queued in either AudioOut2 device. New grains
+        // keep advancing silently until the AVPlayer session ends.
+        lock (HostSubmitGate)
+        {
+            lock (HostBackendGate)
+            {
+                PrimaryBackend?.Reset();
+                SecondaryBackend?.Reset();
+            }
+        }
+    }
 
     [SysAbiExport(
         Nid = "g2tViFIohHE",
@@ -785,6 +806,11 @@ public static class AudioOut2Exports
 
     private static bool TrySubmitContextAudio(CpuContext ctx, ContextState context)
     {
+        if (Volatile.Read(ref _avPlayerAudioExclusive) != 0)
+        {
+            return false;
+        }
+
         var frames = checked((int)context.GrainSamples);
         if (frames <= 0)
         {

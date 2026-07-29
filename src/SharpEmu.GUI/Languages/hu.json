@@ -86,7 +86,7 @@
   "Console.Split": "Felosztás",
   "Console.Copy": "Másolás",
   "Console.Clear": "Törlés",
-  "Console.WindowTitle": "SharpEmu Konzol",
+  "Console.WindowTitle": "Touché PX5 Konzol",
 
   "Launch.NoGameSelected": "Nincs játék kiválasztva",
   "Launch.NoGameHint": "Válassz egy játékot a könyvtárból, vagy nyiss meg közvetlenül egy eboot.bin fájlt.",
@@ -97,9 +97,9 @@
   "Launch.Running": "Fut — {0}",
   "Launch.Stopping": "Leállítás…",
   "Launch.Exited": "Kilépett a következő kóddal: {0} ({1})",
-  "Launch.ExeNotFound": "A SharpEmu futtatható fájl nem található. Előbb építsd fel a SharpEmu.CLI projektet (dotnet build).",
+  "Launch.ExeNotFound": "A Touché PX5 futtatható fájl nem található. Előbb építsd fel a TouchePx5 projektet (dotnet build).",
   "Launch.LogFile": "Naplófájl: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "Nem sikerült elindítani az emulátort: {0}",
   "Launch.ProcessExited": "A folyamat kilépett a következő kóddal: {0} ({1}).",
 
@@ -112,7 +112,7 @@
 
   "Status.EmulatorLocating": "Emulátor: keresés…",
   "Status.EmulatorPath": "Emulátor: {0}",
-  "Status.EmulatorNotFound": "Emulátor: a SharpEmu futtatható fájl nem található — előbb építsd fel a SharpEmu.CLI-t.",
+  "Status.EmulatorNotFound": "Emulátor: a Touché PX5 futtatható fájl nem található — előbb építsd fel a TouchePx5-t.",
   "Status.ScanningLibrary": "Könyvtár beolvasása…",
   "Status.AddFolderPrompt": "Adj hozzá egy játékmappát a könyvtár feltöltéséhez.",
   "Status.LibraryScanned": "Könyvtár beolvasva: {0} játék {1} mappában.",
@@ -152,7 +152,7 @@
   "PerGame.Title": "Játékonkénti beállítások — {0} ({1})",
   "PerGame.InheritNote": "A be nem jelölt sorok a globális alapértelmezéseket öröklik.",
   "PerGame.EnvToggles.Label": "Környezeti kapcsolók",
-  "PerGame.EnvToggles.Desc": "A globális SHARPEMU_* kapcsolókészlet felülírása ennél a játéknál.",
+  "PerGame.EnvToggles.Desc": "A globális TOUCHEPX5_* kapcsolókészlet felülírása ennél a játéknál.",
   "About.Github.LatestCommitLabel": "Legutóbbi commit",
   "About.Github.LatestCommitDescription": "A main ág legutóbbi commitja",
   "Updater.Auto.Label": "Frissítések keresése indításkor",

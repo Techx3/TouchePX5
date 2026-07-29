@@ -77,7 +77,7 @@
   "Console.Split": "Teilen",
   "Console.Copy": "Kopieren",
   "Console.Clear": "Leeren",
-  "Console.WindowTitle": "SharpEmu Konsole",
+  "Console.WindowTitle": "Touché PX5 Konsole",
 
   "Launch.NoGameSelected": "Kein Spiel ausgewählt",
   "Launch.NoGameHint": "Wähle ein Spiel aus der Bibliothek aus oder öffne eine eboot.bin direkt.",
@@ -88,9 +88,9 @@
   "Launch.Running": "Läuft -- {0}",
   "Launch.Stopping": "Wird beendet…",
   "Launch.Exited": "Beendet mit Code {0} ({1})",
-  "Launch.ExeNotFound": "SharpEmu-Executable wurde nicht gefunden. Baue zuerst das SharpEmu.CLI-Projekt (dotnet build).",
+  "Launch.ExeNotFound": "Touché PX5-Executable wurde nicht gefunden. Baue zuerst das TouchePx5-Projekt (dotnet build).",
   "Launch.LogFile": "Log-Datei: {0}",
-  "Launch.Command": "$ SharpEmu {0}",
+  "Launch.Command": "$ TouchePx5 {0}",
   "Launch.StartFailed": "Emulator konnte nicht gestartet werden: {0}",
   "Launch.ProcessExited": "Prozess wurde mit Code {0} ({1}) beendet.",
 
@@ -103,7 +103,7 @@
 
   "Status.EmulatorLocating": "Emulator: wird gesucht…",
   "Status.EmulatorPath": "Emulator: {0}",
-  "Status.EmulatorNotFound": "Emulator: SharpEmu-Executable nicht gefunden -- baue zuerst SharpEmu.CLI.",
+  "Status.EmulatorNotFound": "Emulator: Touché PX5-Executable nicht gefunden -- baue zuerst TouchePx5.",
   "Status.ScanningLibrary": "Bibliothek wird gescannt…",
   "Status.AddFolderPrompt": "Füge einen Spielordner hinzu, um die Bibliothek zu füllen.",
   "Status.LibraryScanned": "Bibliothek gescannt: {0} Spiel(e) in {1} Ordner(n).",
@@ -144,7 +144,7 @@
   "PerGame.Title": "Spielspezifische Einstellungen — {0} ({1})",
   "PerGame.InheritNote": "Nicht angehakte Zeilen übernehmen die globalen Standardwerte.",
   "PerGame.EnvToggles.Label": "Umgebungsschalter",
-  "PerGame.EnvToggles.Desc": "Die globalen SHARPEMU_*-Schalter für dieses Spiel überschreiben.",
+  "PerGame.EnvToggles.Desc": "Die globalen TOUCHEPX5_*-Schalter für dieses Spiel überschreiben.",
   "Options.About": "Über",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Quellcode, Issues und Projektentwicklung.",

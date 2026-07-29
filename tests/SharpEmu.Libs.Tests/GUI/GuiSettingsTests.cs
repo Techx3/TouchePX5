@@ -26,7 +26,7 @@ public sealed class GuiSettingsTests
 
         Assert.Equal("Info", settings.LogLevel);
         Assert.Equal("en", settings.Language);
-        Assert.Equal("1525606762248540221", settings.DiscordClientId);
+        Assert.Equal(string.Empty, settings.DiscordClientId);
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
         Assert.Empty(settings.EnvironmentToggles);
@@ -53,7 +53,7 @@ public sealed class GuiSettingsTests
         Assert.Equal("999", settings.DiscordClientId);
         Assert.Equal(["C:\\Games"], settings.GameFolders);
         Assert.Equal(["C:\\Games\\skip.bin"], settings.ExcludedGames);
-        Assert.Equal(["SHARPEMU_TRACE"], settings.EnvironmentToggles);
+        Assert.Equal(["TOUCHEPX5_TRACE"], settings.EnvironmentToggles);
     }
 
     // An empty Discord client ID intentionally disables Rich Presence.
@@ -82,7 +82,7 @@ public sealed class GuiSettingsTests
 
         Assert.Equal(["C:\\Games"], settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
-        Assert.Equal(["SHARPEMU_TRACE"], settings.EnvironmentToggles);
+        Assert.Equal(["TOUCHEPX5_TRACE"], settings.EnvironmentToggles);
     }
 
     [Fact]
@@ -92,9 +92,35 @@ public sealed class GuiSettingsTests
 
         Assert.Equal("Info", settings.LogLevel);
         Assert.Equal("en", settings.Language);
-        Assert.Equal("1525606762248540221", settings.DiscordClientId);
+        Assert.Equal(string.Empty, settings.DiscordClientId);
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
         Assert.Empty(settings.EnvironmentToggles);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData("  NVIDIA GeForce RTX 4080  ", "NVIDIA GeForce RTX 4080")]
+    public void NormalizeFromJson_VulkanDevice_IsNormalized(string? input, string? expected)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(new { VulkanDevice = input });
+
+        var settings = GuiSettings.NormalizeFromJson(json);
+
+        Assert.Equal(expected, settings.VulkanDevice);
+    }
+
+    [Fact]
+    public void NormalizeFromJson_LegacySharpEmuDiscordApplication_IsDisabled()
+    {
+        const string json = """
+            { "DiscordRichPresence": true, "DiscordClientId": "1525606762248540221" }
+            """;
+
+        var settings = GuiSettings.NormalizeFromJson(json);
+
+        Assert.False(settings.DiscordRichPresence);
+        Assert.Equal(string.Empty, settings.DiscordClientId);
     }
 }

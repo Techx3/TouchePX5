@@ -22,8 +22,11 @@ public static class AudioOutExports
 
     private static readonly ConcurrentDictionary<int, PortState> Ports = new();
     private static readonly ConcurrentDictionary<ulong, long> AvPlayerBufferSessions = new();
+    private static readonly object AvPlayerDirectAudioGate = new();
     private static int _nextPortHandle;
     private static long _activeAvPlayerAudioSession;
+    private static long _directAvPlayerAudioSession;
+    private static IHostAudioStream? _avPlayerDirectBackend;
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
 
     // Diagnostic: confirm sceAudioOutOutput is actually called and whether the
@@ -63,6 +66,7 @@ public static class AudioOutExports
             BytesPerSample = bytesPerSample;
             IsFloat = isFloat;
             Backend = backend;
+            ChannelVolumes = Enumerable.Repeat(1.0f, channels).ToArray();
         }
 
         public int UserId { get; }
@@ -76,6 +80,7 @@ public static class AudioOutExports
         public IHostAudioStream? Backend { get; }
         public object SubmissionGate { get; } = new();
         public volatile float Volume = 1.0f;
+        public float[] ChannelVolumes { get; }
         public volatile bool Suppressed;
         public long AvPlayerSessionGeneration;
         public int BufferByteLength =>
@@ -327,7 +332,7 @@ public static class AudioOutExports
 
             ActivateAvPlayerPortForBuffer(handle, port, sourceAddress);
 
-            if (port.Suppressed)
+            if (ShouldSuppressOutput(port))
             {
                 port.PaceSilence();
                 return ctx.SetReturn(0);
@@ -350,7 +355,7 @@ public static class AudioOutExports
                     port.Channels,
                     port.BytesPerSample,
                     port.IsFloat,
-                    port.Volume);
+                    port.ChannelVolumes);
                 if (_dumpPath is { } dumpPath)
                 {
                     lock (_dumpGate)
@@ -492,7 +497,7 @@ public static class AudioOutExports
 
                     TraceOutput(output.Handle, output.Port, source);
 
-                    if (output.Port.Suppressed)
+                    if (ShouldSuppressOutput(output.Port))
                     {
                         continue;
                     }
@@ -507,7 +512,7 @@ public static class AudioOutExports
                         output.Port.Channels,
                         output.Port.BytesPerSample,
                         output.Port.IsFloat,
-                        output.Port.Volume);
+                        output.Port.ChannelVolumes);
                 }
                 finally
                 {
@@ -561,20 +566,27 @@ public static class AudioOutExports
         (ulong)candidate.BufferLength * current.Frequency >
         (ulong)current.BufferLength * candidate.Frequency;
 
-    /// <summary>Starts a movie-audio generation and drains every older movie port.</summary>
+    /// <summary>
+    /// Starts a movie-audio generation, drains queued game audio, and gives the
+    /// active movie exclusive access to the host output until the session ends.
+    /// </summary>
     internal static void BeginAvPlayerAudioSession(long generation)
     {
         Volatile.Write(ref _activeAvPlayerAudioSession, generation);
+        AudioOut2Exports.SetAvPlayerAudioExclusive(true);
+        lock (AvPlayerDirectAudioGate)
+        {
+            Volatile.Write(ref _directAvPlayerAudioSession, 0);
+            _avPlayerDirectBackend?.Reset();
+        }
         foreach (var port in Ports.Values)
         {
-            if (Volatile.Read(ref port.AvPlayerSessionGeneration) == 0)
-            {
-                continue;
-            }
-
             lock (port.SubmissionGate)
             {
-                port.Suppressed = true;
+                if (port.AvPlayerSessionGeneration != 0)
+                {
+                    port.Suppressed = true;
+                }
                 port.Backend?.Reset();
             }
         }
@@ -592,9 +604,66 @@ public static class AudioOutExports
         }
     }
 
+    internal static bool SubmitAvPlayerAudioFrame(long generation, ReadOnlySpan<byte> stereoPcm16)
+    {
+        if (generation == 0 || stereoPcm16.IsEmpty ||
+            generation != Volatile.Read(ref _activeAvPlayerAudioSession))
+        {
+            return false;
+        }
+
+        lock (AvPlayerDirectAudioGate)
+        {
+            if (generation != Volatile.Read(ref _activeAvPlayerAudioSession))
+            {
+                return false;
+            }
+
+            if (_avPlayerDirectBackend is null)
+            {
+                try
+                {
+                    var streamFactory = Volatile.Read(ref _streamFactoryForTests);
+                    _avPlayerDirectBackend = streamFactory is not null
+                        ? streamFactory(48_000)
+                        : HostPlatform.Current.Audio.OpenStereoPcm16Stream(48_000);
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine(
+                        $"[AVPLAYER][WARN] Direct movie audio unavailable: {exception.Message}");
+                    return false;
+                }
+            }
+
+            if (_avPlayerDirectBackend is null || !_avPlayerDirectBackend.Submit(stereoPcm16))
+            {
+                return false;
+            }
+
+            Volatile.Write(ref _directAvPlayerAudioSession, generation);
+            return true;
+        }
+    }
+
     internal static void EndAvPlayerAudioSession(long generation)
     {
-        Interlocked.CompareExchange(ref _activeAvPlayerAudioSession, 0, generation);
+        var endedActiveSession = Interlocked.CompareExchange(
+            ref _activeAvPlayerAudioSession,
+            0,
+            generation) == generation;
+        if (endedActiveSession)
+        {
+            AudioOut2Exports.SetAvPlayerAudioExclusive(false);
+            lock (AvPlayerDirectAudioGate)
+            {
+                if (Volatile.Read(ref _directAvPlayerAudioSession) == generation)
+                {
+                    _avPlayerDirectBackend?.Reset();
+                    Volatile.Write(ref _directAvPlayerAudioSession, 0);
+                }
+            }
+        }
         foreach (var pair in AvPlayerBufferSessions)
         {
             if (pair.Value == generation)
@@ -609,8 +678,17 @@ public static class AudioOutExports
             {
                 if (port.AvPlayerSessionGeneration == generation)
                 {
+                    // The movie port must never leak decoded PCM after its
+                    // AVPlayer generation has ended.
                     port.Suppressed = true;
                     port.Backend?.Reset();
+                }
+                else if (endedActiveSession && port.AvPlayerSessionGeneration == 0)
+                {
+                    // Regular game/menu ports are only muted while AVPlayer is
+                    // active.  Resume them when a preview finishes; permanently
+                    // retiring them here also removes the collection music.
+                    port.Suppressed = false;
                 }
             }
         }
@@ -665,6 +743,38 @@ public static class AudioOutExports
         }
     }
 
+    private static bool ShouldSuppressOutput(PortState port)
+    {
+        if (port.Suppressed)
+        {
+            return true;
+        }
+
+        var activeGeneration = Volatile.Read(ref _activeAvPlayerAudioSession);
+        if (activeGeneration == 0)
+        {
+            return false;
+        }
+
+        var portGeneration = Volatile.Read(ref port.AvPlayerSessionGeneration);
+        if (portGeneration == 0)
+        {
+            // AVPlayer owns the host output while a movie is active. Letting an
+            // unclassified game port through also keeps the menu music alive,
+            // because AudioOut does not expose individual music/effect voices.
+            return true;
+        }
+
+        if (portGeneration != activeGeneration)
+        {
+            return true;
+        }
+
+        // Prefer the PCM decoded directly by AVPlayer. If that backend could
+        // not be opened, retain the tagged guest AudioOut port as a fallback.
+        return Volatile.Read(ref _directAvPlayerAudioSession) == activeGeneration;
+    }
+
     private static void TraceOutput(int handle, PortState port, ReadOnlySpan<byte> source)
     {
         if (!_traceOutput)
@@ -699,6 +809,7 @@ public static class AudioOutExports
         const int unityVolume = 32768;
         var maxVolume = 0;
         var found = false;
+        Span<int> values = stackalloc int[8];
         if (volumeArrayAddress != 0)
         {
             Span<byte> raw = stackalloc byte[sizeof(int)];
@@ -715,6 +826,7 @@ public static class AudioOutExports
                 }
 
                 var value = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(raw);
+                values[channel] = value;
                 maxVolume = Math.Max(maxVolume, value);
                 found = true;
             }
@@ -722,7 +834,21 @@ public static class AudioOutExports
 
         if (found)
         {
-            port.Volume = Math.Clamp(maxVolume / (float)unityVolume, 0f, 1f);
+            lock (port.SubmissionGate)
+            {
+                for (var channel = 0; channel < port.ChannelVolumes.Length && channel < 8; channel++)
+                {
+                    if ((channelFlags & (1u << channel)) != 0)
+                    {
+                        port.ChannelVolumes[channel] = Math.Clamp(
+                            values[channel] / (float)unityVolume,
+                            0f,
+                            1f);
+                    }
+                }
+
+                port.Volume = port.ChannelVolumes.Max();
+            }
         }
 
         return ctx.SetReturn(0);
@@ -769,6 +895,8 @@ public static class AudioOutExports
                 port.Dispose();
             }
         }
+        DisposeAvPlayerDirectBackend();
+        AudioOut2Exports.SetAvPlayerAudioExclusive(false);
     }
 
     internal static void SetStreamFactoryForTests(Func<uint, IHostAudioStream?>? streamFactory) =>
@@ -788,8 +916,20 @@ public static class AudioOutExports
         _outputCount = 0;
         AvPlayerBufferSessions.Clear();
         Volatile.Write(ref _activeAvPlayerAudioSession, 0);
+        DisposeAvPlayerDirectBackend();
+        AudioOut2Exports.SetAvPlayerAudioExclusive(false);
         Volatile.Write(ref _shutdown, false);
         Volatile.Write(ref _streamFactoryForTests, null);
+    }
+
+    private static void DisposeAvPlayerDirectBackend()
+    {
+        lock (AvPlayerDirectAudioGate)
+        {
+            _avPlayerDirectBackend?.Dispose();
+            _avPlayerDirectBackend = null;
+            Volatile.Write(ref _directAvPlayerAudioSession, 0);
+        }
     }
 
     private static bool _shutdown;

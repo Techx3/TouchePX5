@@ -111,9 +111,9 @@ release includes the MoltenVK Vulkan implementation.
 
 1. Install the .NET SDK version specified in [`global.json`](./global.json).
 2. Clone the repository: `git clone https://github.com/Techx3/TouchePX5.git`
-3. Restore dependencies: `dotnet restore SharpEmu.slnx`
-4. Build: `dotnet build SharpEmu.slnx -c Release --no-restore`
-5. Test: `dotnet test SharpEmu.slnx -c Release --no-build`
+3. Restore dependencies: `dotnet restore TouchePx5.slnx`
+4. Build: `dotnet build TouchePx5.slnx -c Release --no-restore`
+5. Test: `dotnet test TouchePx5.slnx -c Release --no-build`
 
 Build artifacts are written to the `artifacts` directory.
 

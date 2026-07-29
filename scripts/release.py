@@ -14,7 +14,7 @@ from pathlib import Path
 
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 VERSION_ELEMENT_PATTERN = re.compile(
-    r"(<SharpEmuVersion>)([^<]+)(</SharpEmuVersion>)"
+    r"(<TouchePx5Version>)([^<]+)(</TouchePx5Version>)"
 )
 
 
@@ -166,7 +166,7 @@ def read_version(props_path: Path) -> str:
 
     if match is None:
         raise ReleaseError(
-            f"SharpEmuVersion was not found in {props_path.name}."
+            f"TouchePx5Version was not found in {props_path.name}."
         )
 
     return match.group(2).strip()
@@ -178,7 +178,7 @@ def update_version(props_path: Path, version: str) -> str:
 
     if current_version == version:
         raise ReleaseError(
-            f"SharpEmuVersion is already set to {version}."
+            f"TouchePx5Version is already set to {version}."
         )
 
     updated_content, replacement_count = VERSION_ELEMENT_PATTERN.subn(
@@ -189,7 +189,7 @@ def update_version(props_path: Path, version: str) -> str:
 
     if replacement_count != 1:
         raise ReleaseError(
-            "Expected exactly one SharpEmuVersion element."
+            "Expected exactly one TouchePx5Version element."
         )
 
     props_path.write_text(

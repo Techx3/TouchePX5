@@ -51,7 +51,7 @@ jobs:
         run: |
           short_sha="${GITHUB_SHA::7}"
           safe_ref="$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g')"
-          version="$(python3 -c 'import sys, xml.etree.ElementTree as ET; version = ET.parse("Directory.Build.props").getroot().findtext(".//SharpEmuVersion"); sys.exit("Directory.Build.props is missing SharpEmuVersion") if not version or not version.strip() else print(version.strip())')"
+          version="$(python3 -c 'import sys, xml.etree.ElementTree as ET; version = ET.parse("Directory.Build.props").getroot().findtext(".//TouchePx5Version"); sys.exit("Directory.Build.props is missing TouchePx5Version") if not version or not version.strip() else print(version.strip())')"
           release_tag="v${version}"
           release_name="Touché PX5 v${version}"
 
@@ -103,16 +103,16 @@ jobs:
             Directory.Build.props
 
       - name: Restore solution
-        run: dotnet restore SharpEmu.slnx
+        run: dotnet restore TouchePx5.slnx
 
       - name: Build solution
-        run: dotnet build SharpEmu.slnx -c Release --no-restore
+        run: dotnet build TouchePx5.slnx -c Release --no-restore
 
       # Runs every test project in the solution; a test failure fails the build, as
       # does an aerolib.bin generation failure in the build step above (the MSBuild
       # task logs an error and returns false).
       - name: Run tests
-        run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
+        run: dotnet test TouchePx5.slnx -c Release --no-build --verbosity normal
 
       - name: Validate synthetic shaders
         run: dotnet run --project tools/SharpEmu.Tools.ShaderDump/SharpEmu.Tools.ShaderDump.csproj -c Release -- artifacts/shader-dump
@@ -165,15 +165,15 @@ jobs:
             Directory.Build.props
 
       - name: Restore solution
-        run: dotnet restore SharpEmu.slnx
+        run: dotnet restore TouchePx5.slnx
 
       - name: Build solution
-        run: dotnet build SharpEmu.slnx -c Release --no-restore
+        run: dotnet build TouchePx5.slnx -c Release --no-restore
 
       # Also runs on Linux/macOS: the aerolib.bin MSBuild task does platform-sensitive
       # path handling, so a cross-platform generation regression surfaces here.
       - name: Run tests
-        run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
+        run: dotnet test TouchePx5.slnx -c Release --no-build --verbosity normal
 
       - name: Build pinned SPIRV-Tools
         if: matrix.rid == 'linux-x64'

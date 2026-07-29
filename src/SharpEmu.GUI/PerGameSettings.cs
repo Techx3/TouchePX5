@@ -65,7 +65,11 @@ public sealed class PerGameSettings
         var settings = JsonSerializer.Deserialize<PerGameSettings>(json, SerializerOptions);
         if (settings?.EnvironmentToggles is { } toggles)
         {
-            settings.EnvironmentToggles = toggles.Where(entry => !string.IsNullOrEmpty(entry)).ToList();
+            settings.EnvironmentToggles = toggles
+                .Where(entry => !string.IsNullOrEmpty(entry))
+                .Select(GuiSettings.NormalizeEnvironmentToggle)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         return settings;
