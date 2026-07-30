@@ -647,7 +647,7 @@ public static class FiberExports
                     return SetReturn(ctx, FiberErrorPermission);
                 }
 
-                _threadStates[threadKey] = new FiberThreadState(callerContinuation, fiber, previousFiber);
+                _threadStates[threadKey] = new FiberThreadState(callerContinuation, fiber);
             }
 
             if (!TryWriteUInt32(ctx, fiber + FiberStateOffset, FiberStateRun))
@@ -672,11 +672,7 @@ public static class FiberExports
             transferTarget = targetContinuation.Context with { Rax = 0 };
             if (_threadStates.TryGetValue(threadKey, out var activeState))
             {
-                _threadStates[threadKey] = activeState with
-                {
-                    CurrentFiber = fiber,
-                    PreviousFiber = previousFiber,
-                };
+                activeState.CurrentFiber = fiber;
             }
         }
 
@@ -1201,10 +1197,20 @@ public static class FiberExports
         GuestCpuContinuation Context,
         ulong ArgOnRunAddress);
 
-    private sealed record FiberThreadState(
-        FiberContinuation RootContinuation,
-        ulong CurrentFiber,
-        ulong PreviousFiber);
+    private sealed class FiberThreadState(
+        FiberContinuation rootContinuation,
+        ulong currentFiber)
+    {
+        private long _currentFiber = unchecked((long)currentFiber);
+
+        public FiberContinuation RootContinuation { get; } = rootContinuation;
+
+        public ulong CurrentFiber
+        {
+            get => unchecked((ulong)Volatile.Read(ref _currentFiber));
+            set => Volatile.Write(ref _currentFiber, unchecked((long)value));
+        }
+    }
 
     private readonly record struct FiberStackRange(ulong Start, ulong Size)
     {
