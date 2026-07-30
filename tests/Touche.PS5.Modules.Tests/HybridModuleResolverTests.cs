@@ -89,6 +89,34 @@ public sealed class HybridModuleResolverTests
     }
 
     [Fact]
+    public void RequestOverrideTakesPrecedenceOverPolicyOverride()
+    {
+        var catalog = CreateCatalog(CreateModule("/system/common/lib/libExample.sprx"));
+        var policy = new ModuleResolutionPolicy
+        {
+            HleModules = [new HleModuleDescriptor("libExample.sprx", HleImplementationQuality.CompleteStable)],
+            LleCompatibility = [CreateCompatibility()],
+            GameOverrides =
+            [
+                new GameModuleResolutionOverride("PPSA00003", "libExample.sprx", ModuleResolutionMode.LleOnly),
+            ],
+        };
+        var resolver = new HybridModuleResolver(catalog, policy);
+        var request = CreateRequest(ModuleResolutionMode.Auto, "PPSA00003") with
+        {
+            GameOverrides =
+            [
+                new GameModuleResolutionOverride("PPSA00003", "libExample.sprx", ModuleResolutionMode.HleOnly),
+            ],
+        };
+
+        var decision = resolver.Resolve(request);
+
+        Assert.Equal(ModuleResolutionMode.HleOnly, decision.EffectiveMode);
+        Assert.Equal(ModuleImplementationKind.Hle, decision.SelectedImplementation);
+    }
+
+    [Fact]
     public void AutoUsesControlledStubBeforeLeavingImportUnresolved()
     {
         var withStub = CreateResolver(HleImplementationQuality.ControlledStub, compatible: false);
@@ -131,6 +159,22 @@ public sealed class HybridModuleResolverTests
             CreateCatalog(CreateModule("/system/lib/libExample.sprx")),
             [],
             [record, duplicate]));
+    }
+
+    [Fact]
+    public void DuplicatePolicyOverridesAreRejectedCaseInsensitivelyByTitle()
+    {
+        var overrides = new[]
+        {
+            new GameModuleResolutionOverride("PPSA00004", "libExample.sprx", ModuleResolutionMode.HleOnly),
+            new GameModuleResolutionOverride("ppsa00004", "libExample.sprx", ModuleResolutionMode.LleOnly),
+        };
+
+        Assert.Throws<InvalidDataException>(() => new HybridModuleResolver(
+            catalog: null,
+            hleModules: [],
+            compatibilityRecords: [],
+            gameOverrides: overrides));
     }
 
     [Fact]

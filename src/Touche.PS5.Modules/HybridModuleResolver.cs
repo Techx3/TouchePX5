@@ -14,15 +14,27 @@ public sealed class HybridModuleResolver
     private readonly FirmwareModuleCatalog? _catalog;
     private readonly IReadOnlyDictionary<string, HleModuleDescriptor> _hleModules;
     private readonly IReadOnlyDictionary<CompatibilityKey, LleCompatibilityRecord> _compatibility;
+    private readonly IReadOnlyList<GameModuleResolutionOverride> _gameOverrides;
 
     public HybridModuleResolver(
         FirmwareModuleCatalog? catalog,
         IEnumerable<HleModuleDescriptor>? hleModules = null,
-        IEnumerable<LleCompatibilityRecord>? compatibilityRecords = null)
+        IEnumerable<LleCompatibilityRecord>? compatibilityRecords = null,
+        IEnumerable<GameModuleResolutionOverride>? gameOverrides = null)
     {
         _catalog = catalog;
         _hleModules = BuildHleIndex(hleModules ?? []);
         _compatibility = BuildCompatibilityIndex(compatibilityRecords ?? []);
+        _gameOverrides = BuildOverrideList(gameOverrides ?? []);
+    }
+
+    public HybridModuleResolver(FirmwareModuleCatalog? catalog, ModuleResolutionPolicy policy)
+        : this(
+            catalog,
+            ValidatePolicy(policy).HleModules,
+            policy.LleCompatibility,
+            policy.GameOverrides)
+    {
     }
 
     public ModuleResolutionDecision Resolve(ModuleResolutionRequest request)
@@ -332,7 +344,7 @@ public sealed class HybridModuleResolver
         };
     }
 
-    private static (ModuleResolutionMode Mode, bool OverrideApplied) GetEffectiveMode(
+    private (ModuleResolutionMode Mode, bool OverrideApplied) GetEffectiveMode(
         ModuleResolutionRequest request,
         string canonicalName)
     {
@@ -341,18 +353,48 @@ public sealed class HybridModuleResolver
             return (request.RequestedMode, false);
         }
 
-        var matches = request.GameOverrides.Where(item =>
+        var requestOverride = FindOverride(request.GameOverrides, request, canonicalName);
+        if (requestOverride is not null)
+        {
+            return (requestOverride.Mode, true);
+        }
+
+        var policyOverride = FindOverride(_gameOverrides, request, canonicalName);
+        return policyOverride is null
+            ? (request.RequestedMode, false)
+            : (policyOverride.Mode, true);
+    }
+
+    private static GameModuleResolutionOverride? FindOverride(
+        IEnumerable<GameModuleResolutionOverride> overrides,
+        ModuleResolutionRequest request,
+        string canonicalName)
+    {
+        var matches = overrides.Where(item =>
                 string.Equals(item.TitleId, request.TitleId, StringComparison.OrdinalIgnoreCase) &&
                 (string.Equals(item.ModuleName, request.ModuleName, StringComparison.Ordinal) ||
                  string.Equals(item.ModuleName, canonicalName, StringComparison.Ordinal)))
             .ToArray();
         return matches.Length switch
         {
-            0 => (request.RequestedMode, false),
-            1 => (matches[0].Mode, true),
+            0 => null,
+            1 => matches[0],
             _ => throw new InvalidDataException(
                 $"Multiple module resolution overrides match {request.TitleId}/{request.ModuleName}."),
         };
+    }
+
+    private static ModuleResolutionPolicy ValidatePolicy(ModuleResolutionPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        if (policy.SchemaVersion != ModuleResolutionPolicy.CurrentSchemaVersion ||
+            policy.HleModules is null ||
+            policy.LleCompatibility is null ||
+            policy.GameOverrides is null)
+        {
+            throw new InvalidDataException("The module resolution policy is invalid or unsupported.");
+        }
+        return policy;
     }
 
     private static IReadOnlyDictionary<string, HleModuleDescriptor> BuildHleIndex(
@@ -361,6 +403,7 @@ public sealed class HybridModuleResolver
         var result = new Dictionary<string, HleModuleDescriptor>(StringComparer.Ordinal);
         foreach (var descriptor in descriptors)
         {
+            ArgumentNullException.ThrowIfNull(descriptor);
             ValidateSimpleModuleName(descriptor.ModuleName, nameof(descriptors));
             if (!Enum.IsDefined(descriptor.Quality))
             {
@@ -380,6 +423,7 @@ public sealed class HybridModuleResolver
         var result = new Dictionary<CompatibilityKey, LleCompatibilityRecord>();
         foreach (var record in records)
         {
+            ArgumentNullException.ThrowIfNull(record);
             if (string.IsNullOrWhiteSpace(record.ModuleHash) ||
                 record.ModuleHash.Length != 64 ||
                 !record.ModuleHash.All(char.IsAsciiHexDigit))
@@ -416,6 +460,32 @@ public sealed class HybridModuleResolver
             }
         }
         return result;
+    }
+
+    private static IReadOnlyList<GameModuleResolutionOverride> BuildOverrideList(
+        IEnumerable<GameModuleResolutionOverride> overrides)
+    {
+        var result = new List<GameModuleResolutionOverride>();
+        var keys = new HashSet<(string TitleId, string ModuleName)>(
+            OverrideKeyComparer.Instance);
+        foreach (var item in overrides)
+        {
+            ArgumentNullException.ThrowIfNull(item);
+            ArgumentException.ThrowIfNullOrWhiteSpace(item.TitleId);
+            ValidateModuleName(item.ModuleName, nameof(overrides));
+            if (!Enum.IsDefined(item.Mode))
+            {
+                throw new InvalidDataException(
+                    $"Invalid module override mode for {item.TitleId}/{item.ModuleName}.");
+            }
+            if (!keys.Add((item.TitleId, item.ModuleName)))
+            {
+                throw new InvalidDataException(
+                    $"Duplicate module resolution override for {item.TitleId}/{item.ModuleName}.");
+            }
+            result.Add(item);
+        }
+        return result.ToArray();
     }
 
     private static void ValidateRequest(ModuleResolutionRequest request)
@@ -464,6 +534,22 @@ public sealed class HybridModuleResolver
     }
 
     private readonly record struct CompatibilityKey(string Hash, string FirmwareProfileId, string CoreVersion);
+
+    private sealed class OverrideKeyComparer : IEqualityComparer<(string TitleId, string ModuleName)>
+    {
+        public static OverrideKeyComparer Instance { get; } = new();
+
+        public bool Equals(
+            (string TitleId, string ModuleName) x,
+            (string TitleId, string ModuleName) y) =>
+            string.Equals(x.TitleId, y.TitleId, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(x.ModuleName, y.ModuleName, StringComparison.Ordinal);
+
+        public int GetHashCode((string TitleId, string ModuleName) value) =>
+            HashCode.Combine(
+                StringComparer.OrdinalIgnoreCase.GetHashCode(value.TitleId),
+                StringComparer.Ordinal.GetHashCode(value.ModuleName));
+    }
 
     private readonly record struct ModuleLookup(FirmwareModule? Module, bool Ambiguous);
 

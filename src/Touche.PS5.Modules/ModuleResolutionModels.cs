@@ -66,6 +66,19 @@ public sealed record GameModuleResolutionOverride(
     string ModuleName,
     ModuleResolutionMode Mode);
 
+public sealed record ModuleResolutionPolicy
+{
+    public const int CurrentSchemaVersion = 1;
+
+    public int SchemaVersion { get; init; } = CurrentSchemaVersion;
+
+    public IReadOnlyList<HleModuleDescriptor> HleModules { get; init; } = [];
+
+    public IReadOnlyList<LleCompatibilityRecord> LleCompatibility { get; init; } = [];
+
+    public IReadOnlyList<GameModuleResolutionOverride> GameOverrides { get; init; } = [];
+}
+
 public sealed record ModuleResolutionRequest
 {
     public required string ModuleName { get; init; }
