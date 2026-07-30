@@ -30,6 +30,8 @@ internal sealed unsafe class FfmpegNativeBinkFrameSource : IBinkFrameDecoder
 
     public uint FramesPerSecondDenominator { get; }
 
+    public BinkFramePixelFormat PixelFormat => BinkFramePixelFormat.Nv12;
+
     private FfmpegNativeBinkFrameSource(
         AVFormatContext* formatContext,
         AVCodecContext* codecContext,
@@ -171,6 +173,12 @@ internal sealed unsafe class FfmpegNativeBinkFrameSource : IBinkFrameDecoder
                 outputHeight = Math.Max(1, outputHeight);
             }
 
+            // NV12 requires even plane dimensions. Keeping the native bridge
+            // even also lets swscale write both planes directly into the
+            // playback buffer without a BGRA round trip on the render thread.
+            outputWidth = Math.Max(2u, outputWidth & ~1u);
+            outputHeight = Math.Max(2u, outputHeight & ~1u);
+
             source = new FfmpegNativeBinkFrameSource(
                 formatContext,
                 codecContext,
@@ -203,8 +211,12 @@ internal sealed unsafe class FfmpegNativeBinkFrameSource : IBinkFrameDecoder
 
     public bool TryDecodeNextFrame(Span<byte> destination)
     {
-        var stride = checked((int)(Width * 4));
-        var required = (long)stride * Height;
+        var stride = checked((int)Width);
+        var lumaBytes = checked((int)((ulong)Width * Height));
+        var required = BinkFramePlayback.GetFrameBufferLength(
+            Width,
+            Height,
+            BinkFramePixelFormat.Nv12);
         if (destination.Length < required)
         {
             return false;
@@ -222,7 +234,7 @@ internal sealed unsafe class FfmpegNativeBinkFrameSource : IBinkFrameDecoder
             (AVPixelFormat)_frame->format,
             (int)Width,
             (int)Height,
-            AVPixelFormat.AV_PIX_FMT_BGRA,
+            AVPixelFormat.AV_PIX_FMT_NV12,
             ffmpeg.SWS_FAST_BILINEAR,
             null,
             null,
@@ -235,8 +247,14 @@ internal sealed unsafe class FfmpegNativeBinkFrameSource : IBinkFrameDecoder
 
         fixed (byte* destinationPointer = destination)
         {
-            var destinationPlanes = new byte*[4] { destinationPointer, null, null, null };
-            var destinationStrides = new int[4] { stride, 0, 0, 0 };
+            var destinationPlanes = new byte*[4]
+            {
+                destinationPointer,
+                destinationPointer + lumaBytes,
+                null,
+                null,
+            };
+            var destinationStrides = new int[4] { stride, stride, 0, 0 };
             var convertedRows = ffmpeg.sws_scale(
                 _swsContext,
                 _frame->data,

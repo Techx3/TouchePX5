@@ -36,6 +36,8 @@ internal sealed class FfmpegBinkFrameSource : IBinkFrameDecoder
 
     public uint FramesPerSecondDenominator { get; }
 
+    public BinkFramePixelFormat PixelFormat => BinkFramePixelFormat.Bgra;
+
     internal static bool IsAvailable => AvPlayerExports.FindFfmpeg() is not null;
 
     internal static bool TryOpen(

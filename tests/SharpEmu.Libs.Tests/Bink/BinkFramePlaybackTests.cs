@@ -8,6 +8,24 @@ namespace SharpEmu.Libs.Tests.Bink;
 
 public sealed class BinkFramePlaybackTests
 {
+    [Theory]
+    [InlineData(2u, 2u, 0, 16)]
+    [InlineData(2u, 2u, 1, 6)]
+    [InlineData(1920u, 1080u, 1, 3_110_400)]
+    public void AllocatesFrameBuffersForDecoderPixelFormat(
+        uint width,
+        uint height,
+        int pixelFormat,
+        int expectedLength)
+    {
+        Assert.Equal(
+            expectedLength,
+            BinkFramePlayback.GetFrameBufferLength(
+                width,
+                height,
+                (BinkFramePixelFormat)pixelFormat));
+    }
+
     [Fact]
     public void FramesAdvanceAccordingToMovieClock()
     {
@@ -88,6 +106,8 @@ public sealed class BinkFramePlaybackTests
         public uint FramesPerSecondNumerator => 2;
 
         public uint FramesPerSecondDenominator => 1;
+
+        public BinkFramePixelFormat PixelFormat => BinkFramePixelFormat.Bgra;
 
         public bool TryDecodeNextFrame(Span<byte> destination)
         {

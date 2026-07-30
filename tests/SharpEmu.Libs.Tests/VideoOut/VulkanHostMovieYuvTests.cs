@@ -9,6 +9,24 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class VulkanHostMovieYuvTests
 {
     [Fact]
+    public void SplitsNativeNv12FrameWithoutColorConversion()
+    {
+        var frame = new byte[] { 1, 2, 3, 4, 5, 6 };
+        var luma = new byte[4];
+        var chroma = new byte[2];
+
+        VulkanVideoPresenter.CopyNv12Planes(
+            frame,
+            width: 2,
+            height: 2,
+            luma,
+            chroma);
+
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, luma);
+        Assert.Equal(new byte[] { 5, 6 }, chroma);
+    }
+
+    [Fact]
     public void ConvertsBgraChromaToNv12UvOrder()
     {
         var blueBgra = new byte[]

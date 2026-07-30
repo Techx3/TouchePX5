@@ -27,6 +27,7 @@ internal static class Bink2MovieBridge
     private static byte[]? _frameBuffer;
     private static bool _frameBufferPresented;
     private static BinkFramePlayback? _playback;
+    private static BinkFramePixelFormat _activePixelFormat = BinkFramePixelFormat.Bgra;
     private static long _frameSerial;
     private static uint _presentationWidth = MaxHostVideoWidth;
     private static uint _presentationHeight = MaxHostVideoHeight;
@@ -115,7 +116,8 @@ internal static class Bink2MovieBridge
         out uint height,
         out bool advanced,
         out long frameSerial,
-        out string hostPath)
+        out string hostPath,
+        out BinkFramePixelFormat pixelFormat)
     {
         lock (Gate)
         {
@@ -125,6 +127,7 @@ internal static class Bink2MovieBridge
             advanced = false;
             frameSerial = _frameSerial;
             hostPath = _activePath ?? string.Empty;
+            pixelFormat = _activePixelFormat;
 
             if (_playback is not null)
             {
@@ -272,6 +275,7 @@ internal static class Bink2MovieBridge
         CloseActiveLocked();
         _activePath = hostPath;
         _activeInfo = info;
+        _activePixelFormat = BinkFramePixelFormat.Bgra;
         _frameBuffer = GC.AllocateUninitializedArray<byte>(GetFrameBufferLength(info));
         _frameBufferPresented = false;
         FillDummyFrame(_frameBuffer, info.Width, info.Height);
@@ -317,6 +321,7 @@ internal static class Bink2MovieBridge
         _activePath = hostPath;
         _activeInfo = info;
         _playback = new BinkFramePlayback(decoder);
+        _activePixelFormat = decoder.PixelFormat;
     }
 
     internal static bool TryReadBinkInfo(string path, out Bink2MovieInfo info)
@@ -369,6 +374,7 @@ internal static class Bink2MovieBridge
         _playback = null;
         _activePath = null;
         _activeInfo = default;
+        _activePixelFormat = BinkFramePixelFormat.Bgra;
         _frameBuffer = null;
         _frameBufferPresented = false;
 

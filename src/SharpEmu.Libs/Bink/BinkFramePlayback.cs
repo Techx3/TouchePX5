@@ -5,6 +5,12 @@ using System.Diagnostics;
 
 namespace SharpEmu.Libs.Bink;
 
+internal enum BinkFramePixelFormat
+{
+    Bgra,
+    Nv12,
+}
+
 internal interface IBinkFrameDecoder : IDisposable
 {
     uint Width { get; }
@@ -14,6 +20,8 @@ internal interface IBinkFrameDecoder : IDisposable
     uint FramesPerSecondNumerator { get; }
 
     uint FramesPerSecondDenominator { get; }
+
+    BinkFramePixelFormat PixelFormat { get; }
 
     bool TryDecodeNextFrame(Span<byte> destination);
 }
@@ -49,8 +57,9 @@ internal sealed class BinkFramePlayback : IDisposable
         Height = decoder.Height;
         FramesPerSecondNumerator = decoder.FramesPerSecondNumerator;
         FramesPerSecondDenominator = decoder.FramesPerSecondDenominator;
+        PixelFormat = decoder.PixelFormat;
 
-        var frameBytes = checked((int)((ulong)Width * Height * 4));
+        var frameBytes = GetFrameBufferLength(Width, Height, PixelFormat);
         for (var index = 0; index < BufferCount; index++)
         {
             _freeBuffers.Enqueue(GC.AllocateUninitializedArray<byte>(frameBytes));
@@ -71,6 +80,23 @@ internal sealed class BinkFramePlayback : IDisposable
     internal uint FramesPerSecondNumerator { get; }
 
     internal uint FramesPerSecondDenominator { get; }
+
+    internal BinkFramePixelFormat PixelFormat { get; }
+
+    internal static int GetFrameBufferLength(
+        uint width,
+        uint height,
+        BinkFramePixelFormat pixelFormat)
+    {
+        var lumaBytes = checked((ulong)width * height);
+        return pixelFormat switch
+        {
+            BinkFramePixelFormat.Bgra => checked((int)(lumaBytes * 4)),
+            BinkFramePixelFormat.Nv12 => checked((int)(
+                lumaBytes + ((ulong)width * ((height + 1UL) / 2)))),
+            _ => throw new ArgumentOutOfRangeException(nameof(pixelFormat)),
+        };
+    }
 
     internal bool IsFinished
     {

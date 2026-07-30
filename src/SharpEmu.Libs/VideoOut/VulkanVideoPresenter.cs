@@ -3351,6 +3351,26 @@ internal static unsafe class VulkanVideoPresenter
         Span<byte> chroma) =>
         Presenter.ConvertBgraToYuv420(bgra, width, height, luma, chroma);
 
+    internal static void CopyNv12Planes(
+        ReadOnlySpan<byte> frame,
+        int width,
+        int height,
+        Span<byte> luma,
+        Span<byte> chroma)
+    {
+        var lumaLength = checked(width * height);
+        var chromaLength = checked(((width + 1) / 2) * ((height + 1) / 2) * 2);
+        if (frame.Length < lumaLength + chromaLength ||
+            luma.Length < lumaLength ||
+            chroma.Length < chromaLength)
+        {
+            throw new ArgumentException("NV12 buffers do not match their declared dimensions.");
+        }
+
+        frame[..lumaLength].CopyTo(luma);
+        frame.Slice(lumaLength, chromaLength).CopyTo(chroma);
+    }
+
     private readonly record struct Presentation(
         byte[]? Pixels,
         uint Width,
@@ -3495,6 +3515,7 @@ internal static unsafe class VulkanVideoPresenter
         private byte[]? _hostMovieChromaPixels;
         private uint _hostMovieFrameWidth;
         private uint _hostMovieFrameHeight;
+        private BinkFramePixelFormat _hostMovieFramePixelFormat = BinkFramePixelFormat.Bgra;
         private long _hostMovieFrameSerial;
         private long _hostMovieConvertedFrameSerial = -1;
         private long _hostMovieLumaUploadedFrameSerial = -1;
@@ -7795,6 +7816,7 @@ internal static unsafe class VulkanVideoPresenter
                     _hostMovieFramePixels = avPlayerFrame.Bgra;
                     _hostMovieFrameWidth = avPlayerFrame.Width;
                     _hostMovieFrameHeight = avPlayerFrame.Height;
+                    _hostMovieFramePixelFormat = BinkFramePixelFormat.Bgra;
                     _hostMovieFrameSerial = avPlayerFrame.Sequence;
                 }
                 return;
@@ -7816,7 +7838,8 @@ internal static unsafe class VulkanVideoPresenter
                     out var height,
                     out var advanced,
                     out var frameSerial,
-                    out var hostPath))
+                    out var hostPath,
+                    out var pixelFormat))
             {
                 // Keep the last decoded image until a replacement arrives.
                 // Movie sessions are queued asynchronously; clearing here
@@ -7841,6 +7864,7 @@ internal static unsafe class VulkanVideoPresenter
             _hostMovieFramePixels = pixels;
             _hostMovieFrameWidth = width;
             _hostMovieFrameHeight = height;
+            _hostMovieFramePixelFormat = pixelFormat;
             _hostMovieFrameSerial = frameSerial;
         }
 
@@ -8018,7 +8042,8 @@ internal static unsafe class VulkanVideoPresenter
                     $"uv={bestChromaIndex}:0x{chromaTexture.Address:X16}:" +
                     $"{chromaTexture.Width}x{chromaTexture.Height}:dst=0x{chromaTexture.DstSelect:X} " +
                     $"fallback={(usesFallbackChroma ? 1 : 0)} " +
-                    $"host={_hostMovieFrameWidth}x{_hostMovieFrameHeight}.");
+                    $"host={_hostMovieFrameWidth}x{_hostMovieFrameHeight} " +
+                    $"source={_hostMovieFramePixelFormat}.");
             }
 
             return new HostMovieTextureBindings(lumaMask, chromaMask);
@@ -8123,7 +8148,7 @@ internal static unsafe class VulkanVideoPresenter
                 return;
             }
 
-            var bgra = _hostMovieFramePixels ??
+            var frame = _hostMovieFramePixels ??
                 throw new InvalidOperationException("Host movie frame is unavailable.");
             var width = checked((int)_hostMovieFrameWidth);
             var height = checked((int)_hostMovieFrameHeight);
@@ -8139,12 +8164,24 @@ internal static unsafe class VulkanVideoPresenter
                     GC.AllocateUninitializedArray<byte>(chromaWidth * chromaHeight * 2);
             }
 
-            ConvertBgraToYuv420(
-                bgra,
-                width,
-                height,
-                _hostMovieLumaPixels,
-                _hostMovieChromaPixels);
+            if (_hostMovieFramePixelFormat == BinkFramePixelFormat.Nv12)
+            {
+                CopyNv12Planes(
+                    frame,
+                    width,
+                    height,
+                    _hostMovieLumaPixels,
+                    _hostMovieChromaPixels);
+            }
+            else
+            {
+                ConvertBgraToYuv420(
+                    frame,
+                    width,
+                    height,
+                    _hostMovieLumaPixels,
+                    _hostMovieChromaPixels);
+            }
             _hostMovieConvertedFrameSerial = _hostMovieFrameSerial;
         }
 
