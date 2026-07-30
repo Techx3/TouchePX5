@@ -21,6 +21,10 @@ arm64/
 *.tmp_proj
 *.log
 
+# User-supplied console firmware must remain local.
+*.PUP
+*.pup
+
 *.user
 *.suo
 *.userosscache
