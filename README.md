@@ -116,8 +116,11 @@ to `user/firmware/<sha256>/` and never uploaded or added to the repository.
 The installer verifies the package SHA-256 and distinguishes an official
 encrypted `SLB2` package from a previously decrypted PUP structure. For a
 decrypted structure it also validates bounded table entries and detects the
-version-metadata entry. Touché PX5 does not decrypt protected content, and
-installing a PUP does not currently replace its HLE implementations.
+version-metadata entry. Direct, uncompressed entries are extracted into a local
+`entries/` directory and described by `inventory.json`; compressed, blocked and
+special entries remain inventoried without unsafe partial extraction. Touché
+PX5 does not decrypt protected content, and installing a PUP does not currently
+replace its HLE implementations.
 
 PS5 Backup and Restore files named `archive.dat` use the separate `SIECAF`
 format. Touché PX5 identifies and rejects them as firmware; they cannot replace

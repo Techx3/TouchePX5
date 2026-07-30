@@ -54,7 +54,7 @@
   "Options.Firmware.Active.Label": "Active firmware",
   "Options.Firmware.Active.Desc": "{0} — SHA-256: {1}\n{2}",
   "Options.Firmware.Capability.Official": "Official encrypted package: stored and identified, but its internal entries are not accessible.",
-  "Options.Firmware.Capability.Decrypted": "Decrypted package structure verified: {0} entries. Version metadata: {1}.",
+  "Options.Firmware.Capability.Decrypted": "Decrypted package structure verified: {0} entries. Version metadata: {1}. Directly extracted: {2}.",
   "Options.Firmware.Metadata.Present": "present",
   "Options.Firmware.Metadata.Absent": "not detected",
   "Options.Firmware.None": "No firmware installed.",

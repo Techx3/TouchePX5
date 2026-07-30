@@ -1078,7 +1078,8 @@ public partial class MainWindow : Window
             firmware.EntryCount ?? 0,
             loc.Get(firmware.HasVersionMetadataEntry
                 ? "Options.Firmware.Metadata.Present"
-                : "Options.Firmware.Metadata.Absent"));
+                : "Options.Firmware.Metadata.Absent"),
+            firmware.ExtractedEntryCount);
     }
 
     private async Task OnUpdateButtonAsync()

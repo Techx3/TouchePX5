@@ -42,7 +42,7 @@
   "Options.Firmware.Active.Label": "Firmware activo",
   "Options.Firmware.Active.Desc": "{0} — SHA-256: {1}\n{2}",
   "Options.Firmware.Capability.Official": "Paquete oficial cifrado: almacenado e identificado, pero sus entradas internas no son accesibles.",
-  "Options.Firmware.Capability.Decrypted": "Estructura del paquete descifrado verificada: {0} entradas. Metadatos de versión: {1}.",
+  "Options.Firmware.Capability.Decrypted": "Estructura del paquete descifrado verificada: {0} entradas. Metadatos de versión: {1}. Extraídas directamente: {2}.",
   "Options.Firmware.Metadata.Present": "presentes",
   "Options.Firmware.Metadata.Absent": "no detectados",
   "Options.Firmware.None": "No hay firmware instalado.",

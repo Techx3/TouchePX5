@@ -81,6 +81,18 @@ public sealed class FirmwareManagerTests : IDisposable
         Assert.Equal("Decrypted PUP", result.Firmware.ContainerFormat);
         Assert.Equal(1, result.Firmware.EntryCount);
         Assert.True(result.Firmware.HasVersionMetadataEntry);
+        Assert.Equal(1, result.Firmware.ExtractedEntryCount);
+
+        var installationDirectory = Path.GetDirectoryName(result.Firmware.PackagePath)!;
+        var extractedPath = Path.Combine(installationDirectory, "entries", "entry-0000-id-00c.bin");
+        Assert.True(File.Exists(extractedPath));
+        Assert.Equal(Enumerable.Range(1, 32).Select(value => (byte)value), File.ReadAllBytes(extractedPath));
+        Assert.True(File.Exists(Path.Combine(installationDirectory, "inventory.json")));
+        Assert.Contains(
+            Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(extractedPath))).ToLowerInvariant(),
+            File.ReadAllText(Path.Combine(installationDirectory, "inventory.json")));
+        var reloaded = Assert.Single(manager.GetInstalled());
+        Assert.Equal(1, reloaded.ExtractedEntryCount);
     }
 
     [Fact]
@@ -90,6 +102,24 @@ public sealed class FirmwareManagerTests : IDisposable
         var manager = new FirmwareManager(Path.Combine(_temporaryDirectory, "installed"));
 
         await Assert.ThrowsAsync<InvalidDataException>(() => manager.InstallAsync(sourcePath));
+    }
+
+    [Fact]
+    public async Task InstallAsyncInventoriesButDoesNotExtractCompressedEntry()
+    {
+        var sourcePath = CreateDecryptedPackage(
+            "compressed.PUP",
+            invalidEntryBounds: false,
+            compressed: true);
+        var manager = new FirmwareManager(Path.Combine(_temporaryDirectory, "installed"));
+
+        var result = await manager.InstallAsync(sourcePath);
+
+        Assert.Equal(1, result.Firmware.EntryCount);
+        Assert.Equal(0, result.Firmware.ExtractedEntryCount);
+        var installationDirectory = Path.GetDirectoryName(result.Firmware.PackagePath)!;
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(installationDirectory, "entries")));
+        Assert.Contains("\"IsCompressed\": true", File.ReadAllText(Path.Combine(installationDirectory, "inventory.json")));
     }
 
     [Fact]
@@ -137,7 +167,7 @@ public sealed class FirmwareManagerTests : IDisposable
         return path;
     }
 
-    private string CreateDecryptedPackage(string fileName, bool invalidEntryBounds)
+    private string CreateDecryptedPackage(string fileName, bool invalidEntryBounds, bool compressed = false)
     {
         Directory.CreateDirectory(_temporaryDirectory);
         var data = new byte[1024];
@@ -147,12 +177,18 @@ public sealed class FirmwareManagerTests : IDisposable
         BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(0x18), 1);
 
         const int entryOffset = 32;
-        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(entryOffset), 0x0C << 20);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            data.AsSpan(entryOffset),
+            (0x0CU << 20) | (compressed ? 0x8U : 0U));
         BinaryPrimitives.WriteUInt64LittleEndian(
             data.AsSpan(entryOffset + 8),
             invalidEntryBounds ? 2048UL : 64UL);
         BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(entryOffset + 16), 32);
         BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(entryOffset + 24), 32);
+        for (var index = 0; index < 32; index++)
+        {
+            data[64 + index] = (byte)(index + 1);
+        }
 
         var path = Path.Combine(_temporaryDirectory, fileName);
         File.WriteAllBytes(path, data);

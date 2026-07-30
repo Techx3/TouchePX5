@@ -17,7 +17,24 @@ public sealed record FirmwarePackageInspection(
     string FormatLabel,
     int? EntryCount,
     bool HasVersionMetadataEntry,
-    bool CanInspectEntries);
+    bool CanInspectEntries,
+    IReadOnlyList<FirmwarePackageEntry> Entries);
+
+public sealed record FirmwarePackageEntry(
+    int Index,
+    uint Flags,
+    uint Id,
+    ulong Offset,
+    ulong StoredSize,
+    ulong UnpackedSize,
+    bool IsCompressed,
+    bool IsBlocked,
+    bool IsSpecial)
+{
+    public bool CanExtractDirectly => !IsCompressed && !IsBlocked && !IsSpecial && StoredSize > 0;
+
+    public string FileName => $"entry-{Index:D4}-id-{Id:x3}.bin";
+}
 
 /// <summary>
 /// Performs bounded, read-only inspection of firmware package headers. The
@@ -66,7 +83,8 @@ public static class FirmwarePackageInspector
                 "Official SLB2",
                 null,
                 false,
-                false);
+                false,
+                []);
         }
 
         if (header.AsSpan(0, SiecafMagic.Length).SequenceEqual(SiecafMagic))
@@ -86,6 +104,7 @@ public static class FirmwarePackageInspector
         if (entryCount == 0 ||
             entryCount > MaximumEntryCount ||
             declaredHeaderSize < DecryptedHeaderSize ||
+            declaredHeaderSize < minimumTableEnd ||
             declaredHeaderSize > fileInfo.Length ||
             minimumTableEnd > fileInfo.Length ||
             declaredFileSize > (ulong)fileInfo.Length)
@@ -97,18 +116,51 @@ public static class FirmwarePackageInspector
         stream.Position = DecryptedHeaderSize;
         await ReadExactlyAsync(stream, entryTable, cancellationToken).ConfigureAwait(false);
         var hasVersionMetadata = false;
+        ulong directExtractionSize = 0;
+        var entries = new List<FirmwarePackageEntry>(entryCount);
         for (var index = 0; index < entryCount; index++)
         {
             var entry = entryTable.AsSpan(index * DecryptedEntrySize, DecryptedEntrySize);
             var flags = BinaryPrimitives.ReadUInt32LittleEndian(entry);
             var offset = BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]);
             var storedSize = BinaryPrimitives.ReadUInt64LittleEndian(entry[16..]);
-            if (offset > (ulong)fileInfo.Length || storedSize > (ulong)fileInfo.Length - offset)
+            var unpackedSize = BinaryPrimitives.ReadUInt64LittleEndian(entry[24..]);
+            if ((storedSize > 0 && offset < declaredHeaderSize) ||
+                offset > (ulong)fileInfo.Length ||
+                storedSize > (ulong)fileInfo.Length - offset)
             {
                 throw new InvalidDataException($"Decrypted PUP entry {index} points outside the package.");
             }
 
-            if (flags >> 20 == VersionMetadataEntryId)
+            var id = flags >> 20;
+            var isCompressed = (flags & 0x8) != 0;
+            var isBlocked = (flags & 0x800) != 0;
+            var specialFlags = flags & 0xF0000000;
+            var isSpecial = specialFlags is 0xE0000000 or 0xF0000000;
+            var packageEntry = new FirmwarePackageEntry(
+                index,
+                flags,
+                id,
+                offset,
+                storedSize,
+                unpackedSize,
+                isCompressed,
+                isBlocked,
+                isSpecial);
+            entries.Add(packageEntry);
+
+            if (packageEntry.CanExtractDirectly)
+            {
+                var maximumExtractionSize = (ulong)fileInfo.Length;
+                if (storedSize > maximumExtractionSize - directExtractionSize)
+                {
+                    throw new InvalidDataException("The decrypted PUP requests an excessive direct extraction size.");
+                }
+
+                directExtractionSize += storedSize;
+            }
+
+            if (id == VersionMetadataEntryId)
             {
                 hasVersionMetadata = true;
             }
@@ -119,7 +171,8 @@ public static class FirmwarePackageInspector
             "Decrypted PUP",
             entryCount,
             hasVersionMetadata,
-            true);
+            true,
+            entries);
     }
 
     private static FirmwarePackageInspection InspectSiecaf(ReadOnlySpan<byte> header, long fileLength)
@@ -149,7 +202,8 @@ public static class FirmwarePackageInspector
             "PS5 Backup (SIECAF)",
             checked((int)segmentCount),
             false,
-            false);
+            false,
+            []);
     }
 
     private static async Task ReadExactlyAsync(
