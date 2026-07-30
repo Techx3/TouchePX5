@@ -3941,10 +3941,24 @@ public static partial class AgcExports
                         length,
                         op,
                         out var dispatch,
-                        out _))
+                        out var indirectDimsRetryAddress))
                 {
                     state.FrameDispatchCount++;
                     ObserveComputeDispatch(ctx, gpuState, state, dispatch);
+                }
+                else if (indirectDimsRetryAddress != 0 &&
+                    HandleSubmittedIndirectDimsWait(
+                        ctx,
+                        state,
+                        commandAddress,
+                        currentAddress,
+                        offset,
+                        dwordCount,
+                        indirectDimsRetryAddress,
+                        tracePackets))
+                {
+                    FlushPendingAcquireInvalidation(ctx, state, tracePackets);
+                    return true; // retry after the producer writes indirect dimensions
                 }
             }
 
