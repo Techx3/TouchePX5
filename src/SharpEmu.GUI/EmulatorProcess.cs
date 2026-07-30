@@ -13,7 +13,22 @@ namespace SharpEmu.GUI;
 /// cannot be reliably reused while guest-created host threads are still alive,
 /// so the GUI must never execute a game in its own process.
 /// </summary>
-internal sealed class EmulatorProcess : IDisposable
+internal interface IEmulatorProcess : IDisposable
+{
+    event Action<string, bool>? OutputReceived;
+
+    event Action<int>? Exited;
+
+    bool IsRunning { get; }
+
+    int? ProcessId { get; }
+
+    void Start(string exePath, IReadOnlyList<string> arguments, string? workingDirectory);
+
+    void Stop();
+}
+
+internal sealed class EmulatorProcess : IEmulatorProcess
 {
     public const int HostStopExitCode = -2;
 
@@ -38,6 +53,7 @@ internal sealed class EmulatorProcess : IDisposable
     private nint _jobHandle;
     private Process? _fallbackProcess;
     private bool _running;
+    private int? _processId;
     private bool _stopRequested;
     private bool _disposed;
 
@@ -52,6 +68,17 @@ internal sealed class EmulatorProcess : IDisposable
             lock (_sync)
             {
                 return _running;
+            }
+        }
+    }
+
+    public int? ProcessId
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _processId;
             }
         }
     }
@@ -168,6 +195,7 @@ internal sealed class EmulatorProcess : IDisposable
         lock (_sync)
         {
             _fallbackProcess = process;
+            _processId = process.Id;
             _running = true;
         }
 
@@ -289,6 +317,7 @@ internal sealed class EmulatorProcess : IDisposable
             {
                 _processHandle = processHandle;
                 _jobHandle = jobHandle;
+                _processId = processInfo.ProcessId;
                 _running = true;
             }
             processHandle = 0;

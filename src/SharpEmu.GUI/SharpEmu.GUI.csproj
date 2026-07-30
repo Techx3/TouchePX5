@@ -22,6 +22,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.Core\SharpEmu.Core.csproj" />
     <ProjectReference Include="..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+    <ProjectReference Include="..\Touche.Core.Contracts\Touche.Core.Contracts.csproj" />
   </ItemGroup>
 
   <ItemGroup>
