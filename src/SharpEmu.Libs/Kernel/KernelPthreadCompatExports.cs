@@ -24,6 +24,7 @@ public static class KernelPthreadCompatExports
     private const int PthreadOnceInProgress = 1;
     private const int PthreadOnceDone = 2;
     private const int MaxPooledMutexWaiters = 4096;
+    private const int MaxPooledCondWaiters = 4096;
 
     private static readonly object _stateGate = new();
     private static readonly ConcurrentDictionary<ulong, PthreadMutexState> _mutexStates = new();
@@ -40,6 +41,8 @@ public static class KernelPthreadCompatExports
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_MUTEX_FILTER"));
     private static readonly ConcurrentBag<PthreadMutexWaiter> _mutexWaiterPool = new();
     private static int _pooledMutexWaiterCount;
+    private static readonly ConcurrentBag<PthreadCondWaiter> _condWaiterPool = new();
+    private static int _pooledCondWaiterCount;
     private static long _nextSynchronizationWaiterId;
 
     private sealed class PthreadMutexState
@@ -160,18 +163,36 @@ public static class KernelPthreadCompatExports
         public int Waiters { get; set; }
     }
 
-    private sealed class PthreadCondWaiter
+    private sealed class PthreadCondWaiter : IGuestThreadBlockWaiter
     {
-        public required ulong ThreadId { get; init; }
-        public required PthreadMutexState MutexState { get; init; }
-        public required string WakeKey { get; init; }
-        public required bool Cooperative { get; init; }
-        public bool PosixErrors { get; init; }
+        public ulong ThreadId { get; set; }
+        public PthreadMutexState MutexState { get; set; } = null!;
+        public PthreadCondState? CondState { get; set; }
+        public CpuContext? Context { get; set; }
+        public ulong CondAddress { get; set; }
+        public ulong MutexAddress { get; set; }
+        public string WakeKey { get; set; } = string.Empty;
+        public string? ReusableWakeKey { get; set; }
+        public bool Cooperative { get; set; }
+        public bool PosixErrors { get; set; }
+        public bool Timed { get; set; }
         public LinkedListNode<PthreadCondWaiter>? Node { get; set; }
         public PthreadMutexWaiter? MutexWaiter { get; set; }
         public Timer? TimeoutTimer { get; set; }
         // 0 = waiting, 1 = signaled, 2 = timed out.
         public int CompletionState { get; set; }
+        public int Returned;
+
+        public int Resume() => Context is { } context && CondState is { } condState
+            ? CompleteBlockedCondWait(
+                context,
+                CondAddress,
+                MutexAddress,
+                condState,
+                this)
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+
+        public bool TryWake() => TryGrantCondWaiterMutex(this);
     }
 
     private readonly record struct PthreadMutexAttrState(int Type, int Protocol);
@@ -1576,20 +1597,21 @@ public static class KernelPthreadCompatExports
 
         var cooperative = GuestThreadExecution.IsGuestThread &&
             GuestThreadExecution.TryGetCurrentImportCallFrame(out _);
-        var waiter = new PthreadCondWaiter
-        {
-            ThreadId = currentThreadId,
-            MutexState = mutexState,
-            Cooperative = cooperative,
-            PosixErrors = posixErrors,
-            WakeKey = cooperative
-                ? $"pthread_cond_waiter:{Interlocked.Increment(ref _nextSynchronizationWaiterId)}"
-                : string.Empty,
-        };
+        var waiter = RentCondWaiter(
+            ctx,
+            state,
+            mutexState,
+            currentThreadId,
+            condAddress,
+            mutexAddress,
+            cooperative,
+            timed,
+            posixErrors);
 
         lock (state.SyncRoot)
         {
-            waiter.Node = state.WaiterQueue.AddLast(waiter);
+            waiter.Node ??= new LinkedListNode<PthreadCondWaiter>(waiter);
+            state.WaiterQueue.AddLast(waiter.Node);
             state.Waiters++;
             TracePthreadCond("wait-enter", condAddress, mutexAddress, state, timed, (int)OrbisGen2Result.ORBIS_GEN2_OK);
 
@@ -1598,6 +1620,7 @@ public static class KernelPthreadCompatExports
             {
                 RemoveCondWaiterLocked(state, waiter);
                 TracePthreadCond("wait-unlock-fail", condAddress, mutexAddress, state, timed, unlockResult);
+                ReturnCondWaiter(waiter);
                 return unlockResult;
             }
 
@@ -1620,8 +1643,7 @@ public static class KernelPthreadCompatExports
                 ctx,
                 timed ? "pthread_cond_timedwait" : "pthread_cond_wait",
                 waiter.WakeKey,
-                () => CompleteBlockedCondWait(ctx, condAddress, mutexAddress, state, waiter),
-                () => TryGrantCondWaiterMutex(waiter)))
+                waiter))
         {
             TracePthreadCond("wait-block", condAddress, mutexAddress, state, timed, (int)OrbisGen2Result.ORBIS_GEN2_OK);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1662,6 +1684,7 @@ public static class KernelPthreadCompatExports
             ? CondTimedOutResult(waiter)
             : (int)OrbisGen2Result.ORBIS_GEN2_OK;
         TracePthreadCond(waiter.CompletionState == 2 ? "wait-exit-timeout" : "wait-exit", condAddress, mutexAddress, state, timed, waitResult);
+        ReturnCondWaiter(waiter);
         return waitResult;
     }
 
@@ -1769,8 +1792,8 @@ public static class KernelPthreadCompatExports
 
     private static void ReturnMutexWaiter(PthreadMutexWaiter waiter)
     {
-        if (Interlocked.Exchange(ref waiter.Returned, 1) != 0 ||
-            waiter.Node?.List is not null)
+        if (waiter.Node?.List is not null ||
+            Interlocked.Exchange(ref waiter.Returned, 1) != 0)
         {
             return;
         }
@@ -1793,6 +1816,87 @@ public static class KernelPthreadCompatExports
         }
 
         Interlocked.Decrement(ref _pooledMutexWaiterCount);
+    }
+
+    private static PthreadCondWaiter RentCondWaiter(
+        CpuContext context,
+        PthreadCondState condState,
+        PthreadMutexState mutexState,
+        ulong threadId,
+        ulong condAddress,
+        ulong mutexAddress,
+        bool cooperative,
+        bool timed,
+        bool posixErrors)
+    {
+        if (!_condWaiterPool.TryTake(out var waiter))
+        {
+            waiter = new PthreadCondWaiter();
+        }
+        else
+        {
+            Interlocked.Decrement(ref _pooledCondWaiterCount);
+        }
+
+        waiter.Context = context;
+        waiter.CondState = condState;
+        waiter.MutexState = mutexState;
+        waiter.ThreadId = threadId;
+        waiter.CondAddress = condAddress;
+        waiter.MutexAddress = mutexAddress;
+        waiter.Cooperative = cooperative;
+        waiter.Timed = timed;
+        waiter.PosixErrors = posixErrors;
+        waiter.WakeKey = cooperative
+            ? waiter.ReusableWakeKey ??=
+                $"pthread_cond_waiter:{Interlocked.Increment(ref _nextSynchronizationWaiterId)}"
+            : string.Empty;
+        waiter.MutexWaiter = null;
+        waiter.TimeoutTimer = null;
+        waiter.CompletionState = 0;
+        waiter.Returned = 0;
+        return waiter;
+    }
+
+    private static void ReturnCondWaiter(PthreadCondWaiter waiter)
+    {
+        if (waiter.Node?.List is not null ||
+            Interlocked.Exchange(ref waiter.Returned, 1) != 0)
+        {
+            return;
+        }
+
+        waiter.TimeoutTimer?.Dispose();
+        waiter.TimeoutTimer = null;
+
+        // Timer.Dispose does not guarantee that an already queued callback has
+        // completed. Keep a timed waiter's terminal state and references intact
+        // until the timer releases it, so a late callback observes completion
+        // and exits instead of operating on cleared or recycled state.
+        if (waiter.Timed)
+        {
+            return;
+        }
+
+        waiter.MutexWaiter = null;
+        waiter.Context = null;
+        waiter.CondState = null;
+        waiter.MutexState = null!;
+        waiter.ThreadId = 0;
+        waiter.CondAddress = 0;
+        waiter.MutexAddress = 0;
+        waiter.WakeKey = string.Empty;
+        waiter.Cooperative = false;
+        waiter.PosixErrors = false;
+        waiter.CompletionState = 0;
+
+        if (Interlocked.Increment(ref _pooledCondWaiterCount) <= MaxPooledCondWaiters)
+        {
+            _condWaiterPool.Add(waiter);
+            return;
+        }
+
+        Interlocked.Decrement(ref _pooledCondWaiterCount);
     }
 
     [Conditional("DEBUG")]
@@ -2012,10 +2116,9 @@ public static class KernelPthreadCompatExports
 
     private static void RemoveCondWaiterLocked(PthreadCondState state, PthreadCondWaiter waiter)
     {
-        if (waiter.Node is not null)
+        if (waiter.Node?.List is not null)
         {
             state.WaiterQueue.Remove(waiter.Node);
-            waiter.Node = null;
             state.Waiters = Math.Max(0, state.Waiters - 1);
         }
     }
@@ -2043,8 +2146,10 @@ public static class KernelPthreadCompatExports
     {
         waiter.TimeoutTimer?.Dispose();
         waiter.TimeoutTimer = null;
-        var result = waiter.MutexWaiter is not null &&
-            Volatile.Read(ref waiter.MutexWaiter.Granted) == 1
+        var mutexWaiter = waiter.MutexWaiter;
+        var mutexGranted = mutexWaiter is not null &&
+            Volatile.Read(ref mutexWaiter.Granted) == 1;
+        var result = mutexGranted
                 ? (waiter.CompletionState == 2
                     ? CondTimedOutResult(waiter)
                     : (int)OrbisGen2Result.ORBIS_GEN2_OK)
@@ -2056,7 +2161,13 @@ public static class KernelPthreadCompatExports
             state,
             waiter.CompletionState == 2,
             result);
+        if (mutexGranted)
+        {
+            ReturnMutexWaiter(mutexWaiter!);
+            waiter.MutexWaiter = null;
+        }
         _ = ctx;
+        ReturnCondWaiter(waiter);
         return result;
     }
 
