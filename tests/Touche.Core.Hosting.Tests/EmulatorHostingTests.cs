@@ -22,6 +22,9 @@ public sealed class EmulatorHostingTests
         Assert.Same(adapter, registry.GetRequired(ToucheCoreIds.PlayStation5));
         Assert.Equal([ToucheCoreIds.PlayStation5], registry.CoreIds);
         Assert.Throws<InvalidOperationException>(() => registry.Register(new FakeAdapter()));
+        var replacement = new FakeAdapter();
+        registry.RegisterOrReplace(replacement);
+        Assert.Same(replacement, registry.GetRequired(ToucheCoreIds.PlayStation5));
         Assert.Throws<KeyNotFoundException>(() => registry.GetRequired("touche.unknown"));
     }
 
@@ -29,11 +32,13 @@ public sealed class EmulatorHostingTests
     public async Task ManagerOwnsOneSessionAndForwardsTypedEvents()
     {
         var adapter = new FakeAdapter();
-        await using var manager = new EmulatorSessionManager();
+        var registry = new EmulatorCoreRegistry();
+        registry.Register(adapter);
+        await using var manager = new EmulatorSessionManager(registry);
         var received = new TaskCompletionSource<EmulatorEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
         manager.EventReceived += emulatorEvent => received.TrySetResult(emulatorEvent);
 
-        var session = await manager.StartAsync(adapter, CreateDescriptor(), CancellationToken.None);
+        var session = await manager.StartAsync(CreateDescriptor(), CancellationToken.None);
         adapter.Session.Emit(new EmulatorLogReceived(
             DateTimeOffset.UtcNow,
             EmulatorLogLevel.Information,
@@ -44,7 +49,7 @@ public sealed class EmulatorHostingTests
         Assert.Same(session, manager.ActiveSession);
         Assert.IsType<EmulatorLogReceived>(forwarded);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            manager.StartAsync(adapter, CreateDescriptor(), CancellationToken.None));
+            manager.StartAsync(CreateDescriptor(), CancellationToken.None));
 
         await manager.StopAsync(CancellationToken.None);
         Assert.True(adapter.Session.StopRequested);

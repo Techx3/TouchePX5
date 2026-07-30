@@ -11,12 +11,23 @@ namespace Touche.Core.Hosting;
 /// </summary>
 public sealed class EmulatorSessionManager : IAsyncDisposable
 {
+    private readonly EmulatorCoreRegistry? _coreRegistry;
     private readonly object _sync = new();
     private readonly SemaphoreSlim _operationGate = new(1, 1);
     private IEmulatorSession? _activeSession;
     private CancellationTokenSource? _eventCancellation;
     private Task? _eventPump;
     private bool _disposed;
+
+    public EmulatorSessionManager()
+    {
+    }
+
+    public EmulatorSessionManager(EmulatorCoreRegistry coreRegistry)
+    {
+        ArgumentNullException.ThrowIfNull(coreRegistry);
+        _coreRegistry = coreRegistry;
+    }
 
     public event Action<EmulatorEvent>? EventReceived;
 
@@ -29,6 +40,19 @@ public sealed class EmulatorSessionManager : IAsyncDisposable
                 return _activeSession;
             }
         }
+    }
+
+    public Task<IEmulatorSession> StartAsync(
+        SessionDescriptor descriptor,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+        if (_coreRegistry is null)
+        {
+            throw new InvalidOperationException("This session manager has no core registry.");
+        }
+
+        return StartAsync(_coreRegistry.GetRequired(descriptor.CoreId), descriptor, cancellationToken);
     }
 
     public async Task<IEmulatorSession> StartAsync(

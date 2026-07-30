@@ -26,6 +26,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Net.Http.Headers;
 using Touche.Core.Contracts;
+using Touche.Core.Hosting;
 
 namespace SharpEmu.GUI;
 
@@ -65,8 +66,8 @@ public partial class MainWindow : Window
     private bool _refreshingFirmware;
 
     private GuiSettings _settings = new();
-    private IEmulatorSession? _emulatorSession;
-    private CancellationTokenSource? _emulatorEventCancellation;
+    private readonly EmulatorCoreRegistry _coreRegistry = new();
+    private readonly EmulatorSessionManager _emulatorSessions;
     private bool _sessionStarting;
     private GameSurfaceHost? _gameSurfaceHost;
     private ConsoleWindow? _consoleWindow;
@@ -129,6 +130,7 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
+        _emulatorSessions = new EmulatorSessionManager(_coreRegistry);
         InitializeComponent();
 
         try
@@ -147,6 +149,7 @@ public partial class MainWindow : Window
         ConsoleList.ItemsSource = _consoleLines;
         _consoleMirror = GuiConsoleMirror.Install((line, isError) =>
             _pendingLines.Enqueue((line, isError)));
+        _emulatorSessions.EventReceived += OnEmulatorEvent;
 
         _consoleFlushTimer = new DispatcherTimer
         {
@@ -893,7 +896,8 @@ public partial class MainWindow : Window
         _sndPreview.Stop();
         _discord?.Dispose();
         _consoleWindow?.Close();
-        DisposeEmulatorSession();
+        _emulatorSessions.EventReceived -= OnEmulatorEvent;
+        _emulatorSessions.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _consoleMirror?.Dispose();
         DropFileLog();
     }
@@ -2086,7 +2090,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_emulatorSession is null)
+        if (_emulatorSessions.ActiveSession is null)
         {
             // The native host can be created a moment after Launch. Do not
             // let that delayed callback start a session the user already
@@ -2102,7 +2106,7 @@ public partial class MainWindow : Window
         SessionHintText.Text = Localization.Instance.Get("Launch.Stopping");
         SessionF11Badge.IsVisible = false;
         ShowSessionLoading("Closing game", "Waiting for the emulation session to exit...");
-        _ = _emulatorSession.StopAsync(CancellationToken.None);
+        _ = _emulatorSessions.StopAsync(CancellationToken.None);
         _runningGameName = null;
         _runningGameTitleId = null;
         StatusText.Text = Localization.Instance.Get("Launch.Stopping");
@@ -2186,7 +2190,7 @@ public partial class MainWindow : Window
 
     private async void StartPendingSession(VulkanHostSurface surface)
     {
-        if (_pendingLaunch is not { } launch || _emulatorSession is not null || _sessionStarting)
+        if (_pendingLaunch is not { } launch || _emulatorSessions.ActiveSession is not null || _sessionStarting)
         {
             return;
         }
@@ -2206,11 +2210,9 @@ public partial class MainWindow : Window
                 _ => BuildEmulatorArguments(launch, surface),
                 Path.GetDirectoryName(_emulatorExePath));
             var descriptor = BuildSessionDescriptor(launch);
-            var session = await adapter.LaunchAsync(descriptor, CancellationToken.None);
-            _emulatorSession = session;
+            _coreRegistry.RegisterOrReplace(adapter);
+            await _emulatorSessions.StartAsync(descriptor, CancellationToken.None);
             _pendingLaunch = null;
-            _emulatorEventCancellation = new CancellationTokenSource();
-            _ = PumpEmulatorEventsAsync(session, _emulatorEventCancellation.Token);
             AppendConsoleLine(
                 Localization.Instance.Format("Launch.Command", launch.EbootPath),
                 DimLineBrush);
@@ -2255,44 +2257,22 @@ public partial class MainWindow : Window
         };
     }
 
-    private async Task PumpEmulatorEventsAsync(
-        IEmulatorSession session,
-        CancellationToken cancellationToken)
+    private void OnEmulatorEvent(EmulatorEvent emulatorEvent)
     {
-        try
+        switch (emulatorEvent)
         {
-            await foreach (var emulatorEvent in session.ReadEventsAsync(cancellationToken))
-            {
-                switch (emulatorEvent)
-                {
-                    case EmulatorLogReceived log:
-                        OnEmulatorOutput(log.Message, log.Level >= EmulatorLogLevel.Error);
-                        break;
-                    case EmulatorProcessExited exited:
-                        Dispatcher.UIThread.Post(() => OnEmulatorExited(exited.ExitCode ?? 3));
-                        break;
-                }
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
+            case EmulatorLogReceived log:
+                OnEmulatorOutput(log.Message, log.Level >= EmulatorLogLevel.Error);
+                break;
+            case EmulatorProcessExited exited:
+                Dispatcher.UIThread.Post(() => OnEmulatorExited(exited.ExitCode ?? 3));
+                break;
         }
     }
 
     private void DisposeEmulatorSession()
     {
-        var session = _emulatorSession;
-        _emulatorSession = null;
-        var cancellation = _emulatorEventCancellation;
-        _emulatorEventCancellation = null;
-        cancellation?.Cancel();
-        cancellation?.Dispose();
-        if (session is null)
-        {
-            return;
-        }
-
-        session.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        _emulatorSessions.DisposeActiveSessionAsync().AsTask().GetAwaiter().GetResult();
     }
 
     private List<string> BuildEmulatorArguments(PendingLaunch launch, VulkanHostSurface surface)
