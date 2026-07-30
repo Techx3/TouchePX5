@@ -192,7 +192,10 @@ internal sealed record GuestRenderTarget(
     uint Height,
     uint Format,
     uint NumberType,
-    uint MipLevels = 1);
+    uint MipLevels = 1,
+    uint BaseArrayLayer = 0,
+    uint LayerCount = 1,
+    uint MipLevel = 0);
 
 /// <summary>Guest DB surface bound alongside a color render target.</summary>
 internal sealed record GuestDepthTarget(

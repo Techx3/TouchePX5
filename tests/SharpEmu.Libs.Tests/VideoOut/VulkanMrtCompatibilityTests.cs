@@ -51,4 +51,30 @@ public sealed class VulkanMrtCompatibilityTests
         Assert.False(VulkanVideoPresenter.RenderTargetsAliased(uniqueTargets));
         Assert.True(VulkanVideoPresenter.RenderTargetsAliased(aliasedTargets));
     }
+
+    [Fact]
+    public void AliasDetection_AllowsDistinctArraySlicesAtSameAddress()
+    {
+        GuestRenderTarget[] layeredTargets =
+        [
+            new(0x1000, 1920, 1080, 10, 0, BaseArrayLayer: 0),
+            new(0x1000, 1920, 1080, 10, 0, BaseArrayLayer: 1),
+            new(0x1000, 1920, 1080, 10, 0, BaseArrayLayer: 2),
+            new(0x1000, 1920, 1080, 10, 0, BaseArrayLayer: 3),
+        ];
+
+        Assert.False(VulkanVideoPresenter.RenderTargetsAliased(layeredTargets));
+    }
+
+    [Fact]
+    public void AliasDetection_RejectsOverlappingArraySliceRanges()
+    {
+        GuestRenderTarget[] layeredTargets =
+        [
+            new(0x1000, 1920, 1080, 10, 0, BaseArrayLayer: 1, LayerCount: 2),
+            new(0x1000, 1920, 1080, 10, 0, BaseArrayLayer: 2, LayerCount: 1),
+        ];
+
+        Assert.True(VulkanVideoPresenter.RenderTargetsAliased(layeredTargets));
+    }
 }

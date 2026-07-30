@@ -138,6 +138,7 @@ public static partial class AgcExports
     private const uint CbBlendAlpha = 0x108;
     private const uint CbColor0Base = 0x318;
     private const uint CbColorRegisterStride = 15;
+    private const uint CbColor0View = 0x31B;
     private const uint CbColor0Info = 0x31C;
     private const uint CbColor0BaseExt = 0x390;
     private const uint CbColor0Attrib2 = 0x3B0;
@@ -466,7 +467,10 @@ public static partial class AgcExports
         uint Height,
         uint Format,
         uint NumberType,
-        uint TileMode);
+        uint TileMode,
+        uint BaseArrayLayer = 0,
+        uint LayerCount = 1,
+        uint MipLevel = 0);
 
     private sealed record TranslatedGuestDraw(
         ulong ExportShaderAddress,
@@ -4008,7 +4012,11 @@ public static partial class AgcExports
                             pendingDisplayTarget.Width,
                             pendingDisplayTarget.Height,
                             pendingDisplayTarget.Format,
-                            pendingDisplayTarget.NumberType)],
+                            pendingDisplayTarget.NumberType,
+                            MipLevels: pendingDisplayTarget.MipLevel + 1,
+                            BaseArrayLayer: pendingDisplayTarget.BaseArrayLayer,
+                            LayerCount: pendingDisplayTarget.LayerCount,
+                            MipLevel: pendingDisplayTarget.MipLevel)],
                         pendingComposite.VertexShader,
                         pendingComposite.VertexCount,
                         pendingComposite.InstanceCount,
@@ -6551,6 +6559,7 @@ public static partial class AgcExports
                     "[LOADER][TRACE] " +
                     $"agc.rt_writer seq={drawSequence} target=0x{target.Address:X16} " +
                     $"fmt={target.Format} tile={target.TileMode} " +
+                    $"mip={target.MipLevel} layer={target.BaseArrayLayer}+{target.LayerCount} " +
                     $"size={target.Width}x{target.Height} vertices={vertexCount} " +
                     $"prim=0x{primitiveType:X} indexed={indexed} " +
                     $"es=0x{(hasExportShader ? exportShaderAddress : 0):X16} " +
@@ -7393,7 +7402,7 @@ public static partial class AgcExports
         {
             TraceAgcShader(
                 $"agc.mrt_filter ps=0x{pixelShaderAddress:X16} " +
-                $"bound=[{string.Join(",", allBoundTargets.Select(t => $"s{t.Slot}:0x{t.Address:X}:exp{(GetPixelColorExportMask(pixelColorExportMasks, t.Slot) != 0 ? 1 : 0)}"))}] " +
+                $"bound=[{string.Join(",", allBoundTargets.Select(t => $"s{t.Slot}:0x{t.Address:X}:m{t.MipLevel}:l{t.BaseArrayLayer}+{t.LayerCount}:exp{(GetPixelColorExportMask(pixelColorExportMasks, t.Slot) != 0 ? 1 : 0)}"))}] " +
                  $"kept={renderTargets.Length}");
         }
 
@@ -7629,7 +7638,11 @@ public static partial class AgcExports
                 renderTargets[index].Width,
                 renderTargets[index].Height,
                 renderTargets[index].Format,
-                renderTargets[index].NumberType);
+                renderTargets[index].NumberType,
+                MipLevels: renderTargets[index].MipLevel + 1,
+                BaseArrayLayer: renderTargets[index].BaseArrayLayer,
+                LayerCount: renderTargets[index].LayerCount,
+                MipLevel: renderTargets[index].MipLevel);
         }
 
         var pixelUserDataCount = Math.Min(pixelEvaluation.InitialScalarRegisters.Count, 8);
@@ -8375,6 +8388,12 @@ public static partial class AgcExports
                 continue;
             }
 
+            registers.TryGetValue(
+                CbColor0View + slot * CbColorRegisterStride,
+                out var view);
+            var (sliceStart, layerCount, mipLevel) =
+                DecodeColorRenderTargetView(view);
+
             targets.Add(new RenderTargetDescriptor(
                 slot,
                 address,
@@ -8382,10 +8401,26 @@ public static partial class AgcExports
                 (attrib2 & 0x3FFFu) + 1,
                 (info >> 2) & 0x1Fu,
                 (info >> 8) & 0x7u,
-                (attrib3 >> 14) & 0x1Fu));
+                (attrib3 >> 14) & 0x1Fu,
+                sliceStart,
+                layerCount,
+                mipLevel));
         }
 
         return targets;
+    }
+
+    internal static (uint BaseArrayLayer, uint LayerCount, uint MipLevel)
+        DecodeColorRenderTargetView(uint view)
+    {
+        // Mesa GFX10 register data: CB_COLOR0_VIEW.SLICE_START[12:0],
+        // SLICE_MAX[25:13], MIP_LEVEL[29:26].
+        var sliceStart = view & 0x1FFFu;
+        var sliceMax = (view >> 13) & 0x1FFFu;
+        var layerCount = sliceMax >= sliceStart
+            ? sliceMax - sliceStart + 1
+            : 1u;
+        return (sliceStart, layerCount, (view >> 26) & 0xFu);
     }
 
     private static GuestRenderState CreateRenderState(

@@ -1146,7 +1146,9 @@ internal static unsafe class VulkanVideoPresenter
         {
             for (var j = i + 1; j < targets.Count; j++)
             {
-                if (targets[i].Address == targets[j].Address)
+                if (targets[i].Address == targets[j].Address &&
+                    targets[i].MipLevel == targets[j].MipLevel &&
+                    RenderTargetLayerRangesOverlap(targets[i], targets[j]))
                 {
                     return true;
                 }
@@ -1154,6 +1156,15 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         return false;
+    }
+
+    private static bool RenderTargetLayerRangesOverlap(
+        GuestRenderTarget left,
+        GuestRenderTarget right)
+    {
+        var leftEnd = (ulong)left.BaseArrayLayer + Math.Max(left.LayerCount, 1u);
+        var rightEnd = (ulong)right.BaseArrayLayer + Math.Max(right.LayerCount, 1u);
+        return left.BaseArrayLayer < rightEnd && right.BaseArrayLayer < leftEnd;
     }
 
     internal static (uint Width, uint Height) ResolveCommonMrtExtent(
@@ -1183,7 +1194,8 @@ internal static unsafe class VulkanVideoPresenter
 
     private static string DescribeRenderTargets(IReadOnlyList<GuestRenderTarget> targets) =>
         string.Join(',', targets.Select(static target =>
-            $"0x{target.Address:X16}:{target.Width}x{target.Height}:f{target.Format}:n{target.NumberType}"));
+            $"0x{target.Address:X16}:{target.Width}x{target.Height}:f{target.Format}:n{target.NumberType}:" +
+            $"m{target.MipLevel}:l{target.BaseArrayLayer}+{Math.Max(target.LayerCount, 1u)}"));
 
     public static void SubmitOffscreenTranslatedDraw(
         byte[] pixelSpirv,
@@ -3453,6 +3465,7 @@ internal static unsafe class VulkanVideoPresenter
         private ulong _minStorageBufferOffsetAlignment = 1;
         private bool _supportsIndependentBlend;
         private uint _maxColorAttachments;
+        private uint _maxImageArrayLayers = 1;
         private Device _device;
         private PipelineCache _pipelineCache;
         private string? _pipelineCachePath;
@@ -3605,6 +3618,7 @@ internal static unsafe class VulkanVideoPresenter
             uint Depth,
             uint Type,
             uint MipLevels,
+            uint ArrayLayers,
             uint GuestFormat,
             Format Format);
 
@@ -3873,12 +3887,14 @@ internal static unsafe class VulkanVideoPresenter
             public uint LogicalHeight;
             public uint LogicalDepth = 1;
             public uint MipLevels;
+            public uint ArrayLayers = 1;
             public uint GuestFormat;
             public Format Format;
             public Image Image;
             public DeviceMemory Memory;
             public ImageView View;
             public ImageView[] MipViews = [];
+            public Dictionary<(uint MipLevel, uint ArrayLayer), ImageView> AttachmentViews { get; } = new();
             public Dictionary<(Format Format, uint MipLevel, uint LevelCount, uint DstSelect), ImageView> FormatViews { get; } = new();
             public RenderPass RenderPass;
             public RenderPass InitialRenderPass;
@@ -4651,6 +4667,7 @@ internal static unsafe class VulkanVideoPresenter
             LoadComputeDeviceLimits();
             _vk.GetPhysicalDeviceProperties(_physicalDevice, out var selected);
             _maxColorAttachments = selected.Limits.MaxColorAttachments;
+            _maxImageArrayLayers = selected.Limits.MaxImageArrayLayers;
             var selectedName = SilkMarshal.PtrToString((nint)selected.DeviceName) ?? "unknown";
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan device: {selectedName} ({selected.DeviceType})");
@@ -5693,7 +5710,10 @@ internal static unsafe class VulkanVideoPresenter
                 _submitTimeline;
         }
 
-        private void TransitionNewGuestImageToSampled(Image image, uint mipLevels)
+        private void TransitionNewGuestImageToSampled(
+            Image image,
+            uint mipLevels,
+            uint arrayLayers)
         {
             var commandBuffer = AllocateGuestCommandBuffer();
             var beginInfo = new CommandBufferBeginInfo
@@ -5714,7 +5734,7 @@ internal static unsafe class VulkanVideoPresenter
                 SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 Image = image,
-                SubresourceRange = ColorSubresourceRange(0, mipLevels),
+                SubresourceRange = ColorSubresourceRange(0, mipLevels, arrayLayers),
             };
             _vk.CmdPipelineBarrier(
                 commandBuffer,
@@ -8295,7 +8315,6 @@ internal static unsafe class VulkanVideoPresenter
 
             var vkFormat = GetTextureFormat(texture.Format, texture.NumberType);
             if (texture.Address != 0 &&
-                !(texture.ArrayedView && texture.ArrayLayers > 1) &&
                 TryResolveGuestImageAlias(texture, vkFormat, out var guestImage) &&
                 TryGetOrCreateGuestImageView(
                     guestImage,
@@ -8917,6 +8936,12 @@ internal static unsafe class VulkanVideoPresenter
             GuestDrawTexture texture,
             GuestImageResource guestImage)
         {
+            if (texture.ArrayedView &&
+                Math.Max(texture.ArrayLayers, 1u) > guestImage.ArrayLayers)
+            {
+                return false;
+            }
+
             var textureIs3D = IsGuestTexture3D(texture.Type);
             if (textureIs3D != IsGuestTexture3D(guestImage.Type))
             {
@@ -12431,7 +12456,15 @@ internal static unsafe class VulkanVideoPresenter
                     work.DepthTarget is { } depthOnlyTarget
                         ? GetDepthOnlyColorTarget(depthOnlyTarget)
                         : work.Targets[index];
-                targets[index] = GetOrCreateGuestImage(targetDescriptor, formats[index]);
+                targets[index] = GetOrCreateGuestImage(
+                    targetDescriptor,
+                    formats[index],
+                    requiredArrayLayers: GetRequiredArrayLayers(
+                        work.Targets,
+                        targetDescriptor.Address),
+                    requiredMipLevels: GetRequiredMipLevels(
+                        work.Targets,
+                        targetDescriptor.Address));
                 if (work.Targets[index].Address != 0 &&
                     TakeGuestImageInitialData(work.Targets[index].Address) is { } initialData &&
                     !targets[index].Initialized &&
@@ -12455,10 +12488,16 @@ internal static unsafe class VulkanVideoPresenter
             {
                 var extentWidth = firstTarget.Width;
                 var extentHeight = firstTarget.Height;
+                extentWidth = GetMipDimension(extentWidth, work.Targets[0].MipLevel);
+                extentHeight = GetMipDimension(extentHeight, work.Targets[0].MipLevel);
                 for (var index = 1; index < targets.Length; index++)
                 {
-                    extentWidth = Math.Min(extentWidth, targets[index].Width);
-                    extentHeight = Math.Min(extentHeight, targets[index].Height);
+                    extentWidth = Math.Min(
+                        extentWidth,
+                        GetMipDimension(targets[index].Width, work.Targets[index].MipLevel));
+                    extentHeight = Math.Min(
+                        extentHeight,
+                        GetMipDimension(targets[index].Height, work.Targets[index].MipLevel));
                 }
 
                 // Vulkan permits framebuffer attachments with different image
@@ -12511,7 +12550,10 @@ internal static unsafe class VulkanVideoPresenter
                     clearDepthSeparately = clearDepthForDraw &&
                         (depth.Width < firstTarget.Width ||
                          depth.Height < firstTarget.Height);
-                    if (targets.Length == 1 && !clearDepthSeparately)
+                    if (targets.Length == 1 &&
+                        !clearDepthSeparately &&
+                        work.Targets[0].MipLevel == 0 &&
+                        work.Targets[0].BaseArrayLayer == 0)
                     {
                         depthFramebuffer = GetOrCreateDepthFramebuffer(firstTarget, depth);
                     }
@@ -12559,14 +12601,18 @@ internal static unsafe class VulkanVideoPresenter
                             ? depthFramebuffer.ColorClearRenderPass
                             : depthFramebuffer.BothClearRenderPass;
                 var framebuffer = depthFramebuffer?.Framebuffer ?? firstTarget.Framebuffer;
-                if (targets.Length > 1)
+                var needsSubresourceFramebuffer = targets.Length > 1 ||
+                    work.Targets.Any(static target =>
+                        target.MipLevel != 0 || target.BaseArrayLayer != 0);
+                if (needsSubresourceFramebuffer)
                 {
                     var attachedDepth = clearDepthSeparately ? null : depth;
                     (renderPass, framebuffer) = CreateRenderPassAndFramebuffer(
                         formats,
-                        targets.Select(target => target.MipViews.Length > 0
-                            ? target.MipViews[0]
-                            : target.View).ToArray(),
+                        targets.Select((target, index) =>
+                            GetOrCreateGuestRenderTargetView(
+                                target,
+                                work.Targets[index])).ToArray(),
                         extent.Width,
                         extent.Height,
                         targets.Select(target =>
@@ -12654,7 +12700,9 @@ internal static unsafe class VulkanVideoPresenter
                         SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                         DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                         Image = targets[index].Image,
-                        SubresourceRange = ColorSubresourceRange(),
+                        SubresourceRange = GetRenderTargetSubresourceRange(
+                            targets[index],
+                            work.Targets[index]),
                     };
                 }
                 _vk.CmdPipelineBarrier(
@@ -12728,7 +12776,9 @@ internal static unsafe class VulkanVideoPresenter
                         SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                         DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                         Image = targets[index].Image,
-                        SubresourceRange = ColorSubresourceRange(),
+                        SubresourceRange = GetRenderTargetSubresourceRange(
+                            targets[index],
+                            work.Targets[index]),
                     };
                 }
                 _vk.CmdPipelineBarrier(
@@ -12985,7 +13035,13 @@ internal static unsafe class VulkanVideoPresenter
                 var targetDescriptor = work.Targets[index];
                 var image = GetOrCreateGuestImage(
                     targetDescriptor,
-                    targetFormats[index].Format);
+                    targetFormats[index].Format,
+                    requiredArrayLayers: GetRequiredArrayLayers(
+                        work.Targets,
+                        targetDescriptor.Address),
+                    requiredMipLevels: GetRequiredMipLevels(
+                        work.Targets,
+                        targetDescriptor.Address));
                 if (TakeGuestImageInitialData(targetDescriptor.Address) is { } initialData &&
                     !image.Initialized &&
                     (ulong)initialData.Length ==
@@ -13006,7 +13062,9 @@ internal static unsafe class VulkanVideoPresenter
                     SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                     DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                     Image = image.Image,
-                    SubresourceRange = ColorSubresourceRange(0, image.MipLevels),
+                    SubresourceRange = GetRenderTargetSubresourceRange(
+                        image,
+                        targetDescriptor),
                 };
                 _vk.CmdPipelineBarrier(
                     commandBuffer,
@@ -13022,7 +13080,9 @@ internal static unsafe class VulkanVideoPresenter
                     1,
                     &toTransferDst);
 
-                var range = ColorSubresourceRange(0, image.MipLevels);
+                var range = GetRenderTargetSubresourceRange(
+                    image,
+                    targetDescriptor);
                 _vk.CmdClearColorImage(
                     commandBuffer,
                     image.Image,
@@ -13041,7 +13101,9 @@ internal static unsafe class VulkanVideoPresenter
                     SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                     DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                     Image = image.Image,
-                    SubresourceRange = ColorSubresourceRange(0, image.MipLevels),
+                    SubresourceRange = GetRenderTargetSubresourceRange(
+                        image,
+                        targetDescriptor),
                 };
                 _vk.CmdPipelineBarrier(
                     commandBuffer,
@@ -13397,14 +13459,123 @@ internal static unsafe class VulkanVideoPresenter
             }
         }
 
+        private static uint GetRequiredArrayLayers(
+            IReadOnlyList<GuestRenderTarget> targets,
+            ulong address)
+        {
+            ulong requiredLayers = 1;
+            foreach (var target in targets)
+            {
+                if (target.Address != address)
+                {
+                    continue;
+                }
+
+                requiredLayers = Math.Max(
+                    requiredLayers,
+                    (ulong)target.BaseArrayLayer + Math.Max(target.LayerCount, 1u));
+            }
+
+            return checked((uint)Math.Min(requiredLayers, uint.MaxValue));
+        }
+
+        private static uint GetRequiredMipLevels(
+            IReadOnlyList<GuestRenderTarget> targets,
+            ulong address)
+        {
+            var requiredMipLevels = 1u;
+            foreach (var target in targets)
+            {
+                if (target.Address == address)
+                {
+                    requiredMipLevels = Math.Max(
+                        requiredMipLevels,
+                        Math.Max(target.MipLevels, target.MipLevel + 1));
+                }
+            }
+
+            return requiredMipLevels;
+        }
+
+        private ImageView GetOrCreateGuestRenderTargetView(
+            GuestImageResource resource,
+            GuestRenderTarget target)
+        {
+            var mipLevel = Math.Min(target.MipLevel, resource.MipLevels - 1);
+            var arrayLayer = Math.Min(target.BaseArrayLayer, resource.ArrayLayers - 1);
+            if (mipLevel == 0 && arrayLayer == 0 && resource.ArrayLayers == 1)
+            {
+                return resource.MipViews.Length > 0
+                    ? resource.MipViews[0]
+                    : resource.View;
+            }
+
+            var key = (mipLevel, arrayLayer);
+            if (resource.AttachmentViews.TryGetValue(key, out var existing))
+            {
+                return existing;
+            }
+
+            var viewInfo = new ImageViewCreateInfo
+            {
+                SType = StructureType.ImageViewCreateInfo,
+                Image = resource.Image,
+                ViewType = ImageViewType.Type2D,
+                Format = resource.Format,
+                Components = new ComponentMapping(
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity),
+                SubresourceRange = ColorSubresourceRange(
+                    mipLevel,
+                    levelCount: 1,
+                    layerCount: 1,
+                    baseArrayLayer: arrayLayer),
+            };
+            Check(
+                _vk.CreateImageView(_device, &viewInfo, null, out var view),
+                "vkCreateImageView(render target subresource)");
+            resource.AttachmentViews.Add(key, view);
+            SetDebugName(
+                ObjectType.ImageView,
+                view.Handle,
+                $"SharpEmu guest 0x{resource.Address:X16} rt mip{mipLevel} layer{arrayLayer}");
+            return view;
+        }
+
+        private static ImageSubresourceRange GetRenderTargetSubresourceRange(
+            GuestImageResource resource,
+            GuestRenderTarget target) =>
+            ColorSubresourceRange(
+                Math.Min(target.MipLevel, resource.MipLevels - 1),
+                levelCount: 1,
+                layerCount: 1,
+                baseArrayLayer: Math.Min(
+                    target.BaseArrayLayer,
+                    resource.ArrayLayers - 1));
+
         private GuestImageResource GetOrCreateGuestImage(
             GuestRenderTarget target,
             Format format,
             bool requiresStorage = false,
             uint type = Gen5TextureType2D,
-            uint depth = 1)
+            uint depth = 1,
+            uint requiredArrayLayers = 0,
+            uint requiredMipLevels = 0)
         {
             depth = GetGuestTextureDepth(type, depth);
+            var arrayLayers = IsGuestTexture3D(type)
+                ? 1u
+                : Math.Max(
+                    requiredArrayLayers,
+                    checked(target.BaseArrayLayer + Math.Max(target.LayerCount, 1u)));
+            if (arrayLayers > _maxImageArrayLayers)
+            {
+                throw new InvalidOperationException(
+                    $"Guest render-target array needs {arrayLayers} layers, " +
+                    $"but the selected Vulkan device supports {_maxImageArrayLayers}.");
+            }
             var supportsStorageUsage = SupportsStorageImage(format);
             if (requiresStorage && !supportsStorageUsage)
             {
@@ -13425,7 +13596,7 @@ internal static unsafe class VulkanVideoPresenter
                 physicalWidth,
                 physicalHeight,
                 physicalDepth,
-                target.MipLevels);
+                Math.Max(target.MipLevels, requiredMipLevels));
             var guestFormat = GetGuestTextureFormat(target.Format, target.NumberType);
             var requestedKey = new GuestImageVariantKey(
                 target.Address,
@@ -13434,6 +13605,7 @@ internal static unsafe class VulkanVideoPresenter
                 depth,
                 type,
                 mipLevels,
+                arrayLayers,
                 guestFormat,
                 format);
             if (_guestImages.TryGetValue(target.Address, out var existing))
@@ -13443,6 +13615,7 @@ internal static unsafe class VulkanVideoPresenter
                     existing.LogicalDepth == depth &&
                     existing.Type == type &&
                     existing.MipLevels == mipLevels &&
+                    existing.ArrayLayers >= arrayLayers &&
                     existing.GuestFormat == guestFormat &&
                     existing.Format == format)
                 {
@@ -13498,6 +13671,7 @@ internal static unsafe class VulkanVideoPresenter
                         existing.LogicalDepth,
                         existing.Type,
                         existing.MipLevels,
+                        existing.ArrayLayers,
                         existing.GuestFormat,
                         existing.Format),
                     existing);
@@ -13564,7 +13738,7 @@ internal static unsafe class VulkanVideoPresenter
                 Format = format,
                 Extent = new Extent3D(physicalWidth, physicalHeight, physicalDepth),
                 MipLevels = mipLevels,
-                ArrayLayers = 1,
+                ArrayLayers = arrayLayers,
                 Samples = SampleCountFlags.Count1Bit,
                 Tiling = ImageTiling.Optimal,
                 Usage =
@@ -13594,20 +13768,20 @@ internal static unsafe class VulkanVideoPresenter
             Check(_vk.BindImageMemory(_device, image, memory, 0), "vkBindImageMemory(offscreen)");
             // Rendering and uploads only define the mips they touch; define the whole
             // chain once so full-chain sampled binds never read Undefined layout.
-            TransitionNewGuestImageToSampled(image, mipLevels);
+            TransitionNewGuestImageToSampled(image, mipLevels, arrayLayers);
 
             var viewInfo = new ImageViewCreateInfo
             {
                 SType = StructureType.ImageViewCreateInfo,
                 Image = image,
-                ViewType = GetGuestTextureViewType(type),
+                ViewType = GetGuestTextureViewType(type, arrayLayers > 1),
                 Format = format,
                 Components = new ComponentMapping(
                     ComponentSwizzle.Identity,
                     ComponentSwizzle.Identity,
                     ComponentSwizzle.Identity,
                     ComponentSwizzle.Identity),
-                SubresourceRange = ColorSubresourceRange(0, mipLevels),
+                SubresourceRange = ColorSubresourceRange(0, mipLevels, arrayLayers),
             };
             Check(
                 _vk.CreateImageView(_device, &viewInfo, null, out var view),
@@ -13616,7 +13790,7 @@ internal static unsafe class VulkanVideoPresenter
             var mipViews = new ImageView[mipLevels];
             for (uint mipLevel = 0; mipLevel < mipLevels; mipLevel++)
             {
-                viewInfo.SubresourceRange = ColorSubresourceRange(mipLevel, 1);
+                viewInfo.SubresourceRange = ColorSubresourceRange(mipLevel, 1, arrayLayers);
                 ImageView mipView;
                 Check(
                     _vk.CreateImageView(
@@ -13652,6 +13826,7 @@ internal static unsafe class VulkanVideoPresenter
                 LogicalHeight = target.Height,
                 LogicalDepth = depth,
                 MipLevels = mipLevels,
+                ArrayLayers = arrayLayers,
                 GuestFormat = guestFormat,
                 Format = format,
                 Image = image,
@@ -14225,6 +14400,15 @@ internal static unsafe class VulkanVideoPresenter
             }
             resource.FormatViews.Clear();
 
+            foreach (var attachmentView in resource.AttachmentViews.Values)
+            {
+                if (attachmentView.Handle != 0)
+                {
+                    _vk.DestroyImageView(_device, attachmentView, null);
+                }
+            }
+            resource.AttachmentViews.Clear();
+
             if (resource.Framebuffer.Handle != 0)
             {
                 _vk.DestroyFramebuffer(_device, resource.Framebuffer, null);
@@ -14387,7 +14571,10 @@ internal static unsafe class VulkanVideoPresenter
                 ViewType = GetGuestTextureViewType(resource.Type, arrayedView),
                 Format = format,
                 Components = ToVkComponentMapping(dstSelect),
-                SubresourceRange = ColorSubresourceRange(mipLevel, levelCount),
+                SubresourceRange = ColorSubresourceRange(
+                    mipLevel,
+                    levelCount,
+                    arrayedView ? resource.ArrayLayers : 1),
             };
             ImageView view;
             Check(
@@ -17835,12 +18022,14 @@ internal static unsafe class VulkanVideoPresenter
         private static ImageSubresourceRange ColorSubresourceRange(
             uint baseMipLevel = 0,
             uint levelCount = 1,
-            uint layerCount = 1) =>
+            uint layerCount = 1,
+            uint baseArrayLayer = 0) =>
             new()
             {
                 AspectMask = ImageAspectFlags.ColorBit,
                 BaseMipLevel = baseMipLevel,
                 LevelCount = levelCount,
+                BaseArrayLayer = baseArrayLayer,
                 LayerCount = layerCount,
             };
 
