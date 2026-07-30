@@ -20,6 +20,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/SharpEmu.SourceGenerators/SharpEmu.SourceGenerators.csproj" />
     <Project Path="src/Touche.Core.Contracts/Touche.Core.Contracts.csproj" />
     <Project Path="src/Touche.Core.Hosting/Touche.Core.Hosting.csproj" />
+    <Project Path="src/Touche.Firmware/Touche.Firmware.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj" />
@@ -28,5 +29,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="tests/SharpEmu.SourceGenerators.Tests/SharpEmu.SourceGenerators.Tests.csproj" />
     <Project Path="tests/Touche.Core.Contracts.Tests/Touche.Core.Contracts.Tests.csproj" />
     <Project Path="tests/Touche.Core.Hosting.Tests/Touche.Core.Hosting.Tests.csproj" />
+    <Project Path="tests/Touche.Firmware.Tests/Touche.Firmware.Tests.csproj" />
   </Folder>
 </Solution>
