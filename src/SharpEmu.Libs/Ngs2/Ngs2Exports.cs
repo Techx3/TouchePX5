@@ -25,6 +25,7 @@ public static class Ngs2Exports
     private static readonly Dictionary<ulong, VoiceState> Voices = new();
     private static long _nextUid;
     private static long _renderCount;
+    private static long _unsupportedWaveformCount;
 
     // NGS2 renders one grain of interleaved float32 per sceNgs2SystemRender.
     // The grain length defaults to 256 frames (matching the 8192-byte AudioOut
@@ -38,6 +39,7 @@ public static class Ngs2Exports
 
         public uint Uid { get; }
         public int GrainSamples { get; set; } = DefaultGrainSamples;
+        public long ConsecutiveSilentRenders { get; set; }
     }
 
     private sealed record RackState(ulong SystemHandle, uint RackId);
@@ -302,6 +304,9 @@ public static class Ngs2Exports
 
             switch (id)
             {
+                case 0x00000002:
+                    ApplyPortVolumeParam(ctx, voiceHandle, offset);
+                    break;
                 case 0x10000001:
                     ApplyWaveformParam(ctx, voiceHandle, offset);
                     break;
@@ -393,8 +398,15 @@ public static class Ngs2Exports
     // (PS-ADPCM) container. Decode it once and arm the voice for playback.
     private static void ApplyWaveformParam(CpuContext ctx, ulong voiceHandle, ulong paramOffset)
     {
-        if (!ctx.TryReadUInt64(paramOffset + 8, out var dataAddr) || dataAddr <= 0x10000)
+        if (!TryResolveVagDataAddress(ctx, paramOffset, out var dataAddr))
         {
+            var failure = Interlocked.Increment(ref _unsupportedWaveformCount);
+            if (failure <= 8 || (failure & (failure - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] ngs2.waveform_unresolved count={failure} " +
+                    $"voice=0x{voiceHandle:X16} param=0x{paramOffset:X}");
+            }
             return;
         }
 
@@ -409,10 +421,7 @@ public static class Ngs2Exports
         }
 
         Span<byte> header = stackalloc byte[Ngs2VagDecoder.VagHeaderSize];
-        if (!ctx.Memory.TryRead(dataAddr, header) || !Ngs2VagDecoder.IsVag(header))
-        {
-            return;
-        }
+        ctx.Memory.TryRead(dataAddr, header);
 
         var declaredSize = (int)BinaryPrimitives.ReadUInt32BigEndian(header[0x0C..]);
         var totalBytes = Ngs2VagDecoder.VagHeaderSize + Math.Clamp(declaredSize, 0, 8 * 1024 * 1024);
@@ -464,11 +473,70 @@ public static class Ngs2Exports
         }
     }
 
-    // Port matrix param: the first float level is a reasonable proxy for the
-    // voice's output gain until per-channel panning is implemented.
-    private static void ApplyPortMatrixParam(CpuContext ctx, ulong voiceHandle, ulong paramOffset)
+    // Some NGS2 clients pass the VAG container directly while others put it in
+    // a waveform-block descriptor. Resolve both layouts without assuming that
+    // every pointer-shaped field is valid guest memory.
+    private static bool TryResolveVagDataAddress(
+        CpuContext ctx, ulong paramOffset, out ulong dataAddress)
     {
-        if (!ctx.TryReadUInt32(paramOffset + 12, out var levelBits))
+        dataAddress = 0;
+        if (!ctx.TryReadUInt16(paramOffset, out var paramSize))
+        {
+            return false;
+        }
+
+        var scanBytes = Math.Clamp((int)paramSize, 16, 64);
+        for (var fieldOffset = 8; fieldOffset + sizeof(ulong) <= scanBytes; fieldOffset += sizeof(ulong))
+        {
+            if (!ctx.TryReadUInt64(paramOffset + (ulong)fieldOffset, out var candidate) ||
+                candidate <= 0x10000)
+            {
+                continue;
+            }
+
+            if (IsVagAddress(ctx, candidate))
+            {
+                dataAddress = candidate;
+                return true;
+            }
+
+            // One level of indirection covers SceNgs2WaveformBlock-style
+            // descriptors while keeping malformed guest pointers bounded.
+            for (var nestedOffset = 0; nestedOffset < 64; nestedOffset += sizeof(ulong))
+            {
+                if (!ctx.TryReadUInt64(candidate + (ulong)nestedOffset, out var nested) ||
+                    nested <= 0x10000 || !IsVagAddress(ctx, nested))
+                {
+                    continue;
+                }
+
+                dataAddress = nested;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsVagAddress(CpuContext ctx, ulong address)
+    {
+        Span<byte> header = stackalloc byte[Ngs2VagDecoder.VagHeaderSize];
+        return ctx.Memory.TryRead(address, header) && Ngs2VagDecoder.IsVag(header);
+    }
+
+    // Common voice port-volume param: header, port, then float level.
+    private static void ApplyPortVolumeParam(CpuContext ctx, ulong voiceHandle, ulong paramOffset) =>
+        ApplyVoiceGain(ctx, voiceHandle, paramOffset + 12);
+
+    // Reverb/custom port matrix fallback retained for titles that encode a
+    // scalar level in this slot.
+    private static void ApplyPortMatrixParam(CpuContext ctx, ulong voiceHandle, ulong paramOffset)
+        => ApplyVoiceGain(ctx, voiceHandle, paramOffset + 12);
+
+    private static void ApplyVoiceGain(
+        CpuContext ctx, ulong voiceHandle, ulong levelAddress)
+    {
+        if (!ctx.TryReadUInt32(levelAddress, out var levelBits))
         {
             return;
         }
@@ -653,6 +721,8 @@ public static class Ngs2Exports
         var floatCount = capacityFrames * channels;
         var accum = ArrayPool<float>.Shared.Rent(floatCount);
         var mixedAnything = false;
+        var armedVoices = 0;
+        var playingVoices = 0;
         try
         {
             Array.Clear(accum, 0, floatCount);
@@ -661,6 +731,14 @@ public static class Ngs2Exports
                 foreach (var pair in Voices)
                 {
                     var voice = pair.Value;
+                    if (voice.Pcm is not null && voice.Pcm.Length != 0)
+                    {
+                        armedVoices++;
+                    }
+                    if (voice.Playing)
+                    {
+                        playingVoices++;
+                    }
                     if (!voice.Playing || voice.Pcm is null || voice.Pcm.Length == 0)
                     {
                         continue;
@@ -681,10 +759,45 @@ public static class Ngs2Exports
             {
                 WriteGrain(ctx, bufferAddress, accum, floatCount);
             }
+
+            TraceMixerHealth(systemHandle, mixedAnything, armedVoices, playingVoices);
         }
         finally
         {
             ArrayPool<float>.Shared.Return(accum);
+        }
+    }
+
+    private static void TraceMixerHealth(
+        ulong systemHandle, bool mixedAnything, int armedVoices, int playingVoices)
+    {
+        lock (StateGate)
+        {
+            if (!Systems.TryGetValue(systemHandle, out var system))
+            {
+                return;
+            }
+
+            if (mixedAnything)
+            {
+                var previous = system.ConsecutiveSilentRenders;
+                system.ConsecutiveSilentRenders = 0;
+                if (previous >= 256)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][INFO] ngs2.mix_recovered system=0x{systemHandle:X16} " +
+                        $"silent_renders={previous} armed={armedVoices} playing={playingVoices}");
+                }
+                return;
+            }
+
+            var count = ++system.ConsecutiveSilentRenders;
+            if (count >= 256 && (count & (count - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] ngs2.silent_mix system=0x{systemHandle:X16} " +
+                    $"renders={count} armed={armedVoices} playing={playingVoices}");
+            }
         }
     }
 
