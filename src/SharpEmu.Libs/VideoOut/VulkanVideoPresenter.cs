@@ -455,14 +455,16 @@ internal static unsafe class VulkanVideoPresenter
             ? fenceMs * 1_000_000UL
             : 3_000_000_000UL;
     // Ordered PM4 actions split draw batches at guest-visible synchronization
-    // points. Keep the probe short so a busy guest queue cannot stall the
-    // presenter for several milliseconds at every cache invalidation.
+    // points. Poll fences by default and defer an unfinished logical queue;
+    // even a short wait here is paid once per marker and can accumulate into
+    // thousands of render-thread stalls. A non-zero override remains useful
+    // for targeted diagnostics.
     private static readonly ulong _orderedVisibilityProbeNs =
         ulong.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_ORDERED_VISIBILITY_WAIT_MS"),
             out var orderedVisibilityWaitMs)
             ? orderedVisibilityWaitMs * 1_000_000UL
-            : 2_000_000UL;
+            : 0UL;
     // When making room in the in-flight submission queue from the macOS MAIN
     // thread (Render() -> guest-work drain), block only this long per attempt
     // instead of the full fence timeout. If a slow/capped compute submission
@@ -5860,11 +5862,10 @@ internal static unsafe class VulkanVideoPresenter
             var status = _vk.GetFenceStatus(_device, fence);
             if (status == Result.NotReady)
             {
-                // Never block the drain for seconds on ordered-action visibility.
-                // A multi-second WaitForFences here tanked Dead Cells (~0.4fps)
-                // and soft-locked GTA after intro once the GPU was busy. Sync
-                // item ceiling is high enough that deferring a tick is safe;
-                // take a short probe wait on dedicated render threads only.
+                // Keep normal rendering non-blocking. The ordered item remains
+                // at the head of its logical queue and is retried after its
+                // predecessor fence signals. Other logical queues may continue
+                // filling the existing in-flight command-buffer ring.
                 if (OperatingSystem.IsMacOS())
                 {
                     return false;
@@ -14654,21 +14655,12 @@ internal static unsafe class VulkanVideoPresenter
 
                 if (deferGuestWork)
                 {
-                    // macOS: non-blocking defer — exclude this logical queue for
-                    // the rest of the tick so sibling queues can still progress.
-                    // Windows/Linux already blocked in WaitForFences; excluding
-                    // the only busy queue ends the drain immediately and leaves
-                    // OrderedGuestAction stacked. Leave the item at the front and
-                    // end this Render; the next tick retries after GPU progress.
-                    if (OperatingSystem.IsMacOS())
-                    {
-                        deferredOrderedQueues ??= new HashSet<string>(StringComparer.Ordinal);
-                        deferredOrderedQueues.Add(pendingGuestWork.Queue.Name);
-                    }
-                    else
-                    {
-                        break;
-                    }
+                    // Preserve FIFO within this logical queue while allowing
+                    // sibling queues to progress during the same render tick.
+                    // If this is the only ready queue, TryTakeGuestWork ends the
+                    // drain and the next tick polls the fence again.
+                    deferredOrderedQueues ??= new HashSet<string>(StringComparer.Ordinal);
+                    deferredOrderedQueues.Add(pendingGuestWork.Queue.Name);
                 }
 
                 if (workStart != 0)
