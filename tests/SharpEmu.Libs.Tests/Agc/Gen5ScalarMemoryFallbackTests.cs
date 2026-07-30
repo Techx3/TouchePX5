@@ -85,6 +85,12 @@ public sealed class Gen5ScalarMemoryFallbackTests
                         out var evaluation,
                         out var error),
                     error);
+                Assert.Equal(
+                    state.UserData,
+                    evaluation.InitialScalarRegisters.Take(state.UserData.Count));
+                Assert.All(
+                    evaluation.InitialScalarRegisters.Skip(16).Take(4),
+                    value => Assert.Equal(0u, value));
                 Assert.Equal(expected, evaluation.ScalarRegisters.Skip(16).Take(4));
             }
             finally

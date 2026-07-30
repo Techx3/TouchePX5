@@ -178,7 +178,11 @@ public static class Gen5ShaderScalarEvaluator
         // the per-load additions the loop used to make are redundant.
         var runtimeScalarRegisters = state.Program.RuntimeScalarRegisters;
         var resolvedImageByPc = new Dictionary<uint, int>();
-        var finalScalarRegisters = (uint[])scalarRegisters.Clone();
+        // The working register file itself becomes the final snapshot. The
+        // initial snapshot above is the only copy needed for the primary path;
+        // supplemental CFG paths still receive their own clones when queued.
+        // Keeping the primary array avoids two 256-dword allocations per draw.
+        var finalScalarRegisters = scalarRegisters;
         var pendingPaths = new Stack<ScalarPathState>();
         var visitedPaths = new HashSet<ScalarPathKey>();
 
@@ -207,7 +211,7 @@ public static class Gen5ShaderScalarEvaluator
         {
             QueuePath(
                 state.Program.Instructions[0].Pc,
-                (uint[])scalarRegisters.Clone(),
+                scalarRegisters,
                 execMask,
                 pathScc: false,
                 supplemental: false);
@@ -689,7 +693,7 @@ public static class Gen5ShaderScalarEvaluator
 
             if (!path.Supplemental)
             {
-                finalScalarRegisters = (uint[])scalarRegisters.Clone();
+                finalScalarRegisters = scalarRegisters;
             }
         }
 
