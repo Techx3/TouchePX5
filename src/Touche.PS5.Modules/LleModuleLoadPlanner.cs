@@ -15,6 +15,7 @@ public sealed class LleModuleLoadPlanner
     private const int ElfHeaderSize = 64;
     private const int ProgramHeaderSize = 56;
     private const int MaximumProgramHeaders = 4096;
+    private const long MaximumModuleBytes = 256L * 1024 * 1024;
     private const ulong MaximumImageSpan = 16UL * 1024 * 1024 * 1024;
     private const uint ProgramTypeLoad = 1;
     private const uint ProgramTypeDynamic = 2;
@@ -49,7 +50,12 @@ public sealed class LleModuleLoadPlanner
             throw new InvalidDataException("The mounted firmware artifact does not match the selected module.");
         }
 
-        return await ParseAsync(module, handle.Content, handle.Artifact.Size, cancellationToken)
+        return await ParseAsync(
+                catalog.ProfileId,
+                module,
+                handle.Content,
+                handle.Artifact.Size,
+                cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -91,12 +97,17 @@ public sealed class LleModuleLoadPlanner
     }
 
     private static async Task<LleModuleLoadPlan> ParseAsync(
+        string profileId,
         FirmwareModule module,
         Stream stream,
         long artifactSize,
         CancellationToken cancellationToken)
     {
-        if (!stream.CanRead || !stream.CanSeek || artifactSize < ElfHeaderSize || stream.Length != artifactSize)
+        if (!stream.CanRead ||
+            !stream.CanSeek ||
+            artifactSize < ElfHeaderSize ||
+            artifactSize > MaximumModuleBytes ||
+            stream.Length != artifactSize)
         {
             throw new InvalidDataException("The firmware module stream is not a valid seekable ELF source.");
         }
@@ -201,6 +212,7 @@ public sealed class LleModuleLoadPlanner
 
         return new LleModuleLoadPlan
         {
+            FirmwareProfileId = profileId,
             ModuleVirtualPath = module.VirtualPath,
             ModuleHash = module.Sha256,
             ElfType = elfType,

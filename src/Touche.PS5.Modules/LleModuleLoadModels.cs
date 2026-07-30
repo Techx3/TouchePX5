@@ -26,6 +26,8 @@ public sealed record LleLoadSegment(
 
 public sealed record LleModuleLoadPlan
 {
+    public required string FirmwareProfileId { get; init; }
+
     public required string ModuleVirtualPath { get; init; }
 
     public required string ModuleHash { get; init; }
@@ -41,4 +43,27 @@ public sealed record LleModuleLoadPlan
     public required bool HasDynamicTable { get; init; }
 
     public required IReadOnlyList<LleLoadSegment> Segments { get; init; }
+}
+
+public sealed record LleMappedSegment(
+    int ProgramHeaderIndex,
+    ulong RuntimeAddress,
+    ulong MemorySize,
+    LleSegmentPermissions Permissions);
+
+public sealed record LleMappedModule
+{
+    public required string FirmwareProfileId { get; init; }
+
+    public required string ModuleVirtualPath { get; init; }
+
+    public required string ModuleHash { get; init; }
+
+    public required ulong RuntimeImageStart { get; init; }
+
+    public required ulong RuntimeEntryPoint { get; init; }
+
+    public required ulong ImageSize { get; init; }
+
+    public required IReadOnlyList<LleMappedSegment> Segments { get; init; }
 }

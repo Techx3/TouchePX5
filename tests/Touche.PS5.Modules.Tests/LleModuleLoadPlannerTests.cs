@@ -44,6 +44,82 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
     }
 
     [Fact]
+    public async Task MapsEverySegmentAndCommitsOnlyAfterSuccessfulStaging()
+    {
+        var imported = await ImportAsync(CreateElf());
+        var catalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(catalog.Modules);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var plan = await new LleModuleLoadPlanner().BuildAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+        var factory = new RecordingTransactionFactory();
+
+        var mapped = await new LleModuleMapper().MapAsync(
+            plan,
+            runtimeImageStart: 0x8000,
+            fileSystem,
+            factory);
+
+        Assert.True(factory.Transaction.Committed);
+        Assert.False(factory.Transaction.RolledBack);
+        Assert.Equal(0x8010UL, mapped.RuntimeEntryPoint);
+        Assert.Equal(0x8000UL, Assert.Single(mapped.Segments).RuntimeAddress);
+        var staged = Assert.Single(factory.Transaction.Segments);
+        Assert.Equal(0x200, staged.InitialData.Length);
+        Assert.Equal(0x300UL, staged.MemorySize);
+    }
+
+    [Fact]
+    public async Task RollsBackTransactionWhenSegmentStagingFails()
+    {
+        var imported = await ImportAsync(CreateElf());
+        var catalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(catalog.Modules);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var plan = await new LleModuleLoadPlanner().BuildAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+        var factory = new RecordingTransactionFactory(failDuringStage: true);
+
+        await Assert.ThrowsAsync<IOException>(() => new LleModuleMapper().MapAsync(
+            plan,
+            runtimeImageStart: 0x8000,
+            fileSystem,
+            factory));
+
+        Assert.False(factory.Transaction.Committed);
+        Assert.True(factory.Transaction.RolledBack);
+        Assert.Empty(factory.Transaction.Segments);
+    }
+
+    [Fact]
+    public async Task RollsBackStagedSegmentsWhenCommitFails()
+    {
+        var imported = await ImportAsync(CreateElf());
+        var catalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(catalog.Modules);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var plan = await new LleModuleLoadPlanner().BuildAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+        var factory = new RecordingTransactionFactory(failDuringCommit: true);
+
+        await Assert.ThrowsAsync<IOException>(() => new LleModuleMapper().MapAsync(
+            plan,
+            runtimeImageStart: 0x8000,
+            fileSystem,
+            factory));
+
+        Assert.False(factory.Transaction.Committed);
+        Assert.True(factory.Transaction.RolledBack);
+        Assert.Empty(factory.Transaction.Segments);
+    }
+
+    [Fact]
     public async Task RejectsCataloguedSegmentThatExceedsVerifiedObject()
     {
         var bytes = CreateElf();
@@ -207,6 +283,77 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
         ReasonCode = "module.lle.compatible",
         Reason = "Test-compatible module.",
     };
+
+    private sealed class RecordingTransactionFactory(
+        bool failDuringStage = false,
+        bool failDuringCommit = false)
+        : ILleGuestMemoryTransactionFactory
+    {
+        public RecordingTransaction Transaction { get; } = new(failDuringStage, failDuringCommit);
+
+        public ValueTask<ILleGuestMemoryTransaction> BeginAsync(
+            string moduleVirtualPath,
+            ulong runtimeImageStart,
+            ulong imageSize,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<ILleGuestMemoryTransaction>(Transaction);
+    }
+
+    private sealed class RecordingTransaction(bool failDuringStage, bool failDuringCommit)
+        : ILleGuestMemoryTransaction
+    {
+        public List<StagedSegment> Segments { get; } = [];
+
+        public bool Committed { get; private set; }
+
+        public bool RolledBack { get; private set; }
+
+        public ValueTask StageSegmentAsync(
+            ulong runtimeAddress,
+            ulong memorySize,
+            ulong sourceFileOffset,
+            ReadOnlyMemory<byte> initialData,
+            LleSegmentPermissions finalPermissions,
+            CancellationToken cancellationToken = default)
+        {
+            if (failDuringStage)
+            {
+                throw new IOException("Injected staging failure.");
+            }
+            Segments.Add(new StagedSegment(
+                runtimeAddress,
+                memorySize,
+                initialData.ToArray(),
+                finalPermissions));
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask CommitAsync(CancellationToken cancellationToken = default)
+        {
+            if (failDuringCommit)
+            {
+                throw new IOException("Injected commit failure.");
+            }
+            Committed = true;
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            if (!Committed)
+            {
+                Segments.Clear();
+                RolledBack = true;
+            }
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed record StagedSegment(
+        ulong RuntimeAddress,
+        ulong MemorySize,
+        byte[] InitialData,
+        LleSegmentPermissions Permissions);
 
     public void Dispose()
     {
