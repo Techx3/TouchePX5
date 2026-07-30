@@ -695,6 +695,8 @@ public partial class MainWindow : Window
         FirmwareNoticeText.Text = loc.Get("Options.Firmware.Notice");
         ActiveFirmwareRow.Label = loc.Get("Options.Firmware.Active.Label");
         ExtractedFirmwareRow.Label = loc.Get("Options.Firmware.Extracted.Label");
+        ExperimentalFirmwareLleRow.Label = loc.Get("Options.Firmware.Experimental.Label");
+        ExperimentalFirmwareLleRow.Description = loc.Get("Options.Firmware.Experimental.Desc");
         InstallFirmwareButton.Content = loc.Get("Options.Firmware.Install");
         ImportExtractedFirmwareButton.Content = loc.Get("Options.Firmware.Extracted.Import");
         OpenFirmwareFolderButton.Content = loc.Get("Options.Firmware.OpenFolder");
