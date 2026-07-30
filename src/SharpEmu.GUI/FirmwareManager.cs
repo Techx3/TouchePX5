@@ -12,7 +12,10 @@ public sealed record InstalledFirmware(
     DateTimeOffset InstalledAtUtc,
     string ContainerFormat,
     string SourceFileName,
-    string PackagePath)
+    string PackagePath,
+    FirmwareContainerKind ContainerKind,
+    int? EntryCount,
+    bool HasVersionMetadataEntry)
 {
     public string DisplayName =>
         $"{ContainerFormat} · {FormatSize(Size)} · {Sha256[..Math.Min(12, Sha256.Length)]}";
@@ -38,11 +41,10 @@ public sealed record FirmwareInstallResult(InstalledFirmware Firmware, bool Alre
 /// </summary>
 public sealed class FirmwareManager
 {
-    private const int ManifestSchemaVersion = 1;
+    private const int ManifestSchemaVersion = 2;
     private const int MinimumContainerSize = 512;
     private const string PackageFileName = "PS5UPDATE.PUP";
     private const string ManifestFileName = "manifest.json";
-    private static readonly byte[] Slb2Magic = "SLB2"u8.ToArray();
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
     private readonly string _rootDirectory;
@@ -89,7 +91,7 @@ public sealed class FirmwareManager
                     File.ReadAllText(manifestPath),
                     JsonOptions);
                 if (manifest is null ||
-                    manifest.SchemaVersion != ManifestSchemaVersion ||
+                    manifest.SchemaVersion is < 1 or > ManifestSchemaVersion ||
                     !string.Equals(manifest.Sha256, hash, StringComparison.OrdinalIgnoreCase) ||
                     new FileInfo(packagePath).Length != manifest.Size)
                 {
@@ -128,10 +130,12 @@ public sealed class FirmwareManager
         var sourceInfo = new FileInfo(fullSourcePath);
         if (sourceInfo.Length < MinimumContainerSize)
         {
-            throw new InvalidDataException("The firmware package is too small to be an SLB2 container.");
+            throw new InvalidDataException("The firmware package is too small to contain a valid container.");
         }
 
-        await ValidateContainerHeaderAsync(fullSourcePath, cancellationToken).ConfigureAwait(false);
+        var inspection = await FirmwarePackageInspector
+            .InspectAsync(fullSourcePath, cancellationToken)
+            .ConfigureAwait(false);
 
         Directory.CreateDirectory(_rootDirectory);
         var stagingDirectory = Path.Combine(_rootDirectory, ".staging");
@@ -180,7 +184,8 @@ public sealed class FirmwareManager
             var installationDirectory = Path.Combine(_rootDirectory, hash);
             var packagePath = Path.Combine(installationDirectory, PackageFileName);
             var manifestPath = Path.Combine(installationDirectory, ManifestFileName);
-            var alreadyInstalled = File.Exists(packagePath);
+            var alreadyInstalled = File.Exists(packagePath) &&
+                                   new FileInfo(packagePath).Length == sourceInfo.Length;
 
             Directory.CreateDirectory(installationDirectory);
             if (alreadyInstalled)
@@ -189,7 +194,7 @@ public sealed class FirmwareManager
             }
             else
             {
-                File.Move(stagingPath, packagePath);
+                File.Move(stagingPath, packagePath, true);
             }
 
             var manifest = new FirmwareManifest(
@@ -197,8 +202,11 @@ public sealed class FirmwareManager
                 hash,
                 sourceInfo.Length,
                 DateTimeOffset.UtcNow,
-                "SLB2",
-                Path.GetFileName(fullSourcePath));
+                inspection.FormatLabel,
+                Path.GetFileName(fullSourcePath),
+                inspection.Kind,
+                inspection.EntryCount,
+                inspection.HasVersionMetadataEntry);
             var manifestTempPath = manifestPath + ".tmp";
             await File.WriteAllTextAsync(
                 manifestTempPath,
@@ -215,30 +223,16 @@ public sealed class FirmwareManager
         }
     }
 
-    private static async Task ValidateContainerHeaderAsync(string path, CancellationToken cancellationToken)
-    {
-        var header = new byte[Slb2Magic.Length];
-        await using var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            4096,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
-        var read = await stream.ReadAsync(header, cancellationToken).ConfigureAwait(false);
-        if (read != header.Length || !header.AsSpan().SequenceEqual(Slb2Magic))
-        {
-            throw new InvalidDataException("The selected file is not an SLB2 firmware container.");
-        }
-    }
-
     private static InstalledFirmware ToInstalled(FirmwareManifest manifest, string packagePath) => new(
         manifest.Sha256,
         manifest.Size,
         manifest.InstalledAtUtc,
         manifest.ContainerFormat,
         manifest.SourceFileName,
-        packagePath);
+        packagePath,
+        manifest.ContainerKind,
+        manifest.EntryCount,
+        manifest.HasVersionMetadataEntry);
 
     private static bool IsSha256(string value) =>
         value.Length == 64 && value.All(character => char.IsAsciiHexDigit(character));
@@ -263,5 +257,8 @@ public sealed class FirmwareManager
         long Size,
         DateTimeOffset InstalledAtUtc,
         string ContainerFormat,
-        string SourceFileName);
+        string SourceFileName,
+        FirmwareContainerKind ContainerKind = FirmwareContainerKind.OfficialSlb2,
+        int? EntryCount = null,
+        bool HasVersionMetadataEntry = false);
 }

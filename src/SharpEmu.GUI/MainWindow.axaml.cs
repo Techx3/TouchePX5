@@ -961,7 +961,8 @@ public partial class MainWindow : Window
                 : Localization.Instance.Format(
                     "Options.Firmware.Active.Desc",
                     selected.SourceFileName,
-                    selected.Sha256);
+                    selected.Sha256,
+                    FirmwareCapabilityDescription(selected));
         }
         finally
         {
@@ -1027,6 +1028,7 @@ public partial class MainWindow : Window
                 result.AlreadyInstalled
                     ? "Options.Firmware.AlreadyInstalled"
                     : "Options.Firmware.Installed",
+                result.Firmware.ContainerFormat,
                 result.Firmware.Sha256);
         }
         catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException)
@@ -1061,6 +1063,22 @@ public partial class MainWindow : Window
                 "Options.Firmware.Failed",
                 exception.Message);
         }
+    }
+
+    private static string FirmwareCapabilityDescription(InstalledFirmware firmware)
+    {
+        var loc = Localization.Instance;
+        if (firmware.ContainerKind == FirmwareContainerKind.OfficialSlb2)
+        {
+            return loc.Get("Options.Firmware.Capability.Official");
+        }
+
+        return loc.Format(
+            "Options.Firmware.Capability.Decrypted",
+            firmware.EntryCount ?? 0,
+            loc.Get(firmware.HasVersionMetadataEntry
+                ? "Options.Firmware.Metadata.Present"
+                : "Options.Firmware.Metadata.Absent"));
     }
 
     private async Task OnUpdateButtonAsync()

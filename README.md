@@ -113,9 +113,11 @@ The firmware development branch can validate and store a user-supplied
 `PS5UPDATE.PUP` from **Options → Firmware → Install PUP**. Packages are copied
 to `user/firmware/<sha256>/` and never uploaded or added to the repository.
 
-This first stage verifies the `SLB2` container and its SHA-256. It does not yet
-decrypt, extract, or execute protected firmware modules, so installing a PUP
-does not currently replace Touché PX5's HLE implementations.
+The installer verifies the package SHA-256 and distinguishes an official
+encrypted `SLB2` package from a previously decrypted PUP structure. For a
+decrypted structure it also validates bounded table entries and detects the
+version-metadata entry. Touché PX5 does not decrypt protected content, and
+installing a PUP does not currently replace its HLE implementations.
 
 ## Build from source
 

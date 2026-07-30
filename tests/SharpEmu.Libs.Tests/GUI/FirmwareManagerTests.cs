@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Security.Cryptography;
+using System.Buffers.Binary;
 using SharpEmu.GUI;
 using Xunit;
 
@@ -24,7 +25,8 @@ public sealed class FirmwareManagerTests : IDisposable
         var result = await manager.InstallAsync(sourcePath);
 
         Assert.False(result.AlreadyInstalled);
-        Assert.Equal("SLB2", result.Firmware.ContainerFormat);
+        Assert.Equal("Official SLB2", result.Firmware.ContainerFormat);
+        Assert.Equal(FirmwareContainerKind.OfficialSlb2, result.Firmware.ContainerKind);
         Assert.Equal(SHA256.HashData(File.ReadAllBytes(sourcePath)), Convert.FromHexString(result.Firmware.Sha256));
         Assert.True(File.Exists(result.Firmware.PackagePath));
         Assert.Equal(File.ReadAllBytes(sourcePath), File.ReadAllBytes(result.Firmware.PackagePath));
@@ -67,12 +69,57 @@ public sealed class FirmwareManagerTests : IDisposable
         await Assert.ThrowsAsync<InvalidDataException>(() => manager.InstallAsync(sourcePath));
     }
 
+    [Fact]
+    public async Task InstallAsyncRecognizesBoundedDecryptedPupTable()
+    {
+        var sourcePath = CreateDecryptedPackage("decrypted.PUP", invalidEntryBounds: false);
+        var manager = new FirmwareManager(Path.Combine(_temporaryDirectory, "installed"));
+
+        var result = await manager.InstallAsync(sourcePath);
+
+        Assert.Equal(FirmwareContainerKind.DecryptedPup, result.Firmware.ContainerKind);
+        Assert.Equal("Decrypted PUP", result.Firmware.ContainerFormat);
+        Assert.Equal(1, result.Firmware.EntryCount);
+        Assert.True(result.Firmware.HasVersionMetadataEntry);
+    }
+
+    [Fact]
+    public async Task InstallAsyncRejectsDecryptedEntryOutsidePackage()
+    {
+        var sourcePath = CreateDecryptedPackage("invalid-bounds.PUP", invalidEntryBounds: true);
+        var manager = new FirmwareManager(Path.Combine(_temporaryDirectory, "installed"));
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => manager.InstallAsync(sourcePath));
+    }
+
     private string CreatePackage(string fileName, bool validMagic)
     {
         Directory.CreateDirectory(_temporaryDirectory);
         var data = new byte[1024];
         RandomNumberGenerator.Fill(data);
         (validMagic ? "SLB2"u8 : "NOPE"u8).CopyTo(data);
+        var path = Path.Combine(_temporaryDirectory, fileName);
+        File.WriteAllBytes(path, data);
+        return path;
+    }
+
+    private string CreateDecryptedPackage(string fileName, bool invalidEntryBounds)
+    {
+        Directory.CreateDirectory(_temporaryDirectory);
+        var data = new byte[1024];
+        BinaryPrimitives.WriteUInt32LittleEndian(data, 0xEEF51454);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(0x0C), 64);
+        BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(0x10), (ulong)data.Length);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(0x18), 1);
+
+        const int entryOffset = 32;
+        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(entryOffset), 0x0C << 20);
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            data.AsSpan(entryOffset + 8),
+            invalidEntryBounds ? 2048UL : 64UL);
+        BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(entryOffset + 16), 32);
+        BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(entryOffset + 24), 32);
+
         var path = Path.Combine(_temporaryDirectory, fileName);
         File.WriteAllBytes(path, data);
         return path;
