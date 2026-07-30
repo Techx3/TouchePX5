@@ -119,6 +119,10 @@ decrypted structure it also validates bounded table entries and detects the
 version-metadata entry. Touché PX5 does not decrypt protected content, and
 installing a PUP does not currently replace its HLE implementations.
 
+PS5 Backup and Restore files named `archive.dat` use the separate `SIECAF`
+format. Touché PX5 identifies and rejects them as firmware; they cannot replace
+a `PS5UPDATE.PUP` and may contain account-linked user data.
+
 ## Build from source
 
 1. Install the .NET SDK version specified in [`global.json`](./global.json).

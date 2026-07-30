@@ -122,11 +122,6 @@ public sealed class FirmwareManager
             throw new FileNotFoundException("The firmware package was not found.", fullSourcePath);
         }
 
-        if (!string.Equals(Path.GetExtension(fullSourcePath), ".pup", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException("Firmware packages must use the .PUP extension.");
-        }
-
         var sourceInfo = new FileInfo(fullSourcePath);
         if (sourceInfo.Length < MinimumContainerSize)
         {
@@ -136,6 +131,17 @@ public sealed class FirmwareManager
         var inspection = await FirmwarePackageInspector
             .InspectAsync(fullSourcePath, cancellationToken)
             .ConfigureAwait(false);
+
+        if (inspection.Kind == FirmwareContainerKind.BackupArchiveSiecaf)
+        {
+            throw new InvalidDataException(
+                "The selected file is a PS5 Backup and Restore archive (SIECAF), not a firmware package.");
+        }
+
+        if (!string.Equals(Path.GetExtension(fullSourcePath), ".pup", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("Firmware packages must use the .PUP extension.");
+        }
 
         Directory.CreateDirectory(_rootDirectory);
         var stagingDirectory = Path.Combine(_rootDirectory, ".staging");

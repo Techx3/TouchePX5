@@ -92,6 +92,40 @@ public sealed class FirmwareManagerTests : IDisposable
         await Assert.ThrowsAsync<InvalidDataException>(() => manager.InstallAsync(sourcePath));
     }
 
+    [Fact]
+    public async Task InspectorRecognizesBoundedSiecafBackupArchive()
+    {
+        var sourcePath = CreateSiecafArchive("archive.dat", invalidBounds: false);
+
+        var result = await FirmwarePackageInspector.InspectAsync(sourcePath);
+
+        Assert.Equal(FirmwareContainerKind.BackupArchiveSiecaf, result.Kind);
+        Assert.Equal("PS5 Backup (SIECAF)", result.FormatLabel);
+        Assert.Equal(1, result.EntryCount);
+        Assert.False(result.CanInspectEntries);
+    }
+
+    [Fact]
+    public async Task InstallAsyncRejectsSiecafBackupAsNotFirmware()
+    {
+        var sourcePath = CreateSiecafArchive("archive.dat", invalidBounds: false);
+        var manager = new FirmwareManager(Path.Combine(_temporaryDirectory, "installed"));
+
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => manager.InstallAsync(sourcePath));
+
+        Assert.Contains("Backup and Restore archive", error.Message);
+        Assert.Empty(manager.GetInstalled());
+    }
+
+    [Fact]
+    public async Task InspectorRejectsSiecafDataOutsideArchive()
+    {
+        var sourcePath = CreateSiecafArchive("invalid-archive.dat", invalidBounds: true);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => FirmwarePackageInspector.InspectAsync(sourcePath));
+    }
+
     private string CreatePackage(string fileName, bool validMagic)
     {
         Directory.CreateDirectory(_temporaryDirectory);
@@ -119,6 +153,23 @@ public sealed class FirmwareManagerTests : IDisposable
             invalidEntryBounds ? 2048UL : 64UL);
         BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(entryOffset + 16), 32);
         BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(entryOffset + 24), 32);
+
+        var path = Path.Combine(_temporaryDirectory, fileName);
+        File.WriteAllBytes(path, data);
+        return path;
+    }
+
+    private string CreateSiecafArchive(string fileName, bool invalidBounds)
+    {
+        Directory.CreateDirectory(_temporaryDirectory);
+        var data = new byte[1024];
+        "SIECAF\0\0"u8.CopyTo(data);
+        BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(0x08), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(0x10), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(0x18), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(0x40), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(0x48), invalidBounds ? 2048UL : 512UL);
+        BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(0x50), 512);
 
         var path = Path.Combine(_temporaryDirectory, fileName);
         File.WriteAllBytes(path, data);

@@ -9,6 +9,7 @@ public enum FirmwareContainerKind
 {
     OfficialSlb2,
     DecryptedPup,
+    BackupArchiveSiecaf,
 }
 
 public sealed record FirmwarePackageInspection(
@@ -30,7 +31,12 @@ public static class FirmwarePackageInspector
     private const int DecryptedEntrySize = 32;
     private const int MaximumEntryCount = 4096;
     private const uint VersionMetadataEntryId = 0x0C;
+    private const int SiecafHeaderSize = 0x58;
+    private const int SiecafSegmentMetadataSize = 0x40;
+    private const int SiecafSegmentHashSize = 0x30;
+    private const ulong MaximumSiecafSegmentCount = 4096;
     private static readonly byte[] Slb2Magic = "SLB2"u8.ToArray();
+    private static readonly byte[] SiecafMagic = "SIECAF\0\0"u8.ToArray();
 
     public static async Task<FirmwarePackageInspection> InspectAsync(
         string path,
@@ -50,7 +56,7 @@ public static class FirmwarePackageInspector
             FileShare.Read,
             4096,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
-        var header = new byte[DecryptedHeaderSize];
+        var header = new byte[SiecafHeaderSize];
         await ReadExactlyAsync(stream, header, cancellationToken).ConfigureAwait(false);
 
         if (header.AsSpan(0, Slb2Magic.Length).SequenceEqual(Slb2Magic))
@@ -61,6 +67,11 @@ public static class FirmwarePackageInspector
                 null,
                 false,
                 false);
+        }
+
+        if (header.AsSpan(0, SiecafMagic.Length).SequenceEqual(SiecafMagic))
+        {
+            return InspectSiecaf(header, fileInfo.Length);
         }
 
         if (BinaryPrimitives.ReadUInt32LittleEndian(header) != DecryptedPupMagic)
@@ -83,6 +94,7 @@ public static class FirmwarePackageInspector
         }
 
         var entryTable = new byte[entryCount * DecryptedEntrySize];
+        stream.Position = DecryptedHeaderSize;
         await ReadExactlyAsync(stream, entryTable, cancellationToken).ConfigureAwait(false);
         var hasVersionMetadata = false;
         for (var index = 0; index < entryCount; index++)
@@ -108,6 +120,36 @@ public static class FirmwarePackageInspector
             entryCount,
             hasVersionMetadata,
             true);
+    }
+
+    private static FirmwarePackageInspection InspectSiecaf(ReadOnlySpan<byte> header, long fileLength)
+    {
+        var version = BinaryPrimitives.ReadUInt64LittleEndian(header[0x08..]);
+        var segmentCount = BinaryPrimitives.ReadUInt64LittleEndian(header[0x40..]);
+        var dataOffset = BinaryPrimitives.ReadUInt64LittleEndian(header[0x48..]);
+        var dataSize = BinaryPrimitives.ReadUInt64LittleEndian(header[0x50..]);
+
+        if (version != 1 || segmentCount is 0 or > MaximumSiecafSegmentCount)
+        {
+            throw new InvalidDataException("The SIECAF backup header contains an unsupported version or segment count.");
+        }
+
+        var metadataEnd = checked(
+            (ulong)SiecafHeaderSize +
+            segmentCount * (SiecafSegmentMetadataSize + SiecafSegmentHashSize));
+        if (dataOffset < metadataEnd ||
+            dataOffset > (ulong)fileLength ||
+            dataSize > (ulong)fileLength - dataOffset)
+        {
+            throw new InvalidDataException("The SIECAF backup header contains invalid bounds.");
+        }
+
+        return new FirmwarePackageInspection(
+            FirmwareContainerKind.BackupArchiveSiecaf,
+            "PS5 Backup (SIECAF)",
+            checked((int)segmentCount),
+            false,
+            false);
     }
 
     private static async Task ReadExactlyAsync(
