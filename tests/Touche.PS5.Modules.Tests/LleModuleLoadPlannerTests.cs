@@ -116,6 +116,40 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
     }
 
     [Fact]
+    public async Task PublishesMappedGlobalExportsForHybridResolution()
+    {
+        var imported = await ImportAsync(CreateSymbolExportElf());
+        var catalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(catalog.Modules);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var loadPlan = await new LleModuleLoadPlanner().BuildAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+        var linkPlan = await new LleModuleLinkPlanner().BuildAsync(loadPlan, fileSystem);
+        var mapped = new LleMappedModule
+        {
+            FirmwareProfileId = loadPlan.FirmwareProfileId,
+            ModuleVirtualPath = loadPlan.ModuleVirtualPath,
+            ModuleHash = loadPlan.ModuleHash,
+            RuntimeImageStart = 0x8000,
+            ImageVirtualStart = loadPlan.ImageVirtualStart,
+            RuntimeEntryPoint = 0x8010,
+            ImageSize = loadPlan.ImageSize,
+            Segments = [],
+        };
+
+        var symbol = Assert.Single(linkPlan.ExportedSymbols);
+        Assert.Equal("providedNid", symbol.Name);
+        Assert.False(symbol.IsUndefined);
+        var descriptor = Assert.Single(
+            new LleExportCatalogAdapter().CreateDescriptors(loadPlan, mapped, linkPlan));
+        Assert.Equal("providedNid", descriptor.SymbolName);
+        Assert.Equal(0x8180UL, descriptor.RuntimeAddress);
+        Assert.Equal(16UL, descriptor.Size);
+    }
+
+    [Fact]
     public async Task RejectsUnterminatedImportedSymbolName()
     {
         var bytes = CreateSymbolImportElf();
@@ -440,6 +474,25 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
         BinaryPrimitives.WriteUInt16LittleEndian(symbol[6..], 0);
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x500), 0x1100);
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x508), ((ulong)1 << 32) | 6);
+        return bytes;
+    }
+
+    private static byte[] CreateSymbolExportElf()
+    {
+        var bytes = CreateSymbolImportElf();
+        var dynamicHeader = bytes.AsSpan(120, 56);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[32..], 144);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[40..], 144);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x218), 24);
+        WriteDynamicEntry(bytes, 0x270, 0x6100003F, 72);
+        WriteDynamicEntry(bytes, 0x280, 0, 0);
+        "providedNid\0"u8.CopyTo(bytes.AsSpan(0x40c));
+        var symbol = bytes.AsSpan(0x480 + 48, 24);
+        BinaryPrimitives.WriteUInt32LittleEndian(symbol, 12);
+        symbol[4] = 0x12;
+        BinaryPrimitives.WriteUInt16LittleEndian(symbol[6..], 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(symbol[8..], 0x1180);
+        BinaryPrimitives.WriteUInt64LittleEndian(symbol[16..], 16);
         return bytes;
     }
 

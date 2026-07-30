@@ -58,6 +58,12 @@ public sealed record LleModuleLinkPlan
 
     public required IReadOnlyList<LleDynamicSymbol> ImportedSymbols { get; init; }
 
+    /// <summary>
+    /// Globally visible symbols defined by this module and safe to publish as
+    /// providers after the image has been mapped.
+    /// </summary>
+    public IReadOnlyList<LleDynamicSymbol> ExportedSymbols { get; init; } = [];
+
     public required IReadOnlyList<uint> UnsupportedRelocationTypes { get; init; }
 
     public bool CanApply => UnsupportedRelocationTypes.Count == 0;

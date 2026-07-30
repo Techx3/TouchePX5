@@ -138,6 +138,12 @@ public sealed class LleModuleLinkPlanner
         {
             metadata = metadata with { SymbolTableSize = symbolResult.EffectiveSymbolTableSize };
         }
+        var exportedSymbols = await ReadExportedSymbolsAsync(
+            loadPlan,
+            handle.Content,
+            handle.Artifact.Size,
+            metadata,
+            cancellationToken).ConfigureAwait(false);
         return new LleModuleLinkPlan
         {
             FirmwareProfileId = loadPlan.FirmwareProfileId,
@@ -147,6 +153,7 @@ public sealed class LleModuleLinkPlanner
             Relocations = relocations.ToArray(),
             ReferencedSymbols = symbolResult.Symbols,
             ImportedSymbols = symbolResult.Symbols.Where(symbol => symbol.IsUndefined).ToArray(),
+            ExportedSymbols = exportedSymbols,
             UnsupportedRelocationTypes = unsupported,
         };
     }
@@ -371,30 +378,109 @@ public sealed class LleModuleLinkPlanner
         var result = new List<LleDynamicSymbol>(indices.Length);
         foreach (var index in indices)
         {
-            var entryOffset = checked((int)((ulong)index * SymbolEntrySize));
-            var entry = symbols.AsSpan(entryOffset, SymbolEntrySize);
-            var nameOffset = BinaryPrimitives.ReadUInt32LittleEndian(entry);
-            var info = entry[4];
-            var other = entry[5];
-            var sectionIndex = BinaryPrimitives.ReadUInt16LittleEndian(entry[6..]);
-            var value = BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]);
-            var size = BinaryPrimitives.ReadUInt64LittleEndian(entry[16..]);
-            var name = ReadSymbolName(strings, nameOffset);
-            if (sectionIndex == 0 && string.IsNullOrEmpty(name))
+            var symbol = ParseSymbol(symbols, strings, index);
+            var name = symbol.Name;
+            if (symbol.SectionIndex == 0 && string.IsNullOrEmpty(name))
             {
                 throw new InvalidDataException("An imported ELF symbol has no name.");
             }
-            result.Add(new LleDynamicSymbol(
-                index,
-                name,
-                (byte)(info >> 4),
-                (byte)(info & 0x0f),
-                (byte)(other & 0x03),
-                sectionIndex,
-                value,
-                size));
+            result.Add(symbol);
         }
         return new SymbolReadResult(result.ToArray(), symbolTableSize);
+    }
+
+    private static async Task<IReadOnlyList<LleDynamicSymbol>> ReadExportedSymbolsAsync(
+        LleModuleLoadPlan plan,
+        Stream stream,
+        long artifactSize,
+        LleDynamicLinkMetadata metadata,
+        CancellationToken cancellationToken)
+    {
+        if (metadata.SymbolTableSize == 0)
+        {
+            return [];
+        }
+        if (metadata.StringTableLocation == 0 ||
+            metadata.StringTableSize is 0 or > MaximumStringTableBytes ||
+            metadata.SymbolTableLocation == 0 ||
+            metadata.SymbolTableSize > MaximumSymbolTableBytes ||
+            metadata.SymbolTableSize % SymbolEntrySize != 0)
+        {
+            throw new InvalidDataException("The ELF export tables are invalid.");
+        }
+
+        var stringOffset = ResolveFileOffset(
+            plan,
+            metadata.StringTableLocation,
+            metadata.StringTableSize,
+            artifactSize);
+        var symbolOffset = ResolveFileOffset(
+            plan,
+            metadata.SymbolTableLocation,
+            metadata.SymbolTableSize,
+            artifactSize);
+        var strings = await ReadFileRangeAsync(
+            stream,
+            stringOffset,
+            metadata.StringTableSize,
+            MaximumStringTableBytes,
+            cancellationToken).ConfigureAwait(false);
+        var symbols = await ReadFileRangeAsync(
+            stream,
+            symbolOffset,
+            metadata.SymbolTableSize,
+            MaximumSymbolTableBytes,
+            cancellationToken).ConfigureAwait(false);
+
+        var count = checked((uint)(metadata.SymbolTableSize / SymbolEntrySize));
+        var result = new List<LleDynamicSymbol>();
+        for (uint index = 1; index < count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var symbol = ParseSymbol(symbols, strings, index);
+            if (!symbol.IsUndefined &&
+                !string.IsNullOrWhiteSpace(symbol.Name) &&
+                symbol.Binding is 1 or 2 &&
+                symbol.Visibility is 0 or 3 &&
+                symbol.Type is 1 or 2)
+            {
+                result.Add(symbol);
+            }
+        }
+
+        var duplicate = result
+            .GroupBy(symbol => symbol.Name, StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null)
+        {
+            throw new InvalidDataException($"The ELF exports symbol '{duplicate.Key}' more than once.");
+        }
+        return result.ToArray();
+    }
+
+    private static LleDynamicSymbol ParseSymbol(
+        ReadOnlySpan<byte> symbols,
+        ReadOnlySpan<byte> strings,
+        uint index)
+    {
+        var entryOffset = checked((int)((ulong)index * SymbolEntrySize));
+        if (entryOffset > symbols.Length - SymbolEntrySize)
+        {
+            throw new InvalidDataException("An ELF symbol is outside the declared symbol table.");
+        }
+        var entry = symbols.Slice(entryOffset, SymbolEntrySize);
+        var nameOffset = BinaryPrimitives.ReadUInt32LittleEndian(entry);
+        var info = entry[4];
+        var other = entry[5];
+        return new LleDynamicSymbol(
+            index,
+            ReadSymbolName(strings, nameOffset),
+            (byte)(info >> 4),
+            (byte)(info & 0x0f),
+            (byte)(other & 0x03),
+            BinaryPrimitives.ReadUInt16LittleEndian(entry[6..]),
+            BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]),
+            BinaryPrimitives.ReadUInt64LittleEndian(entry[16..]));
     }
 
     private static string ReadSymbolName(ReadOnlySpan<byte> stringTable, uint nameOffset)
