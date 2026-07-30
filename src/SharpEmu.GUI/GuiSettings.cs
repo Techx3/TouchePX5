@@ -59,6 +59,9 @@ public sealed class GuiSettings
     /// <summary>Vulkan physical-device name override; null selects automatically.</summary>
     public string? VulkanDevice { get; set; }
 
+    /// <summary>SHA-256 of the locally installed firmware selected for future LLE support.</summary>
+    public string? ActiveFirmwareSha256 { get; set; }
+
     /// <summary>
     /// Discord application ID used for Rich Presence. Configure an application
     /// owned by the Touché PX5 project before enabling this integration.
@@ -107,6 +110,7 @@ public sealed class GuiSettings
         settings.VulkanDevice = string.IsNullOrWhiteSpace(settings.VulkanDevice)
             ? null
             : settings.VulkanDevice.Trim();
+        settings.ActiveFirmwareSha256 = NormalizeSha256(settings.ActiveFirmwareSha256);
         if (settings.DiscordClientId == "1525606762248540221")
         {
             settings.DiscordClientId = "";
@@ -124,6 +128,14 @@ public sealed class GuiSettings
         name.StartsWith("SHARPEMU_", StringComparison.OrdinalIgnoreCase)
             ? "TOUCHEPX5_" + name["SHARPEMU_".Length..]
             : name;
+
+    private static string? NormalizeSha256(string? value)
+    {
+        var normalized = value?.Trim().ToLowerInvariant();
+        return normalized is { Length: 64 } && normalized.All(character => char.IsAsciiHexDigit(character))
+            ? normalized
+            : null;
+    }
 
     // JSON can populate non-nullable lists with null references and entries.
     private static List<string> FilterNullOrEmpty(List<string>? source)

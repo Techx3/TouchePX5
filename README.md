@@ -107,6 +107,16 @@ release includes the MoltenVK Vulkan implementation.
 > This project does **not** support or condone piracy.
 > Users are expected to use legally obtained copies of their games.
 
+### Local firmware packages
+
+The firmware development branch can validate and store a user-supplied
+`PS5UPDATE.PUP` from **Options → Firmware → Install PUP**. Packages are copied
+to `user/firmware/<sha256>/` and never uploaded or added to the repository.
+
+This first stage verifies the `SLB2` container and its SHA-256. It does not yet
+decrypt, extract, or execute protected firmware modules, so installing a PUP
+does not currently replace Touché PX5's HLE implementations.
+
 ## Build from source
 
 1. Install the .NET SDK version specified in [`global.json`](./global.json).

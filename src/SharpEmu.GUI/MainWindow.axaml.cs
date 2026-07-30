@@ -55,11 +55,13 @@ public partial class MainWindow : Window
     private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
     private readonly DispatcherTimer _libraryBlurTimer;
+    private readonly FirmwareManager _firmwareManager = new();
     private BlurEffect? _libraryBlur;
     private double _libraryBlurStartRadius;
     private double _libraryBlurTargetRadius;
     private long _libraryBlurStartedAt;
     private bool _clearLibraryBlurWhenComplete;
+    private bool _refreshingFirmware;
 
     private GuiSettings _settings = new();
     private EmulatorProcess? _emulator;
@@ -235,6 +237,9 @@ public partial class MainWindow : Window
             _settings.CheckForUpdatesOnStartup = AutoUpdateToggle.IsChecked == true;
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
+        InstallFirmwareButton.Click += async (_, _) => await InstallFirmwareAsync();
+        OpenFirmwareFolderButton.Click += (_, _) => OpenFirmwareFolder();
+        FirmwareBox.SelectionChanged += (_, _) => OnFirmwareSelectionChanged();
         EnvBthidToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("TOUCHEPX5_BTHID_UNAVAILABLE", EnvBthidToggle.IsChecked == true);
         EnvLoopGuardToggle.IsCheckedChanged += (_, _) =>
@@ -576,6 +581,7 @@ public partial class MainWindow : Window
         PopulateLanguageBox();
         ApplyLocalization();
         ApplySettingsToControls();
+        RefreshFirmwareControls();
         LocateEmulator();
         UpdateDiscordPresence();
         _ = LoadLatestCommitAsync();
@@ -606,6 +612,7 @@ public partial class MainWindow : Window
         _settings.Language = language.Code;
         Localization.Instance.Load(language.Code);
         ApplyLocalization();
+        RefreshFirmwareControls();
     }
 
     private void PopulateGpuDeviceBox()
@@ -649,6 +656,7 @@ public partial class MainWindow : Window
         LoadingStateText.Text = loc.Get("Library.Loading");
 
         GeneralTabItem.Header = loc.Get("Options.General");
+        FirmwareTabItem.Header = loc.Get("Options.Firmware.Tab");
         GraphicsTabItem.Header = loc.Get("Options.Graphics");
         EnvTabItem.Header = loc.Get("Options.Env.Tab");
         EnvSectionTitle.Text = loc.Get("Options.Section.Environment");
@@ -664,6 +672,12 @@ public partial class MainWindow : Window
         EmulationSectionTitle.Text = loc.Get("Options.Section.Emulation");
         LoggingSectionTitle.Text = loc.Get("Options.Section.Logging");
         LauncherSectionTitle.Text = loc.Get("Options.Section.Launcher");
+        FirmwareSectionTitle.Text = loc.Get("Options.Firmware.Section");
+        FirmwareNoticeText.Text = loc.Get("Options.Firmware.Notice");
+        ActiveFirmwareRow.Label = loc.Get("Options.Firmware.Active.Label");
+        InstallFirmwareButton.Content = loc.Get("Options.Firmware.Install");
+        OpenFirmwareFolderButton.Content = loc.Get("Options.Firmware.OpenFolder");
+        FirmwareStatusText.Text = loc.Get("Options.Firmware.Ready");
         RenderingSectionTitle.Text = loc.Get("Options.Section.Rendering");
         GpuDeviceRow.Label = loc.Get("Options.Gpu.Label");
         GpuDeviceRow.Description = loc.Get("Options.Gpu.Desc");
@@ -927,6 +941,126 @@ public partial class MainWindow : Window
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_NP");
         UpdateLogFilePathText();
+    }
+
+    private void RefreshFirmwareControls()
+    {
+        var installed = _firmwareManager.GetInstalled();
+        _refreshingFirmware = true;
+        try
+        {
+            FirmwareBox.ItemsSource = installed;
+            var selected = installed.FirstOrDefault(firmware =>
+                string.Equals(firmware.Sha256, _settings.ActiveFirmwareSha256, StringComparison.OrdinalIgnoreCase))
+                ?? installed.FirstOrDefault();
+            FirmwareBox.SelectedItem = selected;
+            FirmwareBox.IsEnabled = installed.Count > 0;
+            _settings.ActiveFirmwareSha256 = selected?.Sha256;
+            ActiveFirmwareRow.Description = selected is null
+                ? Localization.Instance.Get("Options.Firmware.None")
+                : Localization.Instance.Format(
+                    "Options.Firmware.Active.Desc",
+                    selected.SourceFileName,
+                    selected.Sha256);
+        }
+        finally
+        {
+            _refreshingFirmware = false;
+        }
+    }
+
+    private void OnFirmwareSelectionChanged()
+    {
+        if (_refreshingFirmware)
+        {
+            return;
+        }
+
+        _settings.ActiveFirmwareSha256 = (FirmwareBox.SelectedItem as InstalledFirmware)?.Sha256;
+        _settings.Save();
+        RefreshFirmwareControls();
+        FirmwareStatusText.Text = Localization.Instance.Get("Options.Firmware.Ready");
+        FirmwareStatusText.Foreground = DimLineBrush;
+    }
+
+    private async Task InstallFirmwareAsync()
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = Localization.Instance.Get("Dialog.OpenFirmware"),
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType(Localization.Instance.Get("Dialog.FirmwareFiles"))
+                {
+                    Patterns = ["*.PUP", "*.pup"],
+                },
+            ],
+        });
+        var sourcePath = files.FirstOrDefault()?.Path.LocalPath;
+        if (string.IsNullOrWhiteSpace(sourcePath))
+        {
+            return;
+        }
+
+        InstallFirmwareButton.IsEnabled = false;
+        FirmwareProgressBar.IsVisible = true;
+        FirmwareProgressBar.Value = 0;
+        FirmwareStatusText.Foreground = DimLineBrush;
+        FirmwareStatusText.Text = Localization.Instance.Get("Options.Firmware.Validating");
+
+        try
+        {
+            var progress = new Progress<FirmwareInstallProgress>(value =>
+            {
+                FirmwareProgressBar.Value = value.Percentage;
+                FirmwareStatusText.Text = Localization.Instance.Format(
+                    "Options.Firmware.Copying",
+                    Math.Round(value.Percentage));
+            });
+            var result = await _firmwareManager.InstallAsync(sourcePath, progress);
+            _settings.ActiveFirmwareSha256 = result.Firmware.Sha256;
+            _settings.Save();
+            RefreshFirmwareControls();
+            FirmwareStatusText.Foreground = SuccessLineBrush;
+            FirmwareStatusText.Text = Localization.Instance.Format(
+                result.AlreadyInstalled
+                    ? "Options.Firmware.AlreadyInstalled"
+                    : "Options.Firmware.Installed",
+                result.Firmware.Sha256);
+        }
+        catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            FirmwareStatusText.Foreground = ErrorLineBrush;
+            FirmwareStatusText.Text = Localization.Instance.Format(
+                "Options.Firmware.Failed",
+                exception.Message);
+        }
+        finally
+        {
+            InstallFirmwareButton.IsEnabled = true;
+            FirmwareProgressBar.IsVisible = false;
+        }
+    }
+
+    private void OpenFirmwareFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(_firmwareManager.RootDirectory);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = _firmwareManager.RootDirectory,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception exception)
+        {
+            FirmwareStatusText.Foreground = ErrorLineBrush;
+            FirmwareStatusText.Text = Localization.Instance.Format(
+                "Options.Firmware.Failed",
+                exception.Message);
+        }
     }
 
     private async Task OnUpdateButtonAsync()
@@ -1843,6 +1977,10 @@ public partial class MainWindow : Window
                 System.Globalization.CultureInfo.InvariantCulture));
         AddSelectedVulkanDriverManifest(_settings.VulkanDevice);
         SetRuntimeEnvironmentVariable("TOUCHEPX5_VK_DEVICE", _settings.VulkanDevice);
+        var activeFirmware = _firmwareManager.GetInstalled().FirstOrDefault(firmware =>
+            string.Equals(firmware.Sha256, _settings.ActiveFirmwareSha256, StringComparison.OrdinalIgnoreCase));
+        SetRuntimeEnvironmentVariable("TOUCHEPX5_FIRMWARE_PATH", activeFirmware?.PackagePath);
+        SetRuntimeEnvironmentVariable("TOUCHEPX5_FIRMWARE_SHA256", activeFirmware?.Sha256);
 
         if (SharpEmuLog.TryParseLevel(effective.LogLevel, out var logLevel))
         {

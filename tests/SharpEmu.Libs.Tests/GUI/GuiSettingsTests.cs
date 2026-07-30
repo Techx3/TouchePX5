@@ -111,6 +111,21 @@ public sealed class GuiSettingsTests
         Assert.Equal(expected, settings.VulkanDevice);
     }
 
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("invalid", null)]
+    [InlineData(
+        "  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    public void NormalizeFromJson_ActiveFirmwareHash_IsValidated(string? input, string? expected)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(new { ActiveFirmwareSha256 = input });
+
+        var settings = GuiSettings.NormalizeFromJson(json);
+
+        Assert.Equal(expected, settings.ActiveFirmwareSha256);
+    }
+
     [Fact]
     public void NormalizeFromJson_LegacySharpEmuDiscordApplication_IsDisabled()
     {

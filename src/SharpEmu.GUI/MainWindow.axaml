@@ -395,6 +395,42 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </StackPanel>
               </ScrollViewer>
             </TabItem>
+            <TabItem x:Name="FirmwareTabItem" Header="Firmware" FontSize="15">
+              <ScrollViewer>
+                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
+                  <Border Classes="card">
+                    <StackPanel Spacing="14">
+                      <TextBlock x:Name="FirmwareSectionTitle" Classes="sectionTitle" Text="SYSTEM FIRMWARE" />
+                      <TextBlock x:Name="FirmwareNoticeText"
+                                 Text="Install a firmware package obtained by the user. Touché PX5 stores the original package locally; protected modules are not decrypted or executed yet."
+                                 FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+
+                      <local:SettingRow x:Name="ActiveFirmwareRow" Label="Active firmware"
+                                        Description="No firmware installed.">
+                        <ComboBox x:Name="FirmwareBox" Width="360"
+                                  VerticalAlignment="Center" CornerRadius="8">
+                          <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="local:InstalledFirmware">
+                              <TextBlock Text="{Binding DisplayName}" />
+                            </DataTemplate>
+                          </ComboBox.ItemTemplate>
+                        </ComboBox>
+                      </local:SettingRow>
+
+                      <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="InstallFirmwareButton" Classes="accent" Content="Install PUP…" />
+                        <Button x:Name="OpenFirmwareFolderButton" Classes="ghost" Content="Open firmware folder" />
+                      </StackPanel>
+
+                      <ProgressBar x:Name="FirmwareProgressBar" Minimum="0" Maximum="100"
+                                   Height="4" IsVisible="False" />
+                      <TextBlock x:Name="FirmwareStatusText" Text="Ready."
+                                 FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+              </ScrollViewer>
+            </TabItem>
             <TabItem x:Name="GraphicsTabItem" Header="Graphics" FontSize="15">
               <ScrollViewer>
                 <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
