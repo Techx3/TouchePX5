@@ -25,6 +25,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
 using System.Net.Http.Headers;
+using Touche.Core.Contracts;
 
 namespace SharpEmu.GUI;
 
@@ -64,7 +65,9 @@ public partial class MainWindow : Window
     private bool _refreshingFirmware;
 
     private GuiSettings _settings = new();
-    private EmulatorProcess? _emulator;
+    private IEmulatorSession? _emulatorSession;
+    private CancellationTokenSource? _emulatorEventCancellation;
+    private bool _sessionStarting;
     private GameSurfaceHost? _gameSurfaceHost;
     private ConsoleWindow? _consoleWindow;
     private GuiConsoleMirror? _consoleMirror;
@@ -144,7 +147,6 @@ public partial class MainWindow : Window
         ConsoleList.ItemsSource = _consoleLines;
         _consoleMirror = GuiConsoleMirror.Install((line, isError) =>
             _pendingLines.Enqueue((line, isError)));
-        Closed += (_, _) => _emulator?.Stop();
 
         _consoleFlushTimer = new DispatcherTimer
         {
@@ -891,7 +893,7 @@ public partial class MainWindow : Window
         _sndPreview.Stop();
         _discord?.Dispose();
         _consoleWindow?.Close();
-        _emulator?.Dispose();
+        DisposeEmulatorSession();
         _consoleMirror?.Dispose();
         DropFileLog();
     }
@@ -2084,7 +2086,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_emulator is null)
+        if (_emulatorSession is null)
         {
             // The native host can be created a moment after Launch. Do not
             // let that delayed callback start a session the user already
@@ -2100,7 +2102,7 @@ public partial class MainWindow : Window
         SessionHintText.Text = Localization.Instance.Get("Launch.Stopping");
         SessionF11Badge.IsVisible = false;
         ShowSessionLoading("Closing game", "Waiting for the emulation session to exit...");
-        _emulator.Stop();
+        _ = _emulatorSession.StopAsync(CancellationToken.None);
         _runningGameName = null;
         _runningGameTitleId = null;
         StatusText.Text = Localization.Instance.Get("Launch.Stopping");
@@ -2146,8 +2148,7 @@ public partial class MainWindow : Window
         FlushPendingConsoleLines();
         _isRunning = false;
         _isStopping = false;
-        _emulator?.Dispose();
-        _emulator = null;
+        DisposeEmulatorSession();
         _pendingLaunch = null;
         DisposeGameSurfaceHost();
         HideGameView();
@@ -2183,9 +2184,9 @@ public partial class MainWindow : Window
         UpdateDiscordPresence();
     }
 
-    private void StartPendingSession(VulkanHostSurface surface)
+    private async void StartPendingSession(VulkanHostSurface surface)
     {
-        if (_pendingLaunch is not { } launch || _emulator is not null)
+        if (_pendingLaunch is not { } launch || _emulatorSession is not null || _sessionStarting)
         {
             return;
         }
@@ -2197,32 +2198,101 @@ public partial class MainWindow : Window
             return;
         }
 
-        var process = new EmulatorProcess();
-        process.OutputReceived += OnEmulatorOutput;
-        process.Exited += code => Dispatcher.UIThread.Post(() => OnEmulatorExited(code));
-
+        _sessionStarting = true;
         try
         {
-            var arguments = BuildEmulatorArguments(launch, surface);
-            _emulator = process;
-            _pendingLaunch = null;
-            process.Start(
+            var adapter = new TouchePs5Adapter(
                 _emulatorExePath,
-                arguments,
+                _ => BuildEmulatorArguments(launch, surface),
                 Path.GetDirectoryName(_emulatorExePath));
+            var descriptor = BuildSessionDescriptor(launch);
+            var session = await adapter.LaunchAsync(descriptor, CancellationToken.None);
+            _emulatorSession = session;
+            _pendingLaunch = null;
+            _emulatorEventCancellation = new CancellationTokenSource();
+            _ = PumpEmulatorEventsAsync(session, _emulatorEventCancellation.Token);
             AppendConsoleLine(
                 Localization.Instance.Format("Launch.Command", launch.EbootPath),
                 DimLineBrush);
         }
         catch (Exception exception)
         {
-            _emulator = null;
-            process.Dispose();
+            DisposeEmulatorSession();
             AppendConsoleLine(
                 Localization.Instance.Format("Launch.StartFailed", exception.Message),
                 ErrorLineBrush);
             OnEmulatorExited(3);
         }
+        finally
+        {
+            _sessionStarting = false;
+        }
+    }
+
+    private SessionDescriptor BuildSessionDescriptor(PendingLaunch launch)
+    {
+        var activeFirmware = _firmwareManager.GetInstalled().FirstOrDefault(firmware =>
+            string.Equals(firmware.Sha256, _settings.ActiveFirmwareSha256, StringComparison.OrdinalIgnoreCase));
+        return new SessionDescriptor
+        {
+            SessionId = Guid.NewGuid(),
+            CoreId = ToucheCoreIds.PlayStation5,
+            Game = new GameLaunchRequest
+            {
+                ExecutablePath = launch.EbootPath,
+                DisplayName = launch.DisplayName,
+                TitleId = launch.TitleId,
+            },
+            Graphics = new GraphicsSessionSettings
+            {
+                AdapterId = _settings.VulkanDevice,
+                SurfaceMode = SessionSurfaceMode.Embedded,
+            },
+            Firmware = activeFirmware is null
+                ? null
+                : new FirmwareSessionSettings { ProfileId = activeFirmware.Sha256 },
+            Diagnostics = new DiagnosticSessionSettings { LogLevel = launch.LogLevel },
+        };
+    }
+
+    private async Task PumpEmulatorEventsAsync(
+        IEmulatorSession session,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var emulatorEvent in session.ReadEventsAsync(cancellationToken))
+            {
+                switch (emulatorEvent)
+                {
+                    case EmulatorLogReceived log:
+                        OnEmulatorOutput(log.Message, log.Level >= EmulatorLogLevel.Error);
+                        break;
+                    case EmulatorProcessExited exited:
+                        Dispatcher.UIThread.Post(() => OnEmulatorExited(exited.ExitCode ?? 3));
+                        break;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    private void DisposeEmulatorSession()
+    {
+        var session = _emulatorSession;
+        _emulatorSession = null;
+        var cancellation = _emulatorEventCancellation;
+        _emulatorEventCancellation = null;
+        cancellation?.Cancel();
+        cancellation?.Dispose();
+        if (session is null)
+        {
+            return;
+        }
+
+        session.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
     private List<string> BuildEmulatorArguments(PendingLaunch launch, VulkanHostSurface surface)
