@@ -94,6 +94,7 @@ public sealed class LleModuleMapper
             ModuleVirtualPath = plan.ModuleVirtualPath,
             ModuleHash = plan.ModuleHash,
             RuntimeImageStart = runtimeImageStart,
+            ImageVirtualStart = plan.ImageVirtualStart,
             RuntimeEntryPoint = runtimeEntryPoint,
             ImageSize = plan.ImageSize,
             Segments = mappedSegments.ToArray(),

@@ -63,15 +63,19 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
         Assert.Equal(24UL, linkPlan.Metadata.RelaSize);
         var relocation = Assert.Single(linkPlan.Relocations);
         Assert.Equal(0x1100UL, relocation.TargetVirtualAddress);
-        Assert.Equal(1U, relocation.SymbolIndex);
+        Assert.Equal(0U, relocation.SymbolIndex);
         Assert.Equal(8U, relocation.Type);
         Assert.True(linkPlan.CanApply);
     }
 
-    [Fact]
-    public async Task ReportsUnsupportedRelocationsBeforeMemoryIsModified()
+    [Theory]
+    [InlineData(16U)]
+    [InlineData(17U)]
+    [InlineData(18U)]
+    [InlineData(37U)]
+    public async Task ReportsUnsupportedRelocationsBeforeMemoryIsModified(uint relocationType)
     {
-        var imported = await ImportAsync(CreateDynamicElf(relocationType: 37));
+        var imported = await ImportAsync(CreateDynamicElf(relocationType));
         var catalog = imported.Result.ModuleCatalog!;
         var module = Assert.Single(catalog.Modules);
         var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
@@ -83,7 +87,7 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
         var linkPlan = await new LleModuleLinkPlanner().BuildAsync(loadPlan, fileSystem);
 
         Assert.False(linkPlan.CanApply);
-        Assert.Equal([37U], linkPlan.UnsupportedRelocationTypes);
+        Assert.Equal([relocationType], linkPlan.UnsupportedRelocationTypes);
     }
 
     [Fact]
@@ -378,7 +382,7 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x300), 0x1100);
         BinaryPrimitives.WriteUInt64LittleEndian(
             bytes.AsSpan(0x308),
-            ((ulong)1 << 32) | relocationType);
+            relocationType);
         BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(0x310), 4);
         return bytes;
     }

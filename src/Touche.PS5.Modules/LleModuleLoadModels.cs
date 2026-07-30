@@ -70,6 +70,8 @@ public sealed record LleMappedModule
 
     public required ulong RuntimeImageStart { get; init; }
 
+    public required ulong ImageVirtualStart { get; init; }
+
     public required ulong RuntimeEntryPoint { get; init; }
 
     public required ulong ImageSize { get; init; }

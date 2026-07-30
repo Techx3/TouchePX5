@@ -44,7 +44,7 @@ public sealed class LleModuleLinkPlanner
 
     private static readonly HashSet<uint> SupportedRelocationTypes =
     [
-        0, 1, 2, 4, 6, 7, 8, 10, 11, 16, 17, 18, 24, 32, 33, 38,
+        0, 1, 2, 4, 6, 7, 8, 10, 11, 24, 32, 33, 38,
     ];
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 

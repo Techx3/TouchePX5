@@ -39,6 +39,7 @@ public sealed class HybridImportResolver
         {
             FirmwareProfileId = linkPlan.FirmwareProfileId,
             ModuleVirtualPath = linkPlan.ModuleVirtualPath,
+            ModuleHash = linkPlan.ModuleHash,
             Mode = mode,
             RelocationsSupported = linkPlan.CanApply,
             Bindings = bindings,

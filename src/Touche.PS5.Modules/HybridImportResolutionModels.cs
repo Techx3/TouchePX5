@@ -55,6 +55,8 @@ public sealed record ModuleImportResolutionPlan
 
     public required string ModuleVirtualPath { get; init; }
 
+    public required string ModuleHash { get; init; }
+
     public required ModuleResolutionMode Mode { get; init; }
 
     public required bool RelocationsSupported { get; init; }
