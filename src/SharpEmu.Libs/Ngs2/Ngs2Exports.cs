@@ -26,6 +26,8 @@ public static class Ngs2Exports
     private static long _nextUid;
     private static long _renderCount;
     private static long _unsupportedWaveformCount;
+    private static long _unresolvedWaveformDumpCount;
+    private static long _voiceEventTraceCount;
 
     // NGS2 renders one grain of interleaved float32 per sceNgs2SystemRender.
     // The grain length defaults to 256 frames (matching the 8192-byte AudioOut
@@ -66,6 +68,7 @@ public static class Ngs2Exports
         public double Position { get; set; }
         public bool Playing { get; set; }
         public bool Paused { get; set; }
+        public bool Stopped { get; set; }
         public int LoopStart { get; set; } = -1;
         public int LoopEnd { get; set; }
         public float Gain { get; set; } = 1f;
@@ -360,17 +363,20 @@ public static class Ngs2Exports
                     // yet; the mixer will begin once the waveform is available.
                     voice.Position = 0;
                     voice.Paused = false;
+                    voice.Stopped = false;
                     voice.Playing = true;
                     break;
                 case 0x0002: // Stop
                 case 0x0004: // Stop immediately
                     voice.Playing = false;
                     voice.Paused = false;
+                    voice.Stopped = true;
                     voice.Position = 0;
                     break;
                 case 0x0008: // Kill
                     voice.Playing = false;
                     voice.Paused = false;
+                    voice.Stopped = false;
                     voice.Position = 0;
                     voice.Pcm = null;
                     voice.PcmRight = null;
@@ -381,15 +387,26 @@ public static class Ngs2Exports
                     {
                         voice.Playing = false;
                         voice.Paused = true;
+                        voice.Stopped = false;
                     }
                     break;
                 case 0x0020: // Resume
                     if (voice.Paused && voice.Pcm is not null)
                     {
                         voice.Paused = false;
+                        voice.Stopped = false;
                         voice.Playing = true;
                     }
                     break;
+            }
+
+            var traceCount = Interlocked.Increment(ref _voiceEventTraceCount);
+            if (traceCount <= 16 || (traceCount & (traceCount - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] ngs2.voice_event count={traceCount} " +
+                    $"voice=0x{voiceHandle:X16} event=0x{eventId:X} " +
+                    $"playing={voice.Playing} paused={voice.Paused} stopped={voice.Stopped}");
             }
         }
     }
@@ -406,6 +423,10 @@ public static class Ngs2Exports
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] ngs2.waveform_unresolved count={failure} " +
                     $"voice=0x{voiceHandle:X16} param=0x{paramOffset:X}");
+            }
+            if (Interlocked.Increment(ref _unresolvedWaveformDumpCount) <= 4)
+            {
+                TraceUnresolvedWaveform(ctx, voiceHandle, paramOffset);
             }
             return;
         }
@@ -449,6 +470,7 @@ public static class Ngs2Exports
                 voice.LoopEnd = waveform.LoopEnd > 0 ? waveform.LoopEnd : waveform.Samples.Length;
                 voice.Position = 0;
                 voice.Paused = false;
+                voice.Stopped = false;
                 // Loading/changing a waveform is configuration, not a play
                 // request. Auto-starting here revived stopped menu music when a
                 // later effect updated the same NGS2 command list.
@@ -470,6 +492,35 @@ public static class Ngs2Exports
         finally
         {
             System.Buffers.ArrayPool<byte>.Shared.Return(raw);
+        }
+    }
+
+    private static void TraceUnresolvedWaveform(
+        CpuContext ctx, ulong voiceHandle, ulong paramOffset)
+    {
+        Span<byte> param = stackalloc byte[64];
+        param.Clear();
+        ctx.Memory.TryRead(paramOffset, param);
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] ngs2.waveform_param voice=0x{voiceHandle:X16} " +
+            $"addr=0x{paramOffset:X} bytes={Convert.ToHexString(param)}");
+
+        Span<byte> pointed = stackalloc byte[64];
+        for (var offset = 8; offset + sizeof(ulong) <= param.Length; offset += sizeof(ulong))
+        {
+            var candidate = BinaryPrimitives.ReadUInt64LittleEndian(param[offset..]);
+            if (candidate <= 0x10000)
+            {
+                continue;
+            }
+
+            pointed.Clear();
+            if (ctx.Memory.TryRead(candidate, pointed))
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] ngs2.waveform_pointer field=+{offset} " +
+                    $"ptr=0x{candidate:X} bytes={Convert.ToHexString(pointed)}");
+            }
         }
     }
 
@@ -837,6 +888,7 @@ public static class Ngs2Exports
                 else
                 {
                     voice.Playing = false;
+                    voice.Stopped = true;
                     break;
                 }
             }
@@ -844,6 +896,7 @@ public static class Ngs2Exports
             if (idx < 0 || idx >= pcm.Length)
             {
                 voice.Playing = false;
+                voice.Stopped = true;
                 break;
             }
 
@@ -982,18 +1035,23 @@ public static class Ngs2Exports
         var voiceHandle = ctx[CpuRegister.Rdi];
         var stateAddress = ctx[CpuRegister.Rsi];
         var stateSize = (int)Math.Min(ctx[CpuRegister.Rdx], 0x400);
+        uint stateFlags;
         lock (StateGate)
         {
-            if (!Voices.ContainsKey(voiceHandle))
+            if (!Voices.TryGetValue(voiceHandle, out var voice))
             {
                 return SetReturn(ctx, OrbisNgs2ErrorInvalidVoiceHandle);
             }
+            stateFlags = GetVoiceStateFlags(voice);
         }
 
-        // Report an idle (not-in-use) voice: all-zero state block.
         if (stateAddress != 0 && stateSize > 0)
         {
             if (!TryClearGuestBuffer(ctx, stateAddress, (ulong)stateSize))
+            {
+                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+            if (stateSize >= sizeof(uint) && !ctx.TryWriteUInt32(stateAddress, stateFlags))
             {
                 return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
@@ -1011,22 +1069,30 @@ public static class Ngs2Exports
     {
         var voiceHandle = ctx[CpuRegister.Rdi];
         var flagsAddress = ctx[CpuRegister.Rsi];
+        uint stateFlags;
         lock (StateGate)
         {
-            if (!Voices.ContainsKey(voiceHandle))
+            if (!Voices.TryGetValue(voiceHandle, out var voice))
             {
                 return SetReturn(ctx, OrbisNgs2ErrorInvalidVoiceHandle);
             }
+            stateFlags = GetVoiceStateFlags(voice);
         }
 
-        // No flags set: voice is idle.
-        if (flagsAddress != 0 && !ctx.TryWriteUInt64(flagsAddress, 0))
+        // The ABI uses a uint32_t output. Writing eight bytes here overwrote
+        // adjacent guest state in titles that placed the flag on the stack.
+        if (flagsAddress != 0 && !ctx.TryWriteUInt32(flagsAddress, stateFlags))
         {
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         return SetReturn(ctx, 0);
     }
+
+    private static uint GetVoiceStateFlags(VoiceState voice) =>
+        voice.Playing ? 0x3u :
+        voice.Paused ? 0x5u :
+        voice.Stopped ? 0xBu : 0u;
 
     private static int ValidateSystem(CpuContext ctx)
     {
@@ -1153,7 +1219,8 @@ public static class Ngs2Exports
         LibraryName = "libSceNgs2")]
     public static int Ngs2ParseWaveformData(CpuContext ctx)
     {
-        const ulong waveformInfoSize = 200;
+        const int waveformInfoSize = 232;
+        const uint waveformTypeVag = 0x80;
         var dataAddress = ctx[CpuRegister.Rdi];
         var dataSize = ctx[CpuRegister.Rsi];
         var outInfoAddress = ctx[CpuRegister.Rdx];
@@ -1162,8 +1229,98 @@ public static class Ngs2Exports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        return TryClearGuestBuffer(ctx, outInfoAddress, waveformInfoSize)
+        Span<byte> info = stackalloc byte[waveformInfoSize];
+        info.Clear();
+
+        Span<byte> header = stackalloc byte[Ngs2VagDecoder.VagHeaderSize];
+        var isVag = ctx.Memory.TryRead(dataAddress, header) && Ngs2VagDecoder.IsVag(header);
+        var channels = isVag && header[0x1E] == 2 ? 2u : 1u;
+        var sampleRate = isVag
+            ? BinaryPrimitives.ReadUInt32BigEndian(header[0x10..])
+            : 48_000u;
+        if (sampleRate == 0)
+        {
+            sampleRate = 48_000;
+        }
+
+        var declaredDataSize = isVag
+            ? BinaryPrimitives.ReadUInt32BigEndian(header[0x0C..])
+            : (uint)Math.Min(dataSize, uint.MaxValue);
+        var availablePayload = isVag
+            ? dataSize > Ngs2VagDecoder.VagHeaderSize
+                ? dataSize - Ngs2VagDecoder.VagHeaderSize
+                : 0UL
+            : dataSize;
+        var availableDataSize = (uint)Math.Min(availablePayload, uint.MaxValue);
+        var payloadSize = declaredDataSize == 0 || declaredDataSize > availableDataSize
+            ? availableDataSize
+            : declaredDataSize;
+        var frameCount = payloadSize / 16u;
+        var samples = isVag ? (frameCount / channels) * 28u : payloadSize / 2u;
+        var dataOffset = isVag ? (uint)Ngs2VagDecoder.VagHeaderSize : 0u;
+
+        // Ngs2WaveformFormat (24 bytes).
+        BinaryPrimitives.WriteUInt32LittleEndian(info, waveformTypeVag);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[4..], channels);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[8..], sampleRate);
+        // Ngs2WaveformInfo scalar fields.
+        BinaryPrimitives.WriteUInt32LittleEndian(info[24..], dataOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[28..], payloadSize);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[40..], samples);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[44..], isVag ? 16u : 2u);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[48..], isVag ? 28u : 1u);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[52..], 1u);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[56..], isVag ? 16u : 2u);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[60..], isVag ? 28u : 1u);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[68..], 1u);
+        // First Ngs2WaveformBlock starts at +72 and is 40 bytes.
+        BinaryPrimitives.WriteUInt64LittleEndian(info[72..], dataOffset);
+        BinaryPrimitives.WriteUInt64LittleEndian(info[80..], payloadSize);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[96..], samples);
+
+        return ctx.Memory.TryWrite(outInfoAddress, info)
             ? ctx.SetReturn(0)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        ExportName = "sceNgs2CalcWaveformBlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2CalcWaveformBlock(CpuContext ctx)
+    {
+        const int waveformBlockSize = 40;
+        var formatAddress = ctx[CpuRegister.Rdi];
+        var samplePosition = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var sampleCount = unchecked((uint)ctx[CpuRegister.Rdx]);
+        var blockAddress = ctx[CpuRegister.Rcx];
+        if (formatAddress == 0 || blockAddress == 0)
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> format = stackalloc byte[24];
+        if (!ctx.Memory.TryRead(formatAddress, format))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var waveformType = BinaryPrimitives.ReadUInt32LittleEndian(format);
+        var channels = Math.Max(1u, BinaryPrimitives.ReadUInt32LittleEndian(format[4..]));
+        var vag = waveformType == 0x80;
+        var unitSamples = vag ? 28u : 1u;
+        var unitBytes = vag ? 16u * channels : 2u * channels;
+        var firstUnit = samplePosition / unitSamples;
+        var units = (sampleCount + (samplePosition % unitSamples) + unitSamples - 1) / unitSamples;
+
+        Span<byte> block = stackalloc byte[waveformBlockSize];
+        block.Clear();
+        BinaryPrimitives.WriteUInt64LittleEndian(block, (ulong)firstUnit * unitBytes);
+        BinaryPrimitives.WriteUInt64LittleEndian(block[8..], (ulong)units * unitBytes);
+        BinaryPrimitives.WriteUInt32LittleEndian(block[20..], samplePosition % unitSamples);
+        BinaryPrimitives.WriteUInt32LittleEndian(block[24..], sampleCount);
+        return ctx.Memory.TryWrite(blockAddress, block)
+            ? SetReturn(ctx, 0)
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 }
