@@ -9,6 +9,8 @@ namespace Touche.Firmware;
 
 public interface IFirmwareVirtualFileSystem
 {
+    string ProfileId { get; }
+
     bool Exists(string virtualPath);
 
     FirmwareArtifact? GetArtifact(string virtualPath);
@@ -101,18 +103,23 @@ public sealed class FirmwareFileHandle : IAsyncDisposable, IDisposable
 /// </summary>
 public sealed class FirmwareVirtualFileSystem : IFirmwareVirtualFileSystem
 {
+    private readonly string _profileId;
     private readonly string _objectsRoot;
     private readonly IReadOnlyDictionary<string, FirmwareArtifact> _artifacts;
     private readonly ConcurrentDictionary<string, ObjectFingerprint> _verifiedObjects = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _verificationGates = new(StringComparer.Ordinal);
 
     private FirmwareVirtualFileSystem(
+        string profileId,
         string objectsRoot,
         IReadOnlyDictionary<string, FirmwareArtifact> artifacts)
     {
+        _profileId = profileId;
         _objectsRoot = objectsRoot;
         _artifacts = artifacts;
     }
+
+    public string ProfileId => _profileId;
 
     public static FirmwareVirtualFileSystem Mount(string storeRoot, string profileId)
     {
@@ -146,6 +153,7 @@ public sealed class FirmwareVirtualFileSystem : IFirmwareVirtualFileSystem
         }
 
         return new FirmwareVirtualFileSystem(
+            profileId,
             Path.Combine(Path.GetFullPath(storeRoot), "objects"),
             artifacts);
     }

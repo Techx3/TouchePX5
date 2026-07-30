@@ -23,6 +23,7 @@ public sealed class FirmwareVirtualFileSystemTests : IDisposable
         await using var handle = await fileSystem.OpenReadAsync(path);
 
         Assert.NotNull(handle);
+        Assert.Equal(result.Manifest.ProfileId, fileSystem.ProfileId);
         Assert.False(handle.Content is FileStream);
         Assert.False(handle.Content.CanWrite);
         Assert.True(fileSystem.Exists(path));
