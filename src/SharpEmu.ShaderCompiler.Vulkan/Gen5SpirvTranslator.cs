@@ -239,6 +239,7 @@ public static partial class Gen5SpirvTranslator
         private readonly ulong _storageBufferOffsetAlignment;
         private readonly List<uint> _interfaces = [];
         private readonly Dictionary<uint, uint> _pixelInputs = [];
+        private readonly Dictionary<uint, uint> _pixelInputDefaults = [];
         private readonly Dictionary<uint, SpirvPixelOutput> _pixelOutputs = [];
         private readonly Dictionary<uint, uint> _vertexOutputs = [];
         private readonly Dictionary<uint, SpirvVertexInput> _vertexInputsByPc = [];
@@ -1260,7 +1261,13 @@ public static partial class Gen5SpirvTranslator
                     var cntl = attribute < (uint)_pixelInputCntl.Length
                         ? _pixelInputCntl[attribute]
                         : attribute;
-                    var location = cntl & 0x1Fu;
+                    if (Gen5PixelInputMapping.UsesDefaultValue(cntl))
+                    {
+                        _pixelInputDefaults.Add(attribute, cntl);
+                        continue;
+                    }
+
+                    var location = Gen5PixelInputMapping.GetParameterLocation(cntl);
                     _module.AddDecoration(variable, SpirvDecoration.Location, location);
                     if ((cntl & 0x400u) != 0)
                     {
@@ -2201,8 +2208,23 @@ public static partial class Gen5SpirvTranslator
         {
             error = string.Empty;
             if (_stage != Gen5SpirvStage.Pixel ||
-                !_pixelInputs.TryGetValue(interpolation.Attribute, out var input) ||
                 !TryGetVectorDestination(instruction, out var destination))
+            {
+                error = "invalid interpolated attribute";
+                return false;
+            }
+
+            if (_pixelInputDefaults.TryGetValue(interpolation.Attribute, out var control))
+            {
+                StoreV(
+                    destination,
+                    UInt(Gen5PixelInputMapping.GetDefaultComponentBits(
+                        control,
+                        interpolation.Channel)));
+                return true;
+            }
+
+            if (!_pixelInputs.TryGetValue(interpolation.Attribute, out var input))
             {
                 error = "invalid interpolated attribute";
                 return false;

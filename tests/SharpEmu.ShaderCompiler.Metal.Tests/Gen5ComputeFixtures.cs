@@ -182,7 +182,8 @@ internal static class Gen5ComputeFixtures
     }
 
     public static Gen5MslShader CompilePixelOrThrow(
-        Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float)
+        Gen5PixelOutputKind outputKind = Gen5PixelOutputKind.Float,
+        IReadOnlyList<uint>? pixelInputCntl = null)
     {
         var memory = new FakeGuestMemory();
         memory.AddRegion(ProgramAddress, PixelWords);
@@ -203,7 +204,8 @@ internal static class Gen5ComputeFixtures
                 evaluation,
                 outputKind,
                 out var shader,
-                out var compileError))
+                out var compileError,
+                pixelInputCntl: pixelInputCntl))
         {
             throw new InvalidOperationException($"[pixel] MSL emit failed: {compileError}");
         }

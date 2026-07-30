@@ -7341,20 +7341,22 @@ public static partial class AgcExports
             }
         }
 
+        var psInputCntl = ReadPsInputCntlRegisters(state.CxRegisters);
+        var requiredVertexOutputCount =
+            GetRequiredVertexOutputCount(pixelState, psInputCntl);
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var earlyPrimitiveType);
-        if (IsRectListPrimitive(earlyPrimitiveType) &&
+        var usesRectListParameterFallback =
+            IsRectListPrimitive(earlyPrimitiveType) &&
             (exportEvaluation.VertexInputs is null || exportEvaluation.VertexInputs.Count == 0) &&
             !VertexProgramExportsParameters(exportState.Program) &&
-            GetInterpolatedAttributeCount(pixelState) != 0)
+            requiredVertexOutputCount != 0;
+        if (usesRectListParameterFallback)
         {
-            ReturnPooledEvaluationArrays(exportEvaluation);
-            ReturnPooledEvaluationArrays(pixelEvaluation);
-            error =
-                $"rect-list-no-param-exports ps_inputs={GetInterpolatedAttributeCount(pixelState)}";
             TraceAgcShader(
-                $"agc.rect_list_skip es=0x{exportShaderAddress:X16} " +
-                $"ps=0x{pixelShaderAddress:X16} {error}");
-            return false;
+                $"agc.rect_list_zero_params es=0x{exportShaderAddress:X16} " +
+                $"ps=0x{pixelShaderAddress:X16} " +
+                $"ps_inputs={GetInterpolatedAttributeCount(pixelState)} " +
+                $"vertex_outputs={requiredVertexOutputCount}");
         }
 
         // Every bound color target the shader exports to. Deferred renderers
@@ -7422,14 +7424,13 @@ public static partial class AgcExports
                 (uint)renderTargetOutputKinds[index]) << (index * 8);
         }
 
-        var attributeCount = GetInterpolatedAttributeCount(pixelState);
+        var attributeCount = requiredVertexOutputCount;
         var exportStateFingerprint = _bakeScalars
             ? ComputeShaderStateFingerprint(exportEvaluation)
             : ComputeShaderStructuralFingerprint(exportEvaluation);
         var pixelStateFingerprint = _bakeScalars
             ? ComputeShaderStateFingerprint(pixelEvaluation)
             : ComputeShaderStructuralFingerprint(pixelEvaluation);
-        var psInputCntl = ReadPsInputCntlRegisters(state.CxRegisters);
         var psInputCntlFingerprint = ComputePsInputCntlFingerprint(psInputCntl);
         var shaderKey = (
             exportShaderAddress,
@@ -7527,7 +7528,7 @@ public static partial class AgcExports
                         totalGlobalBufferCount: totalGlobalBuffers,
                         imageBindingBase: pixelEvaluation.ImageBindings.Count,
                         scalarRegisterBufferIndex: _bakeScalars ? -1 : guestGlobalBuffers + 1,
-                        requiredVertexOutputCount: (int)GetInterpolatedAttributeCount(pixelState),
+                        requiredVertexOutputCount: checked((int)requiredVertexOutputCount),
                         storageBufferOffsetAlignment:
                             _storageBufferOffsetAlignment))
                 {
@@ -7643,7 +7644,7 @@ public static partial class AgcExports
             primitiveType,
             compiled.Vertex,
             compiled.Pixel,
-            GetInterpolatedAttributeCount(pixelState),
+            requiredVertexOutputCount,
             vertexCount,
             state.InstanceCount,
             GetBaseVertex(state),
@@ -8159,6 +8160,35 @@ public static partial class AgcExports
         }
 
         return (uint)(maxAttribute + 1);
+    }
+
+    private static uint GetRequiredVertexOutputCount(
+        Gen5ShaderState state,
+        IReadOnlyList<uint> pixelInputCntl)
+    {
+        var maxLocation = -1;
+        foreach (var instruction in state.Program.Instructions)
+        {
+            if (instruction.Control is not Gen5InterpolationControl interpolation)
+            {
+                continue;
+            }
+
+            var attribute = interpolation.Attribute;
+            var control = attribute < (uint)pixelInputCntl.Count
+                ? pixelInputCntl[(int)attribute]
+                : attribute;
+            if (Gen5PixelInputMapping.UsesDefaultValue(control))
+            {
+                continue;
+            }
+
+            maxLocation = Math.Max(
+                maxLocation,
+                checked((int)Gen5PixelInputMapping.GetParameterLocation(control)));
+        }
+
+        return (uint)(maxLocation + 1);
     }
 
     private static readonly bool _bakeScalars = string.Equals(

@@ -268,6 +268,7 @@ public static partial class Gen5MslTranslator
         private bool[] _imageBindingReads = [];
         private bool[] _imageBindingWrites = [];
         private readonly SortedSet<uint> _pixelAttributes = [];
+        private readonly Dictionary<uint, uint> _pixelAttributeDefaults = [];
         private readonly SortedSet<uint> _vertexOutputs = [];
         private readonly Dictionary<uint, Gen5VertexInputBinding> _vertexInputsByPc = [];
         private readonly int _requiredVertexOutputCount;
@@ -366,7 +367,19 @@ public static partial class Gen5MslTranslator
                     _usesFormatLoads |= IsFormatBufferLoad(instruction.Opcode);
                     if (instruction.Control is Gen5InterpolationControl interpolationControl)
                     {
-                        _pixelAttributes.Add(interpolationControl.Attribute);
+                        var attribute = interpolationControl.Attribute;
+                        var cntl = attribute < (uint)_pixelInputCntl.Length
+                            ? _pixelInputCntl[attribute]
+                            : attribute;
+                        if (_stage == Gen5MslStage.Pixel &&
+                            Gen5PixelInputMapping.UsesDefaultValue(cntl))
+                        {
+                            _pixelAttributeDefaults[attribute] = cntl;
+                        }
+                        else
+                        {
+                            _pixelAttributes.Add(attribute);
+                        }
                     }
 
                     if (_stage == Gen5MslStage.Vertex &&
@@ -608,7 +621,7 @@ public static partial class Gen5MslTranslator
                     var cntl = attribute < (uint)_pixelInputCntl.Length
                         ? _pixelInputCntl[attribute]
                         : attribute;
-                    var location = cntl & 0x1Fu;
+                    var location = Gen5PixelInputMapping.GetParameterLocation(cntl);
                     var flat = (cntl & 0x400u) != 0 ? ", flat" : string.Empty;
                     source.AppendLine(
                         $"    float4 attr{attribute} [[user(locn{location}){flat}]];");

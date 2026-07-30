@@ -822,9 +822,22 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
             if (_stage != Gen5MslStage.Pixel ||
-                !_pixelAttributes.Contains(interpolation.Attribute) ||
                 instruction.Destinations.Count == 0 ||
                 instruction.Destinations[0].Kind != Gen5OperandKind.VectorRegister)
+            {
+                error = "invalid interpolated attribute";
+                return false;
+            }
+
+            if (_pixelAttributeDefaults.TryGetValue(interpolation.Attribute, out var control))
+            {
+                StoreVector(
+                    instruction.Destinations[0].Value,
+                    $"0x{Gen5PixelInputMapping.GetDefaultComponentBits(control, interpolation.Channel):X8}u");
+                return true;
+            }
+
+            if (!_pixelAttributes.Contains(interpolation.Attribute))
             {
                 error = "invalid interpolated attribute";
                 return false;

@@ -91,6 +91,19 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
+    public void PixelDefaultInputDoesNotRequireVertexVarying()
+    {
+        // OFFSET bit 5 selects DEFAULT_VAL; selector 1 is (0, 0, 0, 1).
+        var shader = Gen5ComputeFixtures.CompilePixelOrThrow(
+            pixelInputCntl: [0x120u]);
+
+        Assert.Equal(0u, shader.AttributeCount);
+        Assert.DoesNotContain("float4 attr0", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("sharpemu_in.attr0", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("0x00000000u", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PixelOutputKindsSelectTheAttachmentType()
     {
         var uintShader = Gen5ComputeFixtures.CompilePixelOrThrow(Gen5PixelOutputKind.Uint);
