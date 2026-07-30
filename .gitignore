@@ -10,6 +10,9 @@
 logs/
 .tmp/
 
+# Local research material, extracted firmware and private test data.
+local-data/
+
 x86/
 x64/
 arm64/
