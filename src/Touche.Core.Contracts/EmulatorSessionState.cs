@@ -43,7 +43,7 @@ public static class EmulatorSessionTransitions
             EmulatorSessionState.Validating => next is EmulatorSessionState.Starting or
                 EmulatorSessionState.Stopping or EmulatorSessionState.Failed,
             EmulatorSessionState.Starting => next is EmulatorSessionState.Running or
-                EmulatorSessionState.Stopping or EmulatorSessionState.Failed,
+                EmulatorSessionState.Stopping or EmulatorSessionState.Crashed or EmulatorSessionState.Failed,
             EmulatorSessionState.Running => next is EmulatorSessionState.Paused or
                 EmulatorSessionState.Stopping or EmulatorSessionState.Stopped or EmulatorSessionState.Crashed,
             EmulatorSessionState.Paused => next is EmulatorSessionState.Running or
