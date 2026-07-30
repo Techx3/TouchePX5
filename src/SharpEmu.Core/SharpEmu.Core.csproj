@@ -8,6 +8,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
     <ProjectReference Include="..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+    <ProjectReference Include="..\Touche.Firmware\Touche.Firmware.csproj" />
     <ProjectReference Include="..\Touche.PS5.Modules\Touche.PS5.Modules.csproj" />
   </ItemGroup>
 

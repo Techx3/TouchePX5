@@ -7,6 +7,7 @@ namespace Touche.Firmware;
 
 public sealed class FirmwareProfileRepository
 {
+    private const long MaximumCatalogBytes = 64L * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new();
     private readonly string _storeRoot;
 
@@ -92,6 +93,33 @@ public sealed class FirmwareProfileRepository
 
         profiles.Sort(static (left, right) => right.ImportedAtUtc.CompareTo(left.ImportedAtUtc));
         return profiles;
+    }
+
+    public FirmwareModuleCatalog GetModuleCatalog(string profileId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(profileId);
+        var profile = GetImportedProfiles().FirstOrDefault(candidate =>
+            string.Equals(candidate.ProfileId, profileId, StringComparison.Ordinal))
+            ?? throw new DirectoryNotFoundException($"Firmware profile is not installed: {profileId}");
+        var path = Path.Combine(profile.ProfileDirectory, "modules.json");
+        var info = new FileInfo(path);
+        if (!info.Exists || info.Length is <= 0 or > MaximumCatalogBytes)
+        {
+            throw new InvalidDataException($"Firmware module catalog is missing or exceeds {MaximumCatalogBytes} bytes.");
+        }
+        var catalog = Read<FirmwareModuleCatalog>(path);
+        if (catalog is null ||
+            catalog.SchemaVersion != FirmwareModuleCatalog.CurrentSchemaVersion ||
+            !string.Equals(catalog.ProfileId, profileId, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(catalog.ContentHash) ||
+            catalog.Modules is null ||
+            catalog.Modules.Any(module => module is null ||
+                string.IsNullOrWhiteSpace(module.VirtualPath) ||
+                string.IsNullOrWhiteSpace(module.Sha256)))
+        {
+            throw new InvalidDataException("Firmware module catalog is invalid or belongs to another profile.");
+        }
+        return catalog;
     }
 
     private static T? Read<T>(string path)

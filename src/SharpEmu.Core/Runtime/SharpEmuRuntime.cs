@@ -37,6 +37,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     private readonly ISymbolCatalog _symbolCatalog;
     private readonly CpuExecutionOptions _cpuExecutionOptions;
     private readonly IFileSystem _fileSystem;
+    private readonly FirmwareLleRuntimeSession? _firmwareLleSession;
     private bool _disposed;
 
     public string? LastExecutionDiagnostics { get; private set; }
@@ -56,7 +57,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         IModuleManager moduleManager,
         ISymbolCatalog? symbolCatalog = null,
         CpuExecutionOptions cpuExecutionOptions = default,
-        IFileSystem? fileSystem = null)
+        IFileSystem? fileSystem = null,
+        SharpEmuRuntimeOptions runtimeOptions = default)
     {
         _selfLoader = selfLoader ?? throw new ArgumentNullException(nameof(selfLoader));
         _virtualMemory = virtualMemory ?? throw new ArgumentNullException(nameof(virtualMemory));
@@ -71,6 +73,22 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             DebugHook = cpuExecutionOptions.DebugHook,
         };
         _fileSystem = fileSystem ?? new PhysicalFileSystem();
+        if (runtimeOptions.EnableExperimentalFirmwareLle)
+        {
+            if (string.IsNullOrWhiteSpace(runtimeOptions.FirmwareProfileStoreRoot) ||
+                string.IsNullOrWhiteSpace(runtimeOptions.FirmwareProfileId))
+            {
+                throw new ArgumentException(
+                    "Experimental firmware LLE requires a profile store and profile identifier.",
+                    nameof(runtimeOptions));
+            }
+            _firmwareLleSession = new FirmwareLleRuntimeSession(
+                runtimeOptions.FirmwareProfileStoreRoot,
+                runtimeOptions.FirmwareProfileId,
+                virtualMemory,
+                moduleManager,
+                _symbolCatalog);
+        }
     }
 
     public static ISharpEmuRuntime CreateDefault(SharpEmuRuntimeOptions options = default)
@@ -99,7 +117,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             moduleManager,
             Aerolib.Instance,
             cpuExecutionOptions,
-            fileSystem);
+            fileSystem,
+            options);
     }
 
     public SelfImage LoadImage(string ebootPath)
@@ -159,6 +178,11 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         HleDataSymbols.ConfigureProcessImageName(processImageName);
         MergeKnownHleDataSymbols(activeRuntimeSymbols);
+        LoadExperimentalFirmwareProviders(
+            image,
+            generation,
+            activeImportStubs,
+            activeRuntimeSymbols);
         var loadedModuleImages = LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
         RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
         var initializerResult = RunAllInitializers(
@@ -369,6 +393,51 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         return result;
+    }
+
+    private void LoadExperimentalFirmwareProviders(
+        SelfImage image,
+        Generation generation,
+        IDictionary<ulong, string> importStubs,
+        IDictionary<string, ulong> runtimeSymbols)
+    {
+        if (_firmwareLleSession is null)
+        {
+            return;
+        }
+        if (generation != Generation.Gen5)
+        {
+            Console.Error.WriteLine("[FIRMWARE-LLE][INFO] Ignoring firmware profile for a non-PS5 image.");
+            return;
+        }
+
+        try
+        {
+            var summary = _firmwareLleSession.LoadMissingProvidersAsync(
+                    image,
+                    importStubs,
+                    runtimeSymbols)
+                .GetAwaiter()
+                .GetResult();
+            Console.Error.WriteLine(
+                $"[FIRMWARE-LLE][INFO] profile scan: missing={summary.MissingImports}, " +
+                $"candidates={summary.CandidateModules}, loaded={summary.LoadedModules}, " +
+                $"published={summary.PublishedImports}, ambiguous={summary.AmbiguousImports}, " +
+                $"deferred={summary.DeferredModules}");
+        }
+        catch (Exception exception) when (exception is
+            InvalidDataException or
+            InvalidOperationException or
+            IOException or
+            UnauthorizedAccessException or
+            NotSupportedException or
+            OverflowException or
+            System.Text.Json.JsonException)
+        {
+            Console.Error.WriteLine(
+                $"[FIRMWARE-LLE][WARN] Experimental profile disabled for this run: " +
+                $"{exception.GetType().Name}: {exception.Message}");
+        }
     }
 
     private static App0BindingScope? BindApp0Root(string normalizedEbootPath)
@@ -1177,6 +1246,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 "[RUNTIME] Guest workers were still active at teardown; keeping the guest address space mapped.");
             return;
         }
+
+        _firmwareLleSession?.Dispose();
 
         if (_virtualMemory is IDisposable disposableMemory)
         {
