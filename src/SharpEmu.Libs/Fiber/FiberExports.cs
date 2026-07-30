@@ -553,13 +553,14 @@ public static class FiberExports
             return SetReturn(ctx, error);
         }
 
-        if (!TryReadFiberFields(ctx, fiber, out var fields))
-        {
-            return SetReturn(ctx, FiberErrorInvalid);
-        }
-
+        FiberFields fields = default;
         if (attachContextAddress != 0 || attachContextSize != 0)
         {
+            if (!TryReadFiberFields(ctx, fiber, out fields))
+            {
+                return SetReturn(ctx, FiberErrorInvalid);
+            }
+
             var attachResult = AttachContext(ctx, fiber, attachContextAddress, attachContextSize, ref fields);
             if (attachResult != 0)
             {

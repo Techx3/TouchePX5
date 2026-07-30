@@ -18,8 +18,8 @@ internal static class GuestDataPool
 {
     public static ArrayPool<byte> Shared { get; } = new BoundedByteArrayPool(
         maxArrayLength: 16 * 1024 * 1024,
-        maxCachedBytes: 256UL * 1024 * 1024,
-        maxArraysPerBucket: 8);
+        maxCachedBytes: 512UL * 1024 * 1024,
+        maxArraysPerBucket: 16);
 
     public static void Trim() => ((BoundedByteArrayPool)Shared).Trim();
 
@@ -60,8 +60,14 @@ internal static class GuestDataPool
                 {
                     _cachedBytes -= (ulong)array.LongLength;
                 }
+            }
 
-                array ??= new byte[length];
+            // Large allocations can fault/zero many pages. Do that outside the
+            // pool gate so one cache miss does not serialize every guest buffer
+            // renter on the submit and render threads.
+            array ??= GC.AllocateUninitializedArray<byte>(length);
+            lock (_gate)
+            {
                 _leases.Add(array);
             }
 

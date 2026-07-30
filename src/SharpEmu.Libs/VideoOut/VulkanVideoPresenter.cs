@@ -11123,6 +11123,18 @@ internal static unsafe class VulkanVideoPresenter
         internal static Format GetStorageImageFormat(Format format) =>
             format switch
             {
+                // Vulkan does not require storage-image support for scaled
+                // formats (NVIDIA reports none for R8Sscaled). Preserve the
+                // component width/sign while selecting the normalized storage
+                // counterpart so formatless float image operations can run.
+                Format.R8Uscaled => Format.R8Unorm,
+                Format.R8Sscaled => Format.R8SNorm,
+                Format.R8G8Uscaled => Format.R8G8Unorm,
+                Format.R8G8Sscaled => Format.R8G8SNorm,
+                Format.R16Uscaled => Format.R16Unorm,
+                Format.R16Sscaled => Format.R16SNorm,
+                Format.R16G16Uscaled => Format.R16G16Unorm,
+                Format.R16G16Sscaled => Format.R16G16SNorm,
                 Format.R8Srgb => Format.R8Unorm,
                 Format.R8G8Srgb => Format.R8G8Unorm,
                 Format.R8G8B8A8Srgb => Format.R8G8B8A8Unorm,

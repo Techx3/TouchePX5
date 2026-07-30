@@ -9625,9 +9625,13 @@ public static partial class AgcExports
                         storageSource,
                         baseMipInTail,
                         mipTailElementX,
-                        mipTailElementY) ?? storageSource
-                            .AsSpan(0, checked((int)sourceByteCount))
-                            .ToArray();
+                        mipTailElementY);
+                    if (linearStorage is null)
+                    {
+                        linearStorage = storageSource.Length == checked((int)sourceByteCount)
+                            ? storageSource
+                            : storageSource.AsSpan(0, checked((int)sourceByteCount)).ToArray();
+                    }
                     if (linearStorage.AsSpan().IndexOfAnyExcept((byte)0) >= 0)
                     {
                         linearNonzero = true;
@@ -9828,7 +9832,13 @@ public static partial class AgcExports
                         sliceSource,
                         baseMipInTail,
                         mipTailElementX,
-                        mipTailElementY) ?? sliceSource.AsSpan(0, layerBytes).ToArray();
+                        mipTailElementY);
+                    if (sliceLinear is null)
+                    {
+                        sliceLinear = sliceSource.Length == layerBytes
+                            ? sliceSource
+                            : sliceSource.AsSpan(0, layerBytes).ToArray();
+                    }
                     sliceLinear.AsSpan(0, layerBytes)
                         .CopyTo(layered.AsSpan(checked((int)(layer * layerBytes))));
                     uploadedLayers++;
@@ -9973,7 +9983,16 @@ public static partial class AgcExports
             source,
             baseMipInTail,
             mipTailElementX,
-            mipTailElementY) ?? source.AsSpan(0, checked((int)sourceByteCount)).ToArray();
+            mipTailElementY);
+        if (rgba is null)
+        {
+            // Linear resources already have the exact upload layout. Reusing
+            // the source array avoids a second multi-megabyte allocation and
+            // copy for every uncached texture referenced by a draw.
+            rgba = source.Length == checked((int)sourceByteCount)
+                ? source
+                : source.AsSpan(0, checked((int)sourceByteCount)).ToArray();
+        }
         DumpLinearTextureIfRequested(descriptor, sourceWidth, rgba);
         texture = new GuestDrawTexture(
             descriptor.Address,
