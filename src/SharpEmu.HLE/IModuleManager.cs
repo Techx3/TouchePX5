@@ -16,6 +16,8 @@ public interface IModuleManager
 
     bool TryGetExportByName(string exportName, out ExportedFunction export);
 
+    IReadOnlyList<ExportedFunction> GetExports();
+
     bool TryDispatch(string nid, CpuContext context, out OrbisGen2Result result);
 
     OrbisGen2Result Dispatch(string nid, CpuContext context);

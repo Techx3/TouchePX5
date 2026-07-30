@@ -262,6 +262,11 @@ public sealed class ModuleManager : IModuleManager
         return _exportNameTable.TryGetValue(exportName, out export!);
     }
 
+    public IReadOnlyList<ExportedFunction> GetExports() =>
+        _exportTable.Values
+            .OrderBy(export => export.Nid, StringComparer.Ordinal)
+            .ToArray();
+
     public OrbisGen2Result Dispatch(string nid, CpuContext context)
     {
         TryDispatch(nid, context, out var result);
