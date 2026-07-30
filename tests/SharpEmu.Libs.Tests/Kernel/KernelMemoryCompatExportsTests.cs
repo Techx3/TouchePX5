@@ -161,6 +161,32 @@ public sealed class KernelMemoryCompatExportsTests
     }
 
     [Fact]
+    public void Sprintf_InvalidatesCachedFormatWhenGuestBytesChange()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong destinationAddress = memoryBase + 0x100;
+        const ulong formatAddress = memoryBase + 0x200;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = destinationAddress;
+        context[CpuRegister.Rsi] = formatAddress;
+
+        memory.WriteCString(formatAddress, "%d");
+        context[CpuRegister.Rdx] = 7;
+        Assert.Equal(0, KernelMemoryCompatExports.Sprintf(context));
+        Span<byte> firstOutput = stackalloc byte[2];
+        Assert.True(memory.TryRead(destinationAddress, firstOutput));
+        Assert.Equal("7\0", Encoding.UTF8.GetString(firstOutput));
+
+        memory.WriteCString(formatAddress, "%04d");
+        context[CpuRegister.Rdx] = 12;
+        Assert.Equal(0, KernelMemoryCompatExports.Sprintf(context));
+        Span<byte> secondOutput = stackalloc byte[5];
+        Assert.True(memory.TryRead(destinationAddress, secondOutput));
+        Assert.Equal("0012\0", Encoding.UTF8.GetString(secondOutput));
+    }
+
+    [Fact]
     public void AvailableDirectMemorySize_FragmentedRangeReturnsLargestAlignedSpan()
     {
         const ulong firstAllocationStart = 0x0020_0000;

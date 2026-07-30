@@ -3852,12 +3852,11 @@ public static partial class KernelMemoryCompatExports
         var bufferSize = ctx[CpuRegister.Rsi];
         var formatAddress = ctx[CpuRegister.Rdx];
 
-        if (!TryReadCString(ctx, formatAddress, 1_048_576, out var formatBytes))
+        if (!TryReadPrintfFormat(ctx, formatAddress, out var format, out _))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        var format = Encoding.UTF8.GetString(formatBytes);
         var result = FormatString(ctx, format);
 
         return WriteSnprintfOutput(ctx, destination, bufferSize, result);
@@ -3870,12 +3869,11 @@ public static partial class KernelMemoryCompatExports
         var formatAddress = ctx[CpuRegister.Rdx];
         var vaListAddress = ctx[CpuRegister.Rcx];
 
-        if (!TryReadCString(ctx, formatAddress, 1_048_576, out var formatBytes))
+        if (!TryReadPrintfFormat(ctx, formatAddress, out var format, out var formatBytes))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        var format = Encoding.UTF8.GetString(formatBytes);
         if (!TryCreateVaListCursor(ctx, vaListAddress, out var vaCursor))
         {
             return WriteSnprintfOutput(ctx, destination, bufferSize, formatBytes);
@@ -4313,6 +4311,68 @@ public static partial class KernelMemoryCompatExports
 
     [ThreadStatic]
     private static StringBuilder? _formatBuilder;
+
+    [ThreadStatic]
+    private static PrintfFormatCacheEntry?[]? _printfFormatCache;
+
+    private const int PrintfFormatCacheSize = 128;
+    private const int PrintfFormatProbeSize = 256;
+
+    private sealed record PrintfFormatCacheEntry(ulong Address, byte[] Bytes, string Format);
+
+    private static bool TryReadPrintfFormat(
+        CpuContext ctx,
+        ulong address,
+        out string format,
+        out byte[] bytes)
+    {
+        format = string.Empty;
+        bytes = Array.Empty<byte>();
+        if (address == 0)
+        {
+            return false;
+        }
+
+        // printf formats overwhelmingly live in read-only guest data and are
+        // reused millions of times. Validate a small direct-mapped cache against
+        // guest bytes so writable/stack formats remain correct while avoiding a
+        // byte[] allocation and UTF-8 decode on the common hit path.
+        Span<byte> probe = stackalloc byte[PrintfFormatProbeSize];
+        var pageRemaining = 4096 - (int)(address & 4095);
+        var probeLength = Math.Min(PrintfFormatProbeSize, pageRemaining);
+        var readableProbe = probe[..probeLength];
+        if (TryReadCompat(ctx, address, readableProbe))
+        {
+            var nulIndex = readableProbe.IndexOf((byte)0);
+            if (nulIndex >= 0)
+            {
+                var cache = _printfFormatCache ??= new PrintfFormatCacheEntry?[PrintfFormatCacheSize];
+                var cacheIndex = (int)((address >> 3) & (PrintfFormatCacheSize - 1));
+                var entry = cache[cacheIndex];
+                if (entry is not null &&
+                    entry.Address == address &&
+                    entry.Bytes.AsSpan().SequenceEqual(readableProbe[..nulIndex]))
+                {
+                    format = entry.Format;
+                    bytes = entry.Bytes;
+                    return true;
+                }
+
+                bytes = readableProbe[..nulIndex].ToArray();
+                format = Encoding.UTF8.GetString(bytes);
+                cache[cacheIndex] = new PrintfFormatCacheEntry(address, bytes, format);
+                return true;
+            }
+        }
+
+        if (!TryReadCString(ctx, address, 1_048_576, out bytes))
+        {
+            return false;
+        }
+
+        format = Encoding.UTF8.GetString(bytes);
+        return true;
+    }
 
     // printf length modifier collapsed to the widths our conversions care about.
     // Kept as an enum rather than a per-argument substring so the hot format
@@ -7669,12 +7729,11 @@ public static partial class KernelMemoryCompatExports
         var destination = ctx[CpuRegister.Rdi];
         var formatAddress = ctx[CpuRegister.Rsi];
 
-        if (!TryReadCString(ctx, formatAddress, 1_048_576, out var formatBytes))
+        if (!TryReadPrintfFormat(ctx, formatAddress, out var format, out _))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        var format = Encoding.UTF8.GetString(formatBytes);
         var rendered = FormatStringFromVarArgs(ctx, format, firstGpArgIndex: 2);
         return WriteSnprintfOutput(ctx, destination, ulong.MaxValue, rendered);
     }
@@ -7690,12 +7749,11 @@ public static partial class KernelMemoryCompatExports
         var formatAddress = ctx[CpuRegister.Rsi];
         var vaListAddress = ctx[CpuRegister.Rdx];
 
-        if (!TryReadCString(ctx, formatAddress, 1_048_576, out var formatBytes))
+        if (!TryReadPrintfFormat(ctx, formatAddress, out var format, out var formatBytes))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        var format = Encoding.UTF8.GetString(formatBytes);
         if (!TryCreateVaListCursor(ctx, vaListAddress, out var vaCursor))
         {
             return WriteSnprintfOutput(ctx, destination, ulong.MaxValue, formatBytes);

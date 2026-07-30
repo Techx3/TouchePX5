@@ -970,10 +970,27 @@ public static class FiberExports
             return false;
         }
 
-        if (!TryReadUInt32(ctx, fiber + FiberMagicStartOffset, out var magicStart) ||
-            !TryReadUInt32(ctx, fiber + FiberMagicEndOffset, out var magicEnd) ||
-            magicStart != FiberSignature0 ||
-            magicEnd != FiberSignature1)
+        Span<byte> snapshot = stackalloc byte[FiberMagicEndOffset + sizeof(uint)];
+        if (ctx.Memory.TryRead(fiber, snapshot))
+        {
+            var magicStart = BinaryPrimitives.ReadUInt32LittleEndian(snapshot[FiberMagicStartOffset..]);
+            var magicEnd = BinaryPrimitives.ReadUInt32LittleEndian(snapshot[FiberMagicEndOffset..]);
+            if (magicStart == FiberSignature0 && magicEnd == FiberSignature1)
+            {
+                error = 0;
+                return true;
+            }
+
+            error = FiberErrorInvalid;
+            return false;
+        }
+
+        // Preserve compatibility with discontiguous guest mappings where a
+        // single structure read cannot span both mapped pages.
+        if (!TryReadUInt32(ctx, fiber + FiberMagicStartOffset, out var fallbackMagicStart) ||
+            !TryReadUInt32(ctx, fiber + FiberMagicEndOffset, out var fallbackMagicEnd) ||
+            fallbackMagicStart != FiberSignature0 ||
+            fallbackMagicEnd != FiberSignature1)
         {
             error = FiberErrorInvalid;
             return false;
@@ -990,6 +1007,33 @@ public static class FiberExports
         bool includeName = false)
     {
         fields = default;
+        Span<byte> snapshot = stackalloc byte[FiberFlagsOffset + sizeof(uint)];
+        if (ctx.Memory.TryRead(fiber, snapshot))
+        {
+            var snapshotName = string.Empty;
+            if (includeName)
+            {
+                var nameBytes = snapshot.Slice(FiberNameOffset, MaxNameLength + 1);
+                var nameLength = nameBytes.IndexOf((byte)0);
+                if (nameLength < 0)
+                {
+                    nameLength = nameBytes.Length;
+                }
+
+                snapshotName = Encoding.UTF8.GetString(nameBytes[..nameLength]);
+            }
+
+            fields = new FiberFields(
+                BinaryPrimitives.ReadUInt32LittleEndian(snapshot[FiberStateOffset..]),
+                BinaryPrimitives.ReadUInt64LittleEndian(snapshot[FiberEntryOffset..]),
+                BinaryPrimitives.ReadUInt64LittleEndian(snapshot[FiberArgOnInitializeOffset..]),
+                BinaryPrimitives.ReadUInt64LittleEndian(snapshot[FiberContextAddressOffset..]),
+                BinaryPrimitives.ReadUInt64LittleEndian(snapshot[FiberContextSizeOffset..]),
+                BinaryPrimitives.ReadUInt32LittleEndian(snapshot[FiberFlagsOffset..]),
+                snapshotName);
+            return true;
+        }
+
         if (!TryReadUInt32(ctx, fiber + FiberStateOffset, out var state) ||
             !TryReadUInt64(ctx, fiber + FiberEntryOffset, out var entry) ||
             !TryReadUInt64(ctx, fiber + FiberArgOnInitializeOffset, out var argOnInitialize) ||
