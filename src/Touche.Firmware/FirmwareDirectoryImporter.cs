@@ -93,9 +93,20 @@ public sealed class FirmwareDirectoryImporter
                 }
             }
 
+            var moduleCatalog = await new FirmwareModuleCatalogBuilder(objectsRoot)
+                .BuildAsync(scan.Manifest, cancellationToken)
+                .ConfigureAwait(false);
             if (alreadyImported)
             {
-                return new FirmwareImportResult(scan.Manifest, profileDirectory, AlreadyImported: true);
+                await FirmwareModuleCatalogBuilder.WriteAsync(
+                    moduleCatalog,
+                    profileDirectory,
+                    cancellationToken).ConfigureAwait(false);
+                return new FirmwareImportResult(
+                    scan.Manifest,
+                    profileDirectory,
+                    AlreadyImported: true,
+                    moduleCatalog);
             }
 
             var stagedProfile = Path.Combine(stagingDirectory, "profile");
@@ -103,6 +114,10 @@ public sealed class FirmwareDirectoryImporter
             await File.WriteAllTextAsync(
                 Path.Combine(stagedProfile, "manifest.json"),
                 JsonSerializer.Serialize(scan.Manifest, JsonOptions),
+                cancellationToken).ConfigureAwait(false);
+            await FirmwareModuleCatalogBuilder.WriteAsync(
+                moduleCatalog,
+                stagedProfile,
                 cancellationToken).ConfigureAwait(false);
             try
             {
@@ -114,7 +129,11 @@ public sealed class FirmwareDirectoryImporter
                 return new FirmwareImportResult(scan.Manifest, profileDirectory, AlreadyImported: true);
             }
 
-            return new FirmwareImportResult(scan.Manifest, profileDirectory, AlreadyImported: false);
+            return new FirmwareImportResult(
+                scan.Manifest,
+                profileDirectory,
+                AlreadyImported: false,
+                moduleCatalog);
         }
         finally
         {

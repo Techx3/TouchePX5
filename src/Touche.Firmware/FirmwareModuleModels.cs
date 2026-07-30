@@ -1,0 +1,53 @@
+// Copyright (C) 2026 Touché PX5 contributors
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Text.Json.Serialization;
+
+namespace Touche.Firmware;
+
+[JsonConverter(typeof(JsonStringEnumConverter<FirmwareModuleFormat>))]
+public enum FirmwareModuleFormat
+{
+    Unknown,
+    Elf64,
+    SonySelf,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<FirmwareModuleState>))]
+public enum FirmwareModuleState
+{
+    Unknown,
+    Parseable,
+    MissingDependencies,
+    UnsupportedArchitecture,
+    UnsupportedRelocation,
+    UnsupportedEncryption,
+    Loadable,
+    LleCompatible,
+    RuntimeIncompatible,
+}
+
+public sealed record FirmwareModule(
+    string VirtualPath,
+    string Sha256,
+    FirmwareModuleFormat Format,
+    FirmwareModuleState State,
+    string? Architecture,
+    ulong? EntryPoint,
+    int ProgramHeaderCount,
+    bool HasDynamicTable,
+    IReadOnlyList<string> Dependencies,
+    string? Reason);
+
+public sealed record FirmwareModuleCatalog
+{
+    public const int CurrentSchemaVersion = 1;
+
+    public int SchemaVersion { get; init; } = CurrentSchemaVersion;
+
+    public required string ProfileId { get; init; }
+
+    public required string ContentHash { get; init; }
+
+    public required IReadOnlyList<FirmwareModule> Modules { get; init; }
+}

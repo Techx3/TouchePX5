@@ -64,7 +64,8 @@ public sealed record FirmwareDirectoryScan(
 public sealed record FirmwareImportResult(
     FirmwareProfileManifest Manifest,
     string ProfileDirectory,
-    bool AlreadyImported);
+    bool AlreadyImported,
+    FirmwareModuleCatalog? ModuleCatalog = null);
 
 public sealed record FirmwareScanOptions
 {

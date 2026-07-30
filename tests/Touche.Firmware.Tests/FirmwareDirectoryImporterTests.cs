@@ -50,6 +50,8 @@ public sealed class FirmwareDirectoryImporterTests : IDisposable
         Assert.False(first.AlreadyImported);
         Assert.True(second.AlreadyImported);
         Assert.True(File.Exists(Path.Combine(first.ProfileDirectory, "manifest.json")));
+        Assert.True(File.Exists(Path.Combine(first.ProfileDirectory, "modules.json")));
+        Assert.Single(first.ModuleCatalog!.Modules);
         foreach (var artifact in first.Manifest.Artifacts)
         {
             var objectPath = Path.Combine(store, "objects", artifact.Sha256[..2], artifact.Sha256);
