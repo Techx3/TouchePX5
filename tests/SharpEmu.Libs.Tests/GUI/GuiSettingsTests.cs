@@ -126,6 +126,21 @@ public sealed class GuiSettingsTests
         Assert.Equal(expected, settings.ActiveFirmwareSha256);
     }
 
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("invalid", null)]
+    [InlineData(
+        "  PS5-EXTRACTED-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ",
+        "ps5-extracted-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    public void NormalizeFromJson_ExtractedFirmwareProfile_IsValidated(string? input, string? expected)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(new { ActiveFirmwareProfileId = input });
+
+        var settings = GuiSettings.NormalizeFromJson(json);
+
+        Assert.Equal(expected, settings.ActiveFirmwareProfileId);
+    }
+
     [Fact]
     public void NormalizeFromJson_LegacySharpEmuDiscordApplication_IsDisabled()
     {

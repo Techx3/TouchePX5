@@ -62,6 +62,12 @@ public sealed class GuiSettings
     /// <summary>SHA-256 of the locally installed firmware selected for future LLE support.</summary>
     public string? ActiveFirmwareSha256 { get; set; }
 
+    /// <summary>Selected locally imported, extracted firmware profile.</summary>
+    public string? ActiveFirmwareProfileId { get; set; }
+
+    /// <summary>Opt-in switch for the experimental hybrid HLE/LLE provider path.</summary>
+    public bool EnableExperimentalFirmwareLle { get; set; }
+
     /// <summary>
     /// Discord application ID used for Rich Presence. Configure an application
     /// owned by the Touché PX5 project before enabling this integration.
@@ -111,6 +117,7 @@ public sealed class GuiSettings
             ? null
             : settings.VulkanDevice.Trim();
         settings.ActiveFirmwareSha256 = NormalizeSha256(settings.ActiveFirmwareSha256);
+        settings.ActiveFirmwareProfileId = NormalizeFirmwareProfileId(settings.ActiveFirmwareProfileId);
         if (settings.DiscordClientId == "1525606762248540221")
         {
             settings.DiscordClientId = "";
@@ -134,6 +141,18 @@ public sealed class GuiSettings
         var normalized = value?.Trim().ToLowerInvariant();
         return normalized is { Length: 64 } && normalized.All(character => char.IsAsciiHexDigit(character))
             ? normalized
+            : null;
+    }
+
+    private static string? NormalizeFirmwareProfileId(string? value)
+    {
+        const string prefix = "ps5-extracted-";
+        var normalized = value?.Trim().ToLowerInvariant();
+        var hash = normalized is not null && normalized.StartsWith(prefix, StringComparison.Ordinal)
+            ? normalized[prefix.Length..]
+            : null;
+        return hash is { Length: 64 } && hash.All(char.IsAsciiHexDigit)
+            ? prefix + hash
             : null;
     }
 

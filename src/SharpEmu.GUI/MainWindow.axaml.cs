@@ -249,6 +249,16 @@ public partial class MainWindow : Window
         ImportExtractedFirmwareButton.Click += async (_, _) => await ImportExtractedFirmwareAsync();
         OpenFirmwareFolderButton.Click += (_, _) => OpenFirmwareFolder();
         FirmwareBox.SelectionChanged += (_, _) => OnFirmwareSelectionChanged();
+        ExtractedFirmwareBox.SelectionChanged += (_, _) => OnExtractedFirmwareSelectionChanged();
+        ExperimentalFirmwareLleToggle.IsCheckedChanged += (_, _) =>
+        {
+            if (_refreshingFirmware)
+            {
+                return;
+            }
+            _settings.EnableExperimentalFirmwareLle = ExperimentalFirmwareLleToggle.IsChecked == true;
+            _settings.Save();
+        };
         EnvBthidToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("TOUCHEPX5_BTHID_UNAVAILABLE", EnvBthidToggle.IsChecked == true);
         EnvLoopGuardToggle.IsCheckedChanged += (_, _) =>
@@ -944,6 +954,7 @@ public partial class MainWindow : Window
         TitleMusicToggle.IsChecked = _settings.PlayTitleMusic;
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
         AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
+        ExperimentalFirmwareLleToggle.IsChecked = _settings.EnableExperimentalFirmwareLle;
         EnvBthidToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_BTHID_UNAVAILABLE");
         EnvLoopGuardToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_DISABLE_IMPORT_LOOP_GUARD");
         EnvWritableApp0Toggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_WRITABLE_APP0");
@@ -988,8 +999,30 @@ public partial class MainWindow : Window
     {
         var profiles = _firmwareProfileRepository.GetImportedProfiles();
         var selected = profiles.FirstOrDefault(profile =>
-            string.Equals(profile.ProfileId, preferredProfileId, StringComparison.Ordinal))
+            string.Equals(profile.ProfileId, preferredProfileId ?? _settings.ActiveFirmwareProfileId, StringComparison.Ordinal))
             ?? profiles.FirstOrDefault();
+        _refreshingFirmware = true;
+        try
+        {
+            ExtractedFirmwareBox.ItemsSource = profiles;
+            ExtractedFirmwareBox.SelectedItem = selected;
+            ExtractedFirmwareBox.IsEnabled = profiles.Count > 0;
+            ExperimentalFirmwareLleToggle.IsEnabled = selected is not null;
+            _settings.ActiveFirmwareProfileId = selected?.ProfileId;
+            if (selected is null)
+            {
+                _settings.EnableExperimentalFirmwareLle = false;
+                ExperimentalFirmwareLleToggle.IsChecked = false;
+            }
+        }
+        finally
+        {
+            _refreshingFirmware = false;
+        }
+        if (preferredProfileId is not null)
+        {
+            _settings.Save();
+        }
         if (selected is null)
         {
             ExtractedFirmwareRow.Description = Localization.Instance.Get("Options.Firmware.Extracted.None");
@@ -1009,6 +1042,18 @@ public partial class MainWindow : Window
             selected.MissingDependencyCount,
             selected.EncryptedModuleCount,
             selected.IncompatibleModuleCount);
+    }
+
+    private void OnExtractedFirmwareSelectionChanged()
+    {
+        if (_refreshingFirmware)
+        {
+            return;
+        }
+        _settings.ActiveFirmwareProfileId =
+            (ExtractedFirmwareBox.SelectedItem as ImportedFirmwareProfile)?.ProfileId;
+        _settings.Save();
+        RefreshExtractedFirmwareControls(_settings.ActiveFirmwareProfileId);
     }
 
     private void OnFirmwareSelectionChanged()
@@ -2113,6 +2158,10 @@ public partial class MainWindow : Window
             CpuEngine = CpuExecutionEngine.NativeOnly,
             StrictDynlibResolution = effective.StrictDynlibResolution,
             ImportTraceLimit = Math.Max(0, effective.ImportTraceLimit),
+            EnableExperimentalFirmwareLle = _settings.EnableExperimentalFirmwareLle &&
+                !string.IsNullOrWhiteSpace(_settings.ActiveFirmwareProfileId),
+            FirmwareProfileStoreRoot = _firmwareProfileRepository.StoreRoot,
+            FirmwareProfileId = _settings.ActiveFirmwareProfileId,
         };
 
         _isRunning = true;
@@ -2346,9 +2395,11 @@ public partial class MainWindow : Window
                 AdapterId = _settings.VulkanDevice,
                 SurfaceMode = SessionSurfaceMode.Embedded,
             },
-            Firmware = activeFirmware is null
-                ? null
-                : new FirmwareSessionSettings { ProfileId = activeFirmware.Sha256 },
+            Firmware = launch.RuntimeOptions.EnableExperimentalFirmwareLle
+                ? new FirmwareSessionSettings { ProfileId = launch.RuntimeOptions.FirmwareProfileId! }
+                : activeFirmware is null
+                    ? null
+                    : new FirmwareSessionSettings { ProfileId = activeFirmware.Sha256 },
             Diagnostics = new DiagnosticSessionSettings { LogLevel = launch.LogLevel },
         };
     }
@@ -2385,6 +2436,12 @@ public partial class MainWindow : Window
         if (launch.RuntimeOptions.ImportTraceLimit > 0)
         {
             arguments.Add($"--trace-imports={launch.RuntimeOptions.ImportTraceLimit}");
+        }
+        if (launch.RuntimeOptions.EnableExperimentalFirmwareLle)
+        {
+            arguments.Add("--firmware-lle");
+            arguments.Add($"--firmware-store={launch.RuntimeOptions.FirmwareProfileStoreRoot}");
+            arguments.Add($"--firmware-profile={launch.RuntimeOptions.FirmwareProfileId}");
         }
 
         if (surface.TryGetChildProcessDescriptor(out var descriptor))

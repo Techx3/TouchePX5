@@ -6,6 +6,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:SharpEmu.GUI"
+        xmlns:firmware="clr-namespace:Touche.Firmware;assembly=Touche.Firmware"
         xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
         x:Class="SharpEmu.GUI.MainWindow"
         Title=""
@@ -419,8 +420,24 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
                       <local:SettingRow x:Name="ExtractedFirmwareRow" Label="Extracted firmware profile"
                                         Description="No extracted firmware profiles imported.">
-                        <Button x:Name="ImportExtractedFirmwareButton" Classes="ghost"
-                                Content="Import extracted folder…" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                          <ComboBox x:Name="ExtractedFirmwareBox" Width="360"
+                                    VerticalAlignment="Center" CornerRadius="8">
+                            <ComboBox.ItemTemplate>
+                              <DataTemplate x:DataType="firmware:ImportedFirmwareProfile">
+                                <TextBlock Text="{Binding ProfileId}" />
+                              </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                          </ComboBox>
+                          <Button x:Name="ImportExtractedFirmwareButton" Classes="ghost"
+                                  Content="Import extracted folder…" />
+                        </StackPanel>
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="ExperimentalFirmwareLleRow"
+                                        Label="Experimental firmware LLE"
+                                        Description="Use verified decrypted firmware modules only for missing HLE providers. Disabled by default.">
+                        <ToggleSwitch x:Name="ExperimentalFirmwareLleToggle" />
                       </local:SettingRow>
 
                       <StackPanel Orientation="Horizontal" Spacing="8">

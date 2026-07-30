@@ -14,6 +14,15 @@ public readonly struct SharpEmuRuntimeOptions
 
     public int ImportTraceLimit { get; init; }
 
+    /// <summary>Enables the experimental, user-supplied firmware LLE provider path.</summary>
+    public bool EnableExperimentalFirmwareLle { get; init; }
+
+    /// <summary>Root of the local content-addressed extracted-firmware store.</summary>
+    public string? FirmwareProfileStoreRoot { get; init; }
+
+    /// <summary>Immutable identifier of the selected extracted firmware profile.</summary>
+    public string? FirmwareProfileId { get; init; }
+
     /// <summary>
     /// An optional debugger to attach to guest execution. Flows through to
     /// <see cref="CpuExecutionOptions.DebugHook"/>. Null (the default) runs with

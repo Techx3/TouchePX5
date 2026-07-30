@@ -1063,7 +1063,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: TouchePx5 [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info("Usage: TouchePx5 [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--debug-server[=host:port]] [--firmware-lle --firmware-store=<path> --firmware-profile=<id>] <path-to-eboot.bin>");
         Log.Info(@"Example: TouchePx5 --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1123,6 +1123,9 @@ internal static partial class Program
         var strictDynlibResolution = false;
         var importTraceLimit = 0;
         var cpuEngine = CpuExecutionEngine.NativeOnly;
+        var enableFirmwareLle = false;
+        string? firmwareStoreRoot = null;
+        string? firmwareProfileId = null;
         logFilePath = null;
         logLevel = SharpEmuLog.MinimumLevel;
         var pathTokens = new List<string>(args.Length);
@@ -1132,6 +1135,12 @@ internal static partial class Program
             if (string.Equals(argument, "--strict", StringComparison.OrdinalIgnoreCase))
             {
                 strictDynlibResolution = true;
+                continue;
+            }
+
+            if (string.Equals(argument, "--firmware-lle", StringComparison.OrdinalIgnoreCase))
+            {
+                enableFirmwareLle = true;
                 continue;
             }
 
@@ -1262,6 +1271,32 @@ internal static partial class Program
                 continue;
             }
 
+            const string firmwareStorePrefix = "--firmware-store=";
+            if (argument.StartsWith(firmwareStorePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                firmwareStoreRoot = argument[firmwareStorePrefix.Length..];
+                if (string.IsNullOrWhiteSpace(firmwareStoreRoot))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                continue;
+            }
+
+            const string firmwareProfilePrefix = "--firmware-profile=";
+            if (argument.StartsWith(firmwareProfilePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                firmwareProfileId = argument[firmwareProfilePrefix.Length..];
+                if (!IsValidFirmwareProfileId(firmwareProfileId))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                continue;
+            }
+
             if (argument.StartsWith("--", StringComparison.Ordinal))
             {
                 ebootPath = string.Empty;
@@ -1282,6 +1317,14 @@ internal static partial class Program
             logFilePath = null;
             return false;
         }
+        if (enableFirmwareLle &&
+            (string.IsNullOrWhiteSpace(firmwareStoreRoot) || !IsValidFirmwareProfileId(firmwareProfileId)))
+        {
+            ebootPath = string.Empty;
+            runtimeOptions = default;
+            logFilePath = null;
+            return false;
+        }
 
         ebootPath = string.Join(' ', pathTokens);
         runtimeOptions = new SharpEmuRuntimeOptions
@@ -1289,8 +1332,20 @@ internal static partial class Program
             CpuEngine = cpuEngine,
             StrictDynlibResolution = strictDynlibResolution,
             ImportTraceLimit = importTraceLimit,
+            EnableExperimentalFirmwareLle = enableFirmwareLle,
+            FirmwareProfileStoreRoot = firmwareStoreRoot,
+            FirmwareProfileId = firmwareProfileId,
         };
         return true;
+    }
+
+    private static bool IsValidFirmwareProfileId(string? profileId)
+    {
+        const string prefix = "ps5-extracted-";
+        return profileId is not null &&
+            profileId.StartsWith(prefix, StringComparison.Ordinal) &&
+            profileId.Length == prefix.Length + 64 &&
+            profileId[prefix.Length..].All(char.IsAsciiHexDigit);
     }
 
     private static bool TryParseCpuEngine(string valueText, out CpuExecutionEngine engine)
