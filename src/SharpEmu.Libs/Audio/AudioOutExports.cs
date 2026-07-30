@@ -45,6 +45,7 @@ public static class AudioOutExports
     {
         private readonly object _paceGate = new();
         private long _nextSilentOutput;
+        private long _consecutiveSilentOutputs;
 
         public PortState(
             int userId,
@@ -85,6 +86,42 @@ public static class AudioOutExports
         public long AvPlayerSessionGeneration;
         public int BufferByteLength =>
             checked((int)BufferLength * Channels * BytesPerSample);
+
+        public void ObserveGuestBuffer(int handle, ReadOnlySpan<byte> source)
+        {
+            var silent = true;
+            foreach (var value in source)
+            {
+                if (value == 0)
+                {
+                    continue;
+                }
+
+                silent = false;
+                break;
+            }
+
+            if (!silent)
+            {
+                var previous = Interlocked.Exchange(ref _consecutiveSilentOutputs, 0);
+                if (previous >= 256)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][INFO] audioout.signal_recovered handle={handle} " +
+                        $"silent_buffers={previous} ch={Channels} float={IsFloat}");
+                }
+                return;
+            }
+
+            var count = Interlocked.Increment(ref _consecutiveSilentOutputs);
+            if (count >= 256 && (count & (count - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] audioout.silent_stream handle={handle} " +
+                    $"buffers={count} ch={Channels} float={IsFloat} " +
+                    $"suppressed={Suppressed} avplayer={AvPlayerSessionGeneration}");
+            }
+        }
 
         public void PaceSilence()
         {
@@ -329,6 +366,7 @@ public static class AudioOutExports
             }
 
             TraceOutput(handle, port, source);
+            port.ObserveGuestBuffer(handle, source);
 
             ActivateAvPlayerPortForBuffer(handle, port, sourceAddress);
 
@@ -496,6 +534,7 @@ public static class AudioOutExports
                     }
 
                     TraceOutput(output.Handle, output.Port, source);
+                    output.Port.ObserveGuestBuffer(output.Handle, source);
 
                     if (ShouldSuppressOutput(output.Port))
                     {

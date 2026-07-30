@@ -437,15 +437,16 @@ internal static unsafe class VulkanVideoPresenter
     // Max time the main-thread Render() will block waiting for a frame slot's
     // GPU fence before skipping the frame and returning to the event pump.
     // Prevents the window freezing behind a slow-compute GPU backlog.
-    // SHARPEMU_FRAME_WAIT_BUDGET_MS overrides; default 8ms on macOS. The
-    // dedicated Windows/Linux render thread may wait for its frame slot so it
-    // does not drop guest-work drain opportunities under normal GPU load.
+    // SHARPEMU_FRAME_WAIT_BUDGET_MS overrides; default 8ms on macOS and 250ms
+    // on dedicated Windows/Linux render threads. An infinite host wait hid
+    // guest-GPU stalls (notably effect draws) and let the producer queue fill
+    // behind a presenter that could no longer report progress.
     private static readonly ulong _frameSlotWaitBudgetNs =
         ulong.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_FRAME_WAIT_BUDGET_MS"),
             out var frameWaitMs) && frameWaitMs > 0
             ? frameWaitMs * 1_000_000UL
-            : OperatingSystem.IsMacOS() ? 8_000_000UL : ulong.MaxValue;
+            : OperatingSystem.IsMacOS() ? 8_000_000UL : 250_000_000UL;
     // Cap the guest-submission fence wait so a GPU submission whose fence never
     // signals (a mistranslated compute shader that hangs the Metal queue) cannot
     // freeze the render thread forever and starve the swapchain present.
@@ -481,8 +482,10 @@ internal static unsafe class VulkanVideoPresenter
             : 100_000_000UL;
     private static readonly HashSet<string> _tracedFenceTimeouts = new();
     private static long _guestQueueBackpressureTraceCount;
+    private static long _guestQueueRecoveryTraceCount;
     private static long _orderedActionFenceWaitTraceCount;
     private static long _guestQueueStarvationTraceCount;
+    private static long _frameSlotBackpressureTraceCount;
     private static long _mrtExtentCompatibilityTraceCount;
     private static long _mrtAliasRejectTraceCount;
     private static long _guestQueueStarvationLastQueued = -1;
@@ -2758,6 +2761,7 @@ internal static unsafe class VulkanVideoPresenter
         var payloadBytes = GetGuestWorkPayloadBytes(work);
         var isPayloadWork = IsPayloadBearingGuestWork(work);
         var backpressureLogged = false;
+        var backpressureStartTicks = 0L;
         // Work executed by the render-thread consumer can enqueue an ordered
         // same-queue completion marker. Blocking that consumer on the normal
         // producer backpressure limit deadlocks a full queue: no other thread
@@ -2788,6 +2792,7 @@ internal static unsafe class VulkanVideoPresenter
             if (!backpressureLogged)
             {
                 backpressureLogged = true;
+                backpressureStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
                 var traceCount = Interlocked.Increment(
                     ref _guestQueueBackpressureTraceCount);
                 if (traceCount <= 16 || (traceCount & (traceCount - 1)) == 0)
@@ -2833,6 +2838,26 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             System.Threading.Monitor.Wait(_gate);
+        }
+
+        if (backpressureStartTicks != 0)
+        {
+            var blockedMs =
+                (System.Diagnostics.Stopwatch.GetTimestamp() - backpressureStartTicks) *
+                1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            if (blockedMs >= 16.0)
+            {
+                var recoveryCount = Interlocked.Increment(ref _guestQueueRecoveryTraceCount);
+                if (recoveryCount <= 16 || (recoveryCount & (recoveryCount - 1)) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] vk.guest_queue_recovered count={recoveryCount} " +
+                        $"blocked_ms={blockedMs:F1} queued={_pendingGuestWorkCount} " +
+                        $"payload={_pendingPayloadGuestWorkCount}/{_maxPendingGuestWorkItems} " +
+                        $"retained_mb={_pendingGuestWorkBytes / (1024 * 1024)} " +
+                        $"work={work.GetType().Name}");
+                }
+            }
         }
 
         if (_closed)
@@ -14761,11 +14786,19 @@ internal static unsafe class VulkanVideoPresenter
             var frameSlot = _currentFrameSlot;
             if (!TryWaitFrameSlot(frameSlot, _frameSlotWaitBudgetNs))
             {
-                // The GPU is still finishing this slot's previous frame (slow
-                // compute backlog). Don't block the macOS main thread — return
-                // to the Cocoa event pump so the window keeps handling input
-                // (F1 overlay, drag, close) and redrawing. The frame is retried
-                // next Render(); the fence signals once the GPU catches up.
+                var traceCount = Interlocked.Increment(ref _frameSlotBackpressureTraceCount);
+                if (traceCount <= 8 || (traceCount & (traceCount - 1)) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] vk.frame_slot_backpressure count={traceCount} " +
+                        $"slot={frameSlot} guest_submissions={_pendingGuestSubmissions.Count} " +
+                        $"queued={_pendingGuestWorkCount} payload={_pendingPayloadGuestWorkCount} " +
+                        $"last_work={_lastGuestWorkLabel}");
+                }
+
+                // The GPU is still finishing this slot's previous frame. Return
+                // to the host loop and retry instead of hiding a driver/shader
+                // stall in an unbounded fence wait.
                 return;
             }
 
