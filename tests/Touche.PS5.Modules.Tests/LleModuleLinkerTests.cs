@@ -48,7 +48,9 @@ public sealed class LleModuleLinkerTests
         var thunk = Assert.Single(factory.Transaction.Thunks);
         Assert.Equal("dispatch-nid", thunk.DispatchKey);
         Assert.False(thunk.ControlledStub);
-        Assert.Equal(0xf000UL, Assert.Single(result.Imports).RuntimeAddress);
+        var materializedImport = Assert.Single(result.Imports);
+        Assert.Equal(0xf000UL, materializedImport.RuntimeAddress);
+        Assert.Equal("dispatch-nid", materializedImport.HleDispatchKey);
         Assert.Equal(2, factory.Transaction.Writes.Count);
         Assert.Equal(0xf000UL, ReadUInt64(factory.Transaction.Writes[0].Data));
         Assert.Equal(0x8234UL, ReadUInt64(factory.Transaction.Writes[1].Data));

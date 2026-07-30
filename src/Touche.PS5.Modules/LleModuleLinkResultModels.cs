@@ -7,7 +7,8 @@ public sealed record LleMaterializedImport(
     uint SymbolIndex,
     string SymbolName,
     ImportBindingSource Source,
-    ulong RuntimeAddress);
+    ulong RuntimeAddress,
+    string? HleDispatchKey);
 
 public sealed record LleAppliedRelocation(
     ulong RuntimeAddress,

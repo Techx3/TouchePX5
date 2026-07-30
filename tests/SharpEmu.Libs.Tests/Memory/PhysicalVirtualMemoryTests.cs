@@ -176,6 +176,22 @@ public sealed class PhysicalVirtualMemoryTests
         Assert.Equal(first, coalesced);
     }
 
+    [Fact]
+    public void ReleasesIndependentExecutableMappingByBaseAddress()
+    {
+        using var memory = new PhysicalVirtualMemory(new FakeHostMemory());
+        var address = memory.AllocateAt(
+            0x0000_6f00_0000_0000,
+            0x1000,
+            executable: true,
+            allowAlternative: false);
+
+        Assert.Contains(memory.SnapshotRegions(), region => region.VirtualAddress == address);
+        Assert.True(memory.TryReleaseMapping(address));
+        Assert.DoesNotContain(memory.SnapshotRegions(), region => region.VirtualAddress == address);
+        Assert.False(memory.TryReleaseMapping(address));
+    }
+
     /// <summary>
     /// Host memory backed by a single real, zero-initialised page. Reserve/Allocate
     /// report the page-aligned buffer address so lazy-commit read paths can actually

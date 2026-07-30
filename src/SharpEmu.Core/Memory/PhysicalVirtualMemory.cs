@@ -9,7 +9,7 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Memory;
 
-public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IDisposable
+public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryAllocator, IGuestAddressSpace, IReleasableVirtualMemory, IDisposable
 {
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("VMEM");
 
@@ -615,25 +615,46 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private void ReleaseUntrackedAllocation(ulong address)
     {
-        _gate.EnterWriteLock();
-        try
+        _ = TryReleaseMapping(address);
+    }
+
+    public bool TryReleaseMapping(ulong virtualAddress)
+    {
+        lock (_guestAllocationGate)
         {
-            for (var i = 0; i < _regions.Count; i++)
+            _gate.EnterWriteLock();
+            try
             {
-                if (_regions[i].VirtualAddress == address)
+                var index = _regions.FindIndex(region => region.VirtualAddress == virtualAddress);
+                if (index < 0 || virtualAddress == _guestAllocationArenaBase)
                 {
-                    _regions.RemoveAt(i);
-                    break;
+                    return false;
                 }
+
+                var region = _regions[index];
+                if (!_hostMemory.Free(virtualAddress))
+                {
+                    return false;
+                }
+
+                _regions.RemoveAt(index);
+                var regionEnd = checked(region.VirtualAddress + region.Size);
+                for (var page = region.VirtualAddress; page < regionEnd; page += PageSize)
+                {
+                    _pageProtections.Remove(page);
+                }
+                lock (_allocationSearchHintGate)
+                {
+                    _allocationSearchHints.Clear();
+                }
+                Interlocked.Increment(ref _mappingGeneration);
+                return true;
+            }
+            finally
+            {
+                _gate.ExitWriteLock();
             }
         }
-        finally
-        {
-            _gate.ExitWriteLock();
-        }
-
-        Interlocked.Increment(ref _mappingGeneration);
-        _hostMemory.Free(address);
     }
 
     public bool TryAllocateGuestMemory(ulong size, ulong alignment, out ulong address)

@@ -116,7 +116,8 @@ public sealed class LleModuleLinker
                 binding.SymbolIndex,
                 binding.SymbolName,
                 binding.Source,
-                address));
+                address,
+                binding.HleDispatchKey));
         }
         return imports;
     }
