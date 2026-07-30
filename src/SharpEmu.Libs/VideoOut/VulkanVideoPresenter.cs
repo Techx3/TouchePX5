@@ -12837,7 +12837,8 @@ internal static unsafe class VulkanVideoPresenter
 
                 Console.Error.WriteLine(
                     $"[LOADER][ERROR] Vulkan offscreen draw failed " +
-                    $"mrt={work.Targets.Count}: {exception.Message}");
+                    $"mrt={work.Targets.Count} " +
+                    $"ps=0x{work.ShaderAddress:X16}: {exception}");
             }
             finally
             {

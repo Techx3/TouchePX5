@@ -7345,18 +7345,19 @@ public static partial class AgcExports
         var requiredVertexOutputCount =
             GetRequiredVertexOutputCount(pixelState, psInputCntl);
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var earlyPrimitiveType);
-        var usesRectListParameterFallback =
-            IsRectListPrimitive(earlyPrimitiveType) &&
+        if (IsRectListPrimitive(earlyPrimitiveType) &&
             (exportEvaluation.VertexInputs is null || exportEvaluation.VertexInputs.Count == 0) &&
             !VertexProgramExportsParameters(exportState.Program) &&
-            requiredVertexOutputCount != 0;
-        if (usesRectListParameterFallback)
+            requiredVertexOutputCount != 0)
         {
+            ReturnPooledEvaluationArrays(exportEvaluation);
+            ReturnPooledEvaluationArrays(pixelEvaluation);
+            error =
+                $"rect-list-no-param-exports ps_inputs={GetInterpolatedAttributeCount(pixelState)}";
             TraceAgcShader(
-                $"agc.rect_list_zero_params es=0x{exportShaderAddress:X16} " +
-                $"ps=0x{pixelShaderAddress:X16} " +
-                $"ps_inputs={GetInterpolatedAttributeCount(pixelState)} " +
-                $"vertex_outputs={requiredVertexOutputCount}");
+                $"agc.rect_list_skip es=0x{exportShaderAddress:X16} " +
+                $"ps=0x{pixelShaderAddress:X16} {error}");
+            return false;
         }
 
         // Every bound color target the shader exports to. Deferred renderers
