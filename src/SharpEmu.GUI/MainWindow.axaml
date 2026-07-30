@@ -417,6 +417,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         </ComboBox>
                       </local:SettingRow>
 
+                      <local:SettingRow x:Name="ExtractedFirmwareRow" Label="Extracted firmware profile"
+                                        Description="No extracted firmware profiles imported.">
+                        <Button x:Name="ImportExtractedFirmwareButton" Classes="ghost"
+                                Content="Import extracted folder…" />
+                      </local:SettingRow>
+
                       <StackPanel Orientation="Horizontal" Spacing="8">
                         <Button x:Name="InstallFirmwareButton" Classes="accent" Content="Install PUP…" />
                         <Button x:Name="OpenFirmwareFolderButton" Classes="ghost" Content="Open firmware folder" />

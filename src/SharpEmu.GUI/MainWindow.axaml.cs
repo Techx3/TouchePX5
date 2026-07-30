@@ -27,6 +27,7 @@ using System.Text.Json;
 using System.Net.Http.Headers;
 using Touche.Core.Contracts;
 using Touche.Core.Hosting;
+using Touche.Firmware;
 
 namespace SharpEmu.GUI;
 
@@ -58,6 +59,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _consoleFlushTimer;
     private readonly DispatcherTimer _libraryBlurTimer;
     private readonly FirmwareManager _firmwareManager = new();
+    private readonly FirmwareProfileRepository _firmwareProfileRepository = new(
+        Path.Combine(AppContext.BaseDirectory, "user", "firmware-profiles"));
     private BlurEffect? _libraryBlur;
     private double _libraryBlurStartRadius;
     private double _libraryBlurTargetRadius;
@@ -243,6 +246,7 @@ public partial class MainWindow : Window
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
         InstallFirmwareButton.Click += async (_, _) => await InstallFirmwareAsync();
+        ImportExtractedFirmwareButton.Click += async (_, _) => await ImportExtractedFirmwareAsync();
         OpenFirmwareFolderButton.Click += (_, _) => OpenFirmwareFolder();
         FirmwareBox.SelectionChanged += (_, _) => OnFirmwareSelectionChanged();
         EnvBthidToggle.IsCheckedChanged += (_, _) =>
@@ -680,7 +684,9 @@ public partial class MainWindow : Window
         FirmwareSectionTitle.Text = loc.Get("Options.Firmware.Section");
         FirmwareNoticeText.Text = loc.Get("Options.Firmware.Notice");
         ActiveFirmwareRow.Label = loc.Get("Options.Firmware.Active.Label");
+        ExtractedFirmwareRow.Label = loc.Get("Options.Firmware.Extracted.Label");
         InstallFirmwareButton.Content = loc.Get("Options.Firmware.Install");
+        ImportExtractedFirmwareButton.Content = loc.Get("Options.Firmware.Extracted.Import");
         OpenFirmwareFolderButton.Content = loc.Get("Options.Firmware.OpenFolder");
         FirmwareStatusText.Text = loc.Get("Options.Firmware.Ready");
         RenderingSectionTitle.Text = loc.Get("Options.Section.Rendering");
@@ -974,6 +980,35 @@ public partial class MainWindow : Window
         {
             _refreshingFirmware = false;
         }
+
+        RefreshExtractedFirmwareControls();
+    }
+
+    private void RefreshExtractedFirmwareControls(string? preferredProfileId = null)
+    {
+        var profiles = _firmwareProfileRepository.GetImportedProfiles();
+        var selected = profiles.FirstOrDefault(profile =>
+            string.Equals(profile.ProfileId, preferredProfileId, StringComparison.Ordinal))
+            ?? profiles.FirstOrDefault();
+        if (selected is null)
+        {
+            ExtractedFirmwareRow.Description = Localization.Instance.Get("Options.Firmware.Extracted.None");
+            return;
+        }
+
+        var hash = selected.ProfileId.StartsWith("ps5-extracted-", StringComparison.Ordinal)
+            ? selected.ProfileId["ps5-extracted-".Length..]
+            : selected.ProfileId;
+        ExtractedFirmwareRow.Description = Localization.Instance.Format(
+            "Options.Firmware.Extracted.Summary",
+            hash[..Math.Min(12, hash.Length)],
+            selected.ArtifactCount,
+            FormatFirmwareSize(selected.TotalBytes),
+            selected.ModuleCount,
+            selected.ParseableModuleCount,
+            selected.MissingDependencyCount,
+            selected.EncryptedModuleCount,
+            selected.IncompatibleModuleCount);
     }
 
     private void OnFirmwareSelectionChanged()
@@ -1051,6 +1086,60 @@ public partial class MainWindow : Window
         }
     }
 
+    private async Task ImportExtractedFirmwareAsync()
+    {
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = Localization.Instance.Get("Options.Firmware.Extracted.Picker"),
+            AllowMultiple = false,
+        });
+        var sourceDirectory = folders.FirstOrDefault()?.Path.LocalPath;
+        if (string.IsNullOrWhiteSpace(sourceDirectory))
+        {
+            return;
+        }
+
+        InstallFirmwareButton.IsEnabled = false;
+        ImportExtractedFirmwareButton.IsEnabled = false;
+        FirmwareProgressBar.IsVisible = true;
+        FirmwareProgressBar.IsIndeterminate = true;
+        FirmwareStatusText.Foreground = DimLineBrush;
+        FirmwareStatusText.Text = Localization.Instance.Get("Options.Firmware.Extracted.Scanning");
+        try
+        {
+            var importer = new FirmwareDirectoryImporter(_firmwareProfileRepository.StoreRoot);
+            var result = await Task.Run(() => importer.ImportAsync(sourceDirectory));
+            RefreshExtractedFirmwareControls(result.Manifest.ProfileId);
+            FirmwareStatusText.Foreground = SuccessLineBrush;
+            FirmwareStatusText.Text = Localization.Instance.Format(
+                result.AlreadyImported
+                    ? "Options.Firmware.Extracted.AlreadyImported"
+                    : "Options.Firmware.Extracted.Imported",
+                result.Manifest.Artifacts.Count,
+                result.ModuleCatalog?.Modules.Count ?? 0,
+                result.Manifest.ProfileId);
+        }
+        catch (Exception exception) when (exception is
+            InvalidDataException or
+            IOException or
+            UnauthorizedAccessException or
+            OverflowException or
+            System.Text.Json.JsonException)
+        {
+            FirmwareStatusText.Foreground = ErrorLineBrush;
+            FirmwareStatusText.Text = Localization.Instance.Format(
+                "Options.Firmware.Extracted.Failed",
+                exception.Message);
+        }
+        finally
+        {
+            InstallFirmwareButton.IsEnabled = true;
+            ImportExtractedFirmwareButton.IsEnabled = true;
+            FirmwareProgressBar.IsIndeterminate = false;
+            FirmwareProgressBar.IsVisible = false;
+        }
+    }
+
     private void OpenFirmwareFolder()
     {
         try
@@ -1086,6 +1175,13 @@ public partial class MainWindow : Window
                 ? "Options.Firmware.Metadata.Present"
                 : "Options.Firmware.Metadata.Absent"),
             firmware.ExtractedEntryCount);
+    }
+
+    private static string FormatFirmwareSize(long bytes)
+    {
+        const double gib = 1024d * 1024d * 1024d;
+        const double mib = 1024d * 1024d;
+        return bytes >= gib ? $"{bytes / gib:0.00} GiB" : $"{bytes / mib:0.0} MiB";
     }
 
     private async Task OnUpdateButtonAsync()

@@ -24,6 +24,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
     <ProjectReference Include="..\Touche.Core.Contracts\Touche.Core.Contracts.csproj" />
     <ProjectReference Include="..\Touche.Core.Hosting\Touche.Core.Hosting.csproj" />
+    <ProjectReference Include="..\Touche.Firmware\Touche.Firmware.csproj" />
   </ItemGroup>
 
   <ItemGroup>

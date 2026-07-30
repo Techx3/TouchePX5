@@ -67,6 +67,18 @@ public sealed record FirmwareImportResult(
     bool AlreadyImported,
     FirmwareModuleCatalog? ModuleCatalog = null);
 
+public sealed record ImportedFirmwareProfile(
+    string ProfileId,
+    DateTimeOffset ImportedAtUtc,
+    int ArtifactCount,
+    long TotalBytes,
+    int ModuleCount,
+    int ParseableModuleCount,
+    int MissingDependencyCount,
+    int EncryptedModuleCount,
+    int IncompatibleModuleCount,
+    [property: JsonIgnore] string ProfileDirectory);
+
 public sealed record FirmwareScanOptions
 {
     public int MaximumFileCount { get; init; } = 200_000;

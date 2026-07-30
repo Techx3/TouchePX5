@@ -119,6 +119,12 @@ public sealed class FirmwareDirectoryImporter
                 moduleCatalog,
                 stagedProfile,
                 cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(
+                Path.Combine(stagedProfile, "installation.json"),
+                JsonSerializer.Serialize(
+                    new FirmwareProfileInstallation(scan.Manifest.ProfileId, DateTimeOffset.UtcNow),
+                    JsonOptions),
+                cancellationToken).ConfigureAwait(false);
             try
             {
                 Directory.Move(stagedProfile, profileDirectory);
@@ -207,4 +213,6 @@ public sealed class FirmwareDirectoryImporter
 
         return Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
     }
+
+    private sealed record FirmwareProfileInstallation(string ProfileId, DateTimeOffset ImportedAtUtc);
 }

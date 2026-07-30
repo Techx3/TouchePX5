@@ -95,6 +95,25 @@ public sealed class FirmwareDirectoryImporterTests : IDisposable
         Assert.Contains("hash verification", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RepositorySummarizesImportedProfileAndIgnoresCorruption()
+    {
+        var source = CreateExtractedTree("repository-source", reverseCreationOrder: false);
+        var store = Path.Combine(_temporaryDirectory, "repository-store");
+        var importer = new FirmwareDirectoryImporter(store);
+        var imported = await importer.ImportAsync(source);
+        var repository = new FirmwareProfileRepository(store);
+
+        var profile = Assert.Single(repository.GetImportedProfiles());
+
+        Assert.Equal(imported.Manifest.ProfileId, profile.ProfileId);
+        Assert.Equal(2, profile.ArtifactCount);
+        Assert.Equal(1, profile.ModuleCount);
+        Assert.Equal(1, profile.IncompatibleModuleCount);
+        File.WriteAllText(Path.Combine(imported.ProfileDirectory, "manifest.json"), "{}");
+        Assert.Empty(repository.GetImportedProfiles());
+    }
+
     private string CreateExtractedTree(string name, bool reverseCreationOrder)
     {
         var root = Path.Combine(_temporaryDirectory, name);
