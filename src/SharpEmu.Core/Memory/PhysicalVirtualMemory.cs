@@ -775,12 +775,63 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryProtect(ulong address, ulong size, GuestPageProtection protection)
     {
-        if (size == 0)
+        if (size == 0 || address > ulong.MaxValue - size)
         {
             return false;
         }
 
-        return _hostMemory.Protect(address, size, ResolveProtection(protection), out _);
+        var rangeEnd = address + size;
+        if (rangeEnd > ulong.MaxValue - (PageSize - 1))
+        {
+            return false;
+        }
+
+        var startPage = AlignDown(address, PageSize);
+        var endPage = AlignUp(rangeEnd, PageSize);
+        _gate.EnterWriteLock();
+        try
+        {
+            var region = FindRegion(startPage, endPage - startPage);
+            if (region is null ||
+                !EnsureRangeCommitted(startPage, endPage - startPage, region) ||
+                !_hostMemory.Protect(
+                    startPage,
+                    endPage - startPage,
+                    ResolveProtection(protection),
+                    out _))
+            {
+                return false;
+            }
+
+            var flags = ConvertProtection(protection);
+            for (var page = startPage; page < endPage; page += PageSize)
+            {
+                _pageProtections[page] = flags;
+            }
+            return true;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
+    private static ProgramHeaderFlags ConvertProtection(GuestPageProtection protection)
+    {
+        var result = ProgramHeaderFlags.None;
+        if ((protection & GuestPageProtection.Read) != 0)
+        {
+            result |= ProgramHeaderFlags.Read;
+        }
+        if ((protection & GuestPageProtection.Write) != 0)
+        {
+            result |= ProgramHeaderFlags.Write;
+        }
+        if ((protection & GuestPageProtection.Execute) != 0)
+        {
+            result |= ProgramHeaderFlags.Execute;
+        }
+        return result;
     }
 
     // Reproduces the decomposition KernelMemoryCompatExports.ResolveHostProtection

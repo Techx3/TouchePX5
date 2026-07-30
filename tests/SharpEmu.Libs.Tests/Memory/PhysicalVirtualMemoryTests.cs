@@ -192,6 +192,25 @@ public sealed class PhysicalVirtualMemoryTests
         Assert.False(memory.TryReleaseMapping(address));
     }
 
+    [Fact]
+    public void TryProtectUpdatesPageBookkeepingForLaterWrites()
+    {
+        using var host = new LazyZeroedHostMemory();
+        using var memory = new PhysicalVirtualMemory(host);
+        var address = memory.AllocateAt(0, 0x1000, executable: true);
+
+        Assert.True(memory.TryProtect(
+            address,
+            0x1000,
+            SharpEmu.HLE.GuestPageProtection.Read | SharpEmu.HLE.GuestPageProtection.Execute));
+        host.ProtectCalls.Clear();
+        host.ProtectRawCalls.Clear();
+
+        Assert.True(memory.TryWrite(address, new byte[] { 1, 2, 3, 4 }));
+        Assert.Single(host.ProtectCalls);
+        Assert.Single(host.ProtectRawCalls);
+    }
+
     /// <summary>
     /// Host memory backed by a single real, zero-initialised page. Reserve/Allocate
     /// report the page-aligned buffer address so lazy-commit read paths can actually
@@ -212,10 +231,15 @@ public sealed class PhysicalVirtualMemoryTests
 
         public List<(ulong Address, ulong Size, HostPageProtection Protection)> CommitCalls { get; } = [];
 
+        public List<(ulong Address, ulong Size, HostPageProtection Protection)> ProtectCalls { get; } = [];
+
+        public List<(ulong Address, ulong Size, uint Protection)> ProtectRawCalls { get; } = [];
+
         public int QueryCalls { get; private set; }
 
         // Force the commit-first → reserve-only fallback for huge maps.
-        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) => 0;
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
+            size > (4UL << 30) ? 0 : _address;
 
         public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) => _address;
 
@@ -234,12 +258,14 @@ public sealed class PhysicalVirtualMemoryTests
 
         public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection)
         {
-            rawOldProtection = 0;
+            ProtectCalls.Add((address, size, protection));
+            rawOldProtection = 0x20;
             return true;
         }
 
         public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection)
         {
+            ProtectRawCalls.Add((address, size, rawProtection));
             rawOldProtection = 0;
             return true;
         }

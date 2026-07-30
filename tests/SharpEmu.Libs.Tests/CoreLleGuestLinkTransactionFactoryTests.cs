@@ -15,6 +15,84 @@ public sealed class CoreLleGuestLinkTransactionFactoryTests
     private const string ModulePath = "/system/common/lib/libExample.sprx";
 
     [Fact]
+    public async Task MapsLleImageAndMergesSharedPagePermissions()
+    {
+        var memory = new InMemoryVirtualMemory();
+        using var factory = new CoreLleGuestMemoryTransactionFactory(memory);
+        await using (var transaction = await factory.BeginAsync(ModulePath, 0x8000, 0x3000))
+        {
+            await transaction.StageSegmentAsync(
+                0x8000,
+                0x1800,
+                0,
+                new byte[] { 1, 2, 3, 4 },
+                LleSegmentPermissions.Read | LleSegmentPermissions.Execute);
+            await transaction.StageSegmentAsync(
+                0x9800,
+                0x800,
+                4,
+                new byte[] { 5, 6 },
+                LleSegmentPermissions.Read | LleSegmentPermissions.Write);
+            await transaction.CommitAsync();
+        }
+
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, memory.Read(0x8000, 4));
+        Assert.Equal(new byte[4], memory.Read(0x8010, 4));
+        Assert.Equal(new byte[] { 5, 6 }, memory.Read(0x9800, 2));
+        Assert.Equal(
+            GuestPageProtection.Read | GuestPageProtection.Execute,
+            memory.Protections[0x8000]);
+        Assert.Equal(
+            GuestPageProtection.Read | GuestPageProtection.Write | GuestPageProtection.Execute,
+            memory.Protections[0x9000]);
+        Assert.True(factory.TryReleaseModule(ModulePath, 0x8000));
+        Assert.Empty(memory.SnapshotRegions());
+    }
+
+    [Fact]
+    public async Task RollsBackLleImageWhenSegmentWriteFails()
+    {
+        var memory = new InMemoryVirtualMemory();
+        memory.FailWritesAt.Add(0x8000);
+        using var factory = new CoreLleGuestMemoryTransactionFactory(memory);
+
+        await Assert.ThrowsAsync<IOException>(async () =>
+        {
+            await using var transaction = await factory.BeginAsync(ModulePath, 0x8000, 0x1000);
+            await transaction.StageSegmentAsync(
+                0x8000,
+                0x1000,
+                0,
+                new byte[] { 1 },
+                LleSegmentPermissions.Read);
+        });
+
+        Assert.Empty(memory.SnapshotRegions());
+        Assert.False(factory.TryReleaseModule(ModulePath, 0x8000));
+    }
+
+    [Fact]
+    public async Task RollsBackLleImageWhenFinalProtectionFails()
+    {
+        var memory = new InMemoryVirtualMemory { FailProtectionCall = 2 };
+        using var factory = new CoreLleGuestMemoryTransactionFactory(memory);
+
+        await Assert.ThrowsAsync<IOException>(async () =>
+        {
+            await using var transaction = await factory.BeginAsync(ModulePath, 0x8000, 0x1000);
+            await transaction.StageSegmentAsync(
+                0x8000,
+                0x1000,
+                0,
+                new byte[] { 1 },
+                LleSegmentPermissions.Read | LleSegmentPermissions.Execute);
+            await transaction.CommitAsync();
+        });
+
+        Assert.Empty(memory.SnapshotRegions());
+    }
+
+    [Fact]
     public async Task CommitsRelocationAndOwnsExecutableThunkUntilModuleRelease()
     {
         var memory = CreateMemory();
@@ -115,6 +193,10 @@ public sealed class CoreLleGuestLinkTransactionFactoryTests
 
         public HashSet<ulong> FailWritesAt { get; } = [];
 
+        public int FailProtectionCall { get; init; }
+
+        public int ProtectionCallCount { get; private set; }
+
         public Dictionary<ulong, GuestPageProtection> Protections { get; } = [];
 
         public void Clear()
@@ -171,6 +253,23 @@ public sealed class CoreLleGuestLinkTransactionFactoryTests
             bool executable = true,
             bool allowAlternative = true)
         {
+            if (!allowAlternative)
+            {
+                if (size > int.MaxValue || _regions.Any(item =>
+                        desiredAddress < item.Key + (ulong)item.Value.Data.Length &&
+                        item.Key < desiredAddress + size))
+                {
+                    throw new InvalidOperationException();
+                }
+                _regions.Add(
+                    desiredAddress,
+                    new Region(
+                        new byte[(int)size],
+                        executable
+                            ? ProgramHeaderFlags.Read | ProgramHeaderFlags.Write | ProgramHeaderFlags.Execute
+                            : ProgramHeaderFlags.Read | ProgramHeaderFlags.Write));
+                return desiredAddress;
+            }
             if (!TryAllocateAtOrAbove(desiredAddress, size, executable, 0x1000, out var address))
             {
                 throw new OutOfMemoryException();
@@ -208,11 +307,20 @@ public sealed class CoreLleGuestLinkTransactionFactoryTests
 
         public bool TryProtect(ulong address, ulong size, GuestPageProtection protection)
         {
-            if (!_regions.ContainsKey(address))
+            ProtectionCallCount++;
+            if ((FailProtectionCall != 0 && ProtectionCallCount == FailProtectionCall) ||
+                size == 0 ||
+                size > int.MaxValue ||
+                !TryFind(address, (int)size, out _, out _))
             {
                 return false;
             }
-            Protections[address] = protection;
+            var start = address & ~0xfffUL;
+            var end = (address + size + 0xfffUL) & ~0xfffUL;
+            for (var page = start; page < end; page += 0x1000)
+            {
+                Protections[page] = protection;
+            }
             return true;
         }
 
