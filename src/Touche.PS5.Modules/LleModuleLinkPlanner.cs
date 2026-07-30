@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Text;
 using Touche.Firmware;
 
 namespace Touche.PS5.Modules;
@@ -14,8 +15,12 @@ public sealed class LleModuleLinkPlanner
 {
     private const int DynamicEntrySize = 16;
     private const int RelaEntrySize = 24;
+    private const int SymbolEntrySize = 24;
+    private const int MaximumSymbolNameBytes = 4096;
     private const ulong MaximumDynamicTableBytes = 1024 * 1024;
     private const ulong MaximumRelocationTableBytes = 16 * 1024 * 1024;
+    private const ulong MaximumStringTableBytes = 16 * 1024 * 1024;
+    private const ulong MaximumSymbolTableBytes = 16 * 1024 * 1024;
 
     private const long DtNull = 0;
     private const long DtPltRelSize = 2;
@@ -41,6 +46,7 @@ public sealed class LleModuleLinkPlanner
     [
         0, 1, 2, 4, 6, 7, 8, 10, 11, 16, 17, 18, 24, 32, 33, 38,
     ];
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     public async Task<LleModuleLinkPlan> BuildAsync(
         LleModuleLoadPlan loadPlan,
@@ -121,6 +127,17 @@ public sealed class LleModuleLinkPlanner
             .Distinct()
             .Order()
             .ToArray();
+        var symbolResult = await ReadReferencedSymbolsAsync(
+            loadPlan,
+            handle.Content,
+            handle.Artifact.Size,
+            metadata,
+            relocations,
+            cancellationToken).ConfigureAwait(false);
+        if (metadata.SymbolTableSize == 0 && symbolResult.EffectiveSymbolTableSize != 0)
+        {
+            metadata = metadata with { SymbolTableSize = symbolResult.EffectiveSymbolTableSize };
+        }
         return new LleModuleLinkPlan
         {
             FirmwareProfileId = loadPlan.FirmwareProfileId,
@@ -128,6 +145,8 @@ public sealed class LleModuleLinkPlanner
             ModuleHash = loadPlan.ModuleHash,
             Metadata = metadata,
             Relocations = relocations.ToArray(),
+            ReferencedSymbols = symbolResult.Symbols,
+            ImportedSymbols = symbolResult.Symbols.Where(symbol => symbol.IsUndefined).ToArray(),
             UnsupportedRelocationTypes = unsupported,
         };
     }
@@ -287,6 +306,129 @@ public sealed class LleModuleLinkPlanner
         }
     }
 
+    private static async Task<SymbolReadResult> ReadReferencedSymbolsAsync(
+        LleModuleLoadPlan plan,
+        Stream stream,
+        long artifactSize,
+        LleDynamicLinkMetadata metadata,
+        IReadOnlyList<LleRelocation> relocations,
+        CancellationToken cancellationToken)
+    {
+        var indices = relocations
+            .Where(item =>
+                item.SymbolIndex != 0 &&
+                SupportedRelocationTypes.Contains(item.Type) &&
+                RequiresSymbol(item.Type))
+            .Select(item => item.SymbolIndex)
+            .Distinct()
+            .Order()
+            .ToArray();
+        if (indices.Length == 0)
+        {
+            return new SymbolReadResult([], 0);
+        }
+        if (metadata.StringTableLocation == 0 ||
+            metadata.StringTableSize is 0 or > MaximumStringTableBytes ||
+            metadata.SymbolTableLocation == 0)
+        {
+            throw new InvalidDataException("Referenced ELF symbols require valid string and symbol tables.");
+        }
+
+        var requiredSymbolBytes = checked(((ulong)indices[^1] + 1) * SymbolEntrySize);
+        var symbolTableSize = metadata.SymbolTableSize == 0
+            ? requiredSymbolBytes
+            : metadata.SymbolTableSize;
+        if (symbolTableSize < requiredSymbolBytes ||
+            symbolTableSize > MaximumSymbolTableBytes ||
+            symbolTableSize % SymbolEntrySize != 0)
+        {
+            throw new InvalidDataException("The ELF symbol table cannot contain every referenced symbol.");
+        }
+
+        var stringOffset = ResolveFileOffset(
+            plan,
+            metadata.StringTableLocation,
+            metadata.StringTableSize,
+            artifactSize);
+        var symbolOffset = ResolveFileOffset(
+            plan,
+            metadata.SymbolTableLocation,
+            symbolTableSize,
+            artifactSize);
+        var strings = await ReadFileRangeAsync(
+            stream,
+            stringOffset,
+            metadata.StringTableSize,
+            MaximumStringTableBytes,
+            cancellationToken).ConfigureAwait(false);
+        var symbols = await ReadFileRangeAsync(
+            stream,
+            symbolOffset,
+            symbolTableSize,
+            MaximumSymbolTableBytes,
+            cancellationToken).ConfigureAwait(false);
+
+        var result = new List<LleDynamicSymbol>(indices.Length);
+        foreach (var index in indices)
+        {
+            var entryOffset = checked((int)((ulong)index * SymbolEntrySize));
+            var entry = symbols.AsSpan(entryOffset, SymbolEntrySize);
+            var nameOffset = BinaryPrimitives.ReadUInt32LittleEndian(entry);
+            var info = entry[4];
+            var other = entry[5];
+            var sectionIndex = BinaryPrimitives.ReadUInt16LittleEndian(entry[6..]);
+            var value = BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]);
+            var size = BinaryPrimitives.ReadUInt64LittleEndian(entry[16..]);
+            var name = ReadSymbolName(strings, nameOffset);
+            if (sectionIndex == 0 && string.IsNullOrEmpty(name))
+            {
+                throw new InvalidDataException("An imported ELF symbol has no name.");
+            }
+            result.Add(new LleDynamicSymbol(
+                index,
+                name,
+                (byte)(info >> 4),
+                (byte)(info & 0x0f),
+                (byte)(other & 0x03),
+                sectionIndex,
+                value,
+                size));
+        }
+        return new SymbolReadResult(result.ToArray(), symbolTableSize);
+    }
+
+    private static string ReadSymbolName(ReadOnlySpan<byte> stringTable, uint nameOffset)
+    {
+        if (nameOffset >= stringTable.Length)
+        {
+            throw new InvalidDataException("An ELF symbol name is outside the string table.");
+        }
+        var remaining = stringTable[(int)nameOffset..];
+        var maximum = Math.Min(remaining.Length, MaximumSymbolNameBytes);
+        var terminator = remaining[..maximum].IndexOf((byte)0);
+        if (terminator < 0)
+        {
+            throw new InvalidDataException("An ELF symbol name is not terminated within its bounds.");
+        }
+        string name;
+        try
+        {
+            name = StrictUtf8.GetString(remaining[..terminator]);
+        }
+        catch (DecoderFallbackException exception)
+        {
+            throw new InvalidDataException("An ELF symbol name is not valid UTF-8.", exception);
+        }
+        if (name.Any(char.IsControl))
+        {
+            throw new InvalidDataException("An ELF symbol name contains control characters.");
+        }
+        return name;
+    }
+
+    private static bool RequiresSymbol(uint relocationType) =>
+        relocationType is not (0 or 8 or 16 or 38);
+
     private static async Task<byte[]> ReadFileRangeAsync(
         Stream stream,
         ulong offset,
@@ -309,4 +451,8 @@ public sealed class LleModuleLinkPlanner
         await stream.ReadExactlyAsync(bytes, cancellationToken).ConfigureAwait(false);
         return bytes;
     }
+
+    private sealed record SymbolReadResult(
+        IReadOnlyList<LleDynamicSymbol> Symbols,
+        ulong EffectiveSymbolTableSize);
 }

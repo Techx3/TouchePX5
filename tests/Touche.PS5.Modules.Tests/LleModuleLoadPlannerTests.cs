@@ -87,6 +87,51 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
     }
 
     [Fact]
+    public async Task CatalogsReferencedUndefinedSymbolsAsImports()
+    {
+        var imported = await ImportAsync(CreateSymbolImportElf());
+        var catalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(catalog.Modules);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var loadPlan = await new LleModuleLoadPlanner().BuildAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+
+        var linkPlan = await new LleModuleLinkPlanner().BuildAsync(loadPlan, fileSystem);
+
+        var symbol = Assert.Single(linkPlan.ReferencedSymbols);
+        Assert.Equal("exampleNid", symbol.Name);
+        Assert.Equal(1U, symbol.Index);
+        Assert.Equal(1, symbol.Binding);
+        Assert.Equal(2, symbol.Type);
+        Assert.True(symbol.IsUndefined);
+        Assert.Equal(symbol, Assert.Single(linkPlan.ImportedSymbols));
+        Assert.Equal(48UL, linkPlan.Metadata.SymbolTableSize);
+        Assert.True(linkPlan.CanApply);
+    }
+
+    [Fact]
+    public async Task RejectsUnterminatedImportedSymbolName()
+    {
+        var bytes = CreateSymbolImportElf();
+        bytes[0x40b] = (byte)'x';
+        var imported = await ImportAsync(bytes);
+        var catalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(catalog.Modules);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var loadPlan = await new LleModuleLoadPlanner().BuildAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            new LleModuleLinkPlanner().BuildAsync(loadPlan, fileSystem));
+
+        Assert.Contains("terminated", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task MapsEverySegmentAndCommitsOnlyAfterSuccessfulStaging()
     {
         var imported = await ImportAsync(CreateElf());
@@ -335,6 +380,62 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
             bytes.AsSpan(0x308),
             ((ulong)1 << 32) | relocationType);
         BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(0x310), 4);
+        return bytes;
+    }
+
+    private static byte[] CreateSymbolImportElf()
+    {
+        var bytes = new byte[0x600];
+        bytes[0] = 0x7f;
+        bytes[1] = (byte)'E';
+        bytes[2] = (byte)'L';
+        bytes[3] = (byte)'F';
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(16), 3);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(18), 62);
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(20), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(24), 0x1010);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(32), 64);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(52), 64);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(54), 56);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(56), 2);
+
+        var load = bytes.AsSpan(64, 56);
+        BinaryPrimitives.WriteUInt32LittleEndian(load, 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(load[4..], 5);
+        BinaryPrimitives.WriteUInt64LittleEndian(load[8..], 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(load[16..], 0x1000);
+        BinaryPrimitives.WriteUInt64LittleEndian(load[32..], 0x600);
+        BinaryPrimitives.WriteUInt64LittleEndian(load[40..], 0x700);
+        BinaryPrimitives.WriteUInt64LittleEndian(load[48..], 0x1000);
+
+        var dynamicHeader = bytes.AsSpan(120, 56);
+        BinaryPrimitives.WriteUInt32LittleEndian(dynamicHeader, 2);
+        BinaryPrimitives.WriteUInt32LittleEndian(dynamicHeader[4..], 4);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[8..], 0x200);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[16..], 0x1200);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[32..], 128);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[40..], 128);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[48..], 8);
+
+        WriteDynamicEntry(bytes, 0x200, 5, 0x1400);
+        WriteDynamicEntry(bytes, 0x210, 10, 12);
+        WriteDynamicEntry(bytes, 0x220, 6, 0x1480);
+        WriteDynamicEntry(bytes, 0x230, 11, 24);
+        WriteDynamicEntry(bytes, 0x240, 7, 0x1500);
+        WriteDynamicEntry(bytes, 0x250, 8, 24);
+        WriteDynamicEntry(bytes, 0x260, 9, 24);
+        WriteDynamicEntry(bytes, 0x270, 0, 0);
+
+        "\0exampleNid\0"u8.CopyTo(bytes.AsSpan(0x400));
+        var symbol = bytes.AsSpan(0x480 + 24, 24);
+        BinaryPrimitives.WriteUInt32LittleEndian(symbol, 1);
+        symbol[4] = 0x12;
+        BinaryPrimitives.WriteUInt16LittleEndian(symbol[6..], 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x500), 0x1100);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x508), ((ulong)1 << 32) | 6);
         return bytes;
     }
 

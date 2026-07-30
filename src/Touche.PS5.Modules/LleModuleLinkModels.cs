@@ -29,6 +29,19 @@ public sealed record LleDynamicLinkMetadata(
     ulong ProcedureLinkageLocation,
     ulong ProcedureLinkageSize);
 
+public sealed record LleDynamicSymbol(
+    uint Index,
+    string Name,
+    byte Binding,
+    byte Type,
+    byte Visibility,
+    ushort SectionIndex,
+    ulong Value,
+    ulong Size)
+{
+    public bool IsUndefined => SectionIndex == 0;
+}
+
 public sealed record LleModuleLinkPlan
 {
     public required string FirmwareProfileId { get; init; }
@@ -40,6 +53,10 @@ public sealed record LleModuleLinkPlan
     public required LleDynamicLinkMetadata Metadata { get; init; }
 
     public required IReadOnlyList<LleRelocation> Relocations { get; init; }
+
+    public required IReadOnlyList<LleDynamicSymbol> ReferencedSymbols { get; init; }
+
+    public required IReadOnlyList<LleDynamicSymbol> ImportedSymbols { get; init; }
 
     public required IReadOnlyList<uint> UnsupportedRelocationTypes { get; init; }
 
