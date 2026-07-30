@@ -483,6 +483,8 @@ internal static unsafe class VulkanVideoPresenter
     private static long _guestQueueBackpressureTraceCount;
     private static long _orderedActionFenceWaitTraceCount;
     private static long _guestQueueStarvationTraceCount;
+    private static long _mrtExtentCompatibilityTraceCount;
+    private static long _mrtAliasRejectTraceCount;
     private static long _guestQueueStarvationLastQueued = -1;
     // Zero-payload sync (ordered actions / flip markers) may exceed the
     // payload item cap without hard-blocking producers; byte budget still
@@ -1138,15 +1140,10 @@ internal static unsafe class VulkanVideoPresenter
         return false;
     }
 
-    private static bool RenderTargetsMismatchedOrAliased(IReadOnlyList<GuestRenderTarget> targets, GuestRenderTarget first)
+    internal static bool RenderTargetsAliased(IReadOnlyList<GuestRenderTarget> targets)
     {
         for (var i = 0; i < targets.Count; i++)
         {
-            if (targets[i].Width != first.Width || targets[i].Height != first.Height)
-            {
-                return true;
-            }
-
             for (var j = i + 1; j < targets.Count; j++)
             {
                 if (targets[i].Address == targets[j].Address)
@@ -1158,6 +1155,35 @@ internal static unsafe class VulkanVideoPresenter
 
         return false;
     }
+
+    internal static (uint Width, uint Height) ResolveCommonMrtExtent(
+        IReadOnlyList<GuestRenderTarget> targets)
+    {
+        if (targets.Count == 0)
+        {
+            return (0, 0);
+        }
+
+        var width = targets[0].Width;
+        var height = targets[0].Height;
+        for (var index = 1; index < targets.Count; index++)
+        {
+            width = Math.Min(width, targets[index].Width);
+            height = Math.Min(height, targets[index].Height);
+        }
+
+        return (width, height);
+    }
+
+    private static bool ShouldTraceCompatibilityEvent(ref long counter)
+    {
+        var count = Interlocked.Increment(ref counter);
+        return count <= 8 || (count & (count - 1)) == 0;
+    }
+
+    private static string DescribeRenderTargets(IReadOnlyList<GuestRenderTarget> targets) =>
+        string.Join(',', targets.Select(static target =>
+            $"0x{target.Address:X16}:{target.Width}x{target.Height}:f{target.Format}:n{target.NumberType}"));
 
     public static void SubmitOffscreenTranslatedDraw(
         byte[] pixelSpirv,
@@ -1185,11 +1211,29 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         var firstTarget = targets[0];
-        if (RenderTargetsMismatchedOrAliased(targets, firstTarget))
+        if (RenderTargetsAliased(targets))
+        {
+            if (ShouldTraceCompatibilityEvent(ref _mrtAliasRejectTraceCount))
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] Vulkan skipped aliased MRT draw " +
+                    $"count={Volatile.Read(ref _mrtAliasRejectTraceCount)} " +
+                    $"targets=[{DescribeRenderTargets(targets)}].");
+            }
+
+            return;
+        }
+
+        var commonExtent = ResolveCommonMrtExtent(targets);
+        if ((commonExtent.Width != firstTarget.Width ||
+             commonExtent.Height != firstTarget.Height) &&
+            ShouldTraceCompatibilityEvent(ref _mrtExtentCompatibilityTraceCount))
         {
             Console.Error.WriteLine(
-                "[LOADER][WARN] Vulkan skipped MRT draw with mismatched dimensions or aliased targets.");
-            return;
+                $"[LOADER][INFO] Vulkan MRT draw using common extent " +
+                $"{commonExtent.Width}x{commonExtent.Height} " +
+                $"count={Volatile.Read(ref _mrtExtentCompatibilityTraceCount)} " +
+                $"targets=[{DescribeRenderTargets(targets)}].");
         }
 
         if (ShouldTraceGuestImageSubmissionsForDiagnostics())
@@ -1374,14 +1418,6 @@ internal static unsafe class VulkanVideoPresenter
             targets.Count > 8 ||
             AnyRenderTargetInvalid(targets))
         {
-            return;
-        }
-
-        var firstTarget = targets[0];
-        if (RenderTargetsMismatchedOrAliased(targets, firstTarget))
-        {
-            Console.Error.WriteLine(
-                "[LOADER][WARN] Vulkan skipped MRT color clear with mismatched dimensions or aliased targets.");
             return;
         }
 
@@ -12417,7 +12453,19 @@ internal static unsafe class VulkanVideoPresenter
             Framebuffer transientFramebuffer = default;
             try
             {
-                var extent = new Extent2D(firstTarget.Width, firstTarget.Height);
+                var extentWidth = firstTarget.Width;
+                var extentHeight = firstTarget.Height;
+                for (var index = 1; index < targets.Length; index++)
+                {
+                    extentWidth = Math.Min(extentWidth, targets[index].Width);
+                    extentHeight = Math.Min(extentHeight, targets[index].Height);
+                }
+
+                // Vulkan permits framebuffer attachments with different image
+                // extents as long as the framebuffer fits every attachment.
+                // Use their intersection instead of dropping the complete MRT
+                // pass; deferred G-buffer draws rely on all of these writes.
+                var extent = new Extent2D(extentWidth, extentHeight);
                 var clearDepthForDraw = draw.RenderState.Depth.ClearEnable;
                 if (work.DepthTarget?.ReadOnly == true && draw.RenderState.Depth.WriteEnable)
                 {
