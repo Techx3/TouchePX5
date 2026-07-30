@@ -25,6 +25,11 @@ arm64/
 *.PUP
 *.pup
 
+# User-supplied console backups and autoloader export bundles remain local.
+autoloaderY2jb_*/
+autoloaderY2jb_*.zip
+**/PS5/EXPORT/BACKUP/
+
 *.user
 *.suo
 *.userosscache
