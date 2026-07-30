@@ -129,6 +129,17 @@ public static class AppContentExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAppContent")]
     public static int AppContentDownloadDataGetAvailableSpaceKb(CpuContext ctx)
+        => WriteAvailableSpaceKb(ctx);
+
+    [SysAbiExport(
+        Nid = "SaKib2Ug0yI",
+        ExportName = "sceAppContentTemporaryDataGetAvailableSpaceKb",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAppContent")]
+    public static int AppContentTemporaryDataGetAvailableSpaceKb(CpuContext ctx)
+        => WriteAvailableSpaceKb(ctx);
+
+    private static int WriteAvailableSpaceKb(CpuContext ctx)
     {
         const ulong availableSpaceKb = 1024UL * 1024UL; // 1 GiB
         var availableSpaceAddress = ctx[CpuRegister.Rsi];

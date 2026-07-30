@@ -22,6 +22,12 @@ internal static class KernelPthreadState
     [ThreadStatic]
     private static ulong _currentThreadUniqueId;
 
+    [ThreadStatic]
+    private static ulong _cachedGuestThreadHandle;
+
+    [ThreadStatic]
+    private static ulong _cachedGuestThreadUniqueId;
+
     internal readonly record struct ThreadIdentity(ulong UniqueId, string Name);
 
     internal static ulong GetCurrentThreadHandle()
@@ -32,7 +38,7 @@ internal static class KernelPthreadState
         // thread is bound causes mutex owner mismatches (unlock PERM → hang).
         if (guestThreadHandle != 0)
         {
-            EnsureGuestThreadIdentity(guestThreadHandle);
+            EnsureGuestThreadIdentityCached(guestThreadHandle);
             return guestThreadHandle;
         }
 
@@ -45,7 +51,8 @@ internal static class KernelPthreadState
         var guestThreadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
         if (guestThreadHandle != 0)
         {
-            return EnsureGuestThreadIdentity(guestThreadHandle).UniqueId;
+            EnsureGuestThreadIdentityCached(guestThreadHandle);
+            return _cachedGuestThreadUniqueId;
         }
 
         EnsureCurrentThreadRegistered();
@@ -85,6 +92,18 @@ internal static class KernelPthreadState
         var uniqueId = unchecked((ulong)Interlocked.Increment(ref _nextUniqueThreadId));
         var identity = new ThreadIdentity(uniqueId, $"Guest-0x{guestThreadHandle:X}");
         return Threads.GetOrAdd(guestThreadHandle, identity);
+    }
+
+    private static void EnsureGuestThreadIdentityCached(ulong guestThreadHandle)
+    {
+        if (_cachedGuestThreadHandle == guestThreadHandle)
+        {
+            return;
+        }
+
+        var identity = EnsureGuestThreadIdentity(guestThreadHandle);
+        _cachedGuestThreadHandle = guestThreadHandle;
+        _cachedGuestThreadUniqueId = identity.UniqueId;
     }
 
     private static void EnsureCurrentThreadRegistered()

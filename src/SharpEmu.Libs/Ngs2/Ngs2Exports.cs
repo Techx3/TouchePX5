@@ -63,6 +63,7 @@ public static class Ngs2Exports
         public int SourceRate { get; set; }
         public double Position { get; set; }
         public bool Playing { get; set; }
+        public bool Paused { get; set; }
         public int LoopStart { get; set; } = -1;
         public int LoopEnd { get; set; }
         public float Gain { get; set; } = 1f;
@@ -279,10 +280,9 @@ public static class Ngs2Exports
         return SetReturn(ctx, 0);
     }
 
-    // Parse the SceNgs2VoiceParamHead command list (header = u32 size, u32 id;
-    // params are laid out contiguously) and apply the ones the mixer needs:
-    // the waveform-blocks param arms a voice with decoded PCM, and the port
-    // matrix param carries its output gain.
+    // Parse SceNgs2VoiceParamHead as u16 size, s16 next and u32 id. The signed
+    // next field is the byte offset to the following command. Reading size and
+    // next as one u32 skipped chained stop/kill events and left menu voices alive.
     private static void HandleVoiceParams(CpuContext ctx, ulong voiceHandle, ulong paramList)
     {
         if (paramList == 0)
@@ -293,7 +293,8 @@ public static class Ngs2Exports
         var offset = paramList;
         for (var guard = 0; guard < 32; guard++)
         {
-            if (!ctx.TryReadUInt32(offset, out var size) ||
+            if (!ctx.TryReadUInt16(offset, out var size) ||
+                !ctx.TryReadUInt16(offset + 2, out var nextRaw) ||
                 !ctx.TryReadUInt32(offset + 4, out var id))
             {
                 return;
@@ -307,16 +308,84 @@ public static class Ngs2Exports
                 case 0x20010001:
                     ApplyPortMatrixParam(ctx, voiceHandle, offset);
                     break;
+                case 0x00000006:
+                    ApplyVoiceEventParam(ctx, voiceHandle, offset);
+                    break;
             }
 
-            // Advance to the next contiguous block; the game normally sends one
-            // param per call (size==whole block), so stop when size is degenerate.
             if (size < 8 || size > 0x1000)
             {
                 return;
             }
 
-            offset += (size + 7) & ~7u;
+            var next = unchecked((short)nextRaw);
+            if (next == 0)
+            {
+                return;
+            }
+
+            if (next < 8 || next > 0x1000)
+            {
+                return;
+            }
+
+            offset += unchecked((ulong)next);
+        }
+    }
+
+    private static void ApplyVoiceEventParam(CpuContext ctx, ulong voiceHandle, ulong paramOffset)
+    {
+        if (!ctx.TryReadUInt32(paramOffset + 8, out var eventId))
+        {
+            return;
+        }
+
+        lock (StateGate)
+        {
+            if (!Voices.TryGetValue(voiceHandle, out var voice))
+            {
+                return;
+            }
+
+            switch (eventId)
+            {
+                case 0x0001: // Play
+                    // A play event can precede the waveform command in the same
+                    // list. Keep the requested state even when PCM is not armed
+                    // yet; the mixer will begin once the waveform is available.
+                    voice.Position = 0;
+                    voice.Paused = false;
+                    voice.Playing = true;
+                    break;
+                case 0x0002: // Stop
+                case 0x0004: // Stop immediately
+                    voice.Playing = false;
+                    voice.Paused = false;
+                    voice.Position = 0;
+                    break;
+                case 0x0008: // Kill
+                    voice.Playing = false;
+                    voice.Paused = false;
+                    voice.Position = 0;
+                    voice.Pcm = null;
+                    voice.PcmRight = null;
+                    voice.SourceAddr = 0;
+                    break;
+                case 0x0010: // Pause
+                    if (voice.Playing)
+                    {
+                        voice.Playing = false;
+                        voice.Paused = true;
+                    }
+                    break;
+                case 0x0020: // Resume
+                    if (voice.Paused && voice.Pcm is not null)
+                    {
+                        voice.Paused = false;
+                        voice.Playing = true;
+                    }
+                    break;
+            }
         }
     }
 
@@ -370,7 +439,10 @@ public static class Ngs2Exports
                 voice.LoopStart = waveform.LoopStart;
                 voice.LoopEnd = waveform.LoopEnd > 0 ? waveform.LoopEnd : waveform.Samples.Length;
                 voice.Position = 0;
-                voice.Playing = true;
+                voice.Paused = false;
+                // Loading/changing a waveform is configuration, not a play
+                // request. Auto-starting here revived stopped menu music when a
+                // later effect updated the same NGS2 command list.
             }
 
             if (ShouldTrace())

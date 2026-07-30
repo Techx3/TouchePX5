@@ -85,7 +85,20 @@ internal sealed record VulkanComputeGuestDispatch(
 
 internal sealed record VulkanOrderedGuestAction(
     Action Action,
-    string DebugName);
+    string DebugName,
+    ulong WriteBackAddress = 0,
+    ulong WriteBackLength = 0)
+{
+    // ACQUIRE_MEM invalidates guest GPU caches so later GPU work observes
+    // CPU-written resources. It does not expose prior GPU writes to the CPU,
+    // so downloading every dirty guest buffer here is both unnecessary and
+    // extremely expensive for draw-heavy embedded render targets.
+    public bool RequiresGuestBufferWriteBack =>
+        !DebugName.StartsWith("acquire_mem_flush ", StringComparison.Ordinal);
+
+    public bool HasSelectiveGuestBufferWriteBack =>
+        WriteBackAddress != 0 && WriteBackLength != 0;
+}
 
 internal sealed record VulkanOrderedGuestFlip(
     long Version,
@@ -441,6 +454,15 @@ internal static unsafe class VulkanVideoPresenter
         ulong.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FENCE_WAIT_TIMEOUT_MS"), out var fenceMs) && fenceMs > 0
             ? fenceMs * 1_000_000UL
             : 3_000_000_000UL;
+    // Ordered PM4 actions split draw batches at guest-visible synchronization
+    // points. Keep the probe short so a busy guest queue cannot stall the
+    // presenter for several milliseconds at every cache invalidation.
+    private static readonly ulong _orderedVisibilityProbeNs =
+        ulong.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_ORDERED_VISIBILITY_WAIT_MS"),
+            out var orderedVisibilityWaitMs)
+            ? orderedVisibilityWaitMs * 1_000_000UL
+            : 2_000_000UL;
     // When making room in the in-flight submission queue from the macOS MAIN
     // thread (Render() -> guest-work drain), block only this long per attempt
     // instead of the full fence timeout. If a slow/capped compute submission
@@ -1584,6 +1606,29 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
+    public static long SubmitOrderedGuestBufferReadback(
+        ulong address,
+        ulong byteCount,
+        string debugName)
+    {
+        if (address == 0 || byteCount == 0)
+        {
+            return 0;
+        }
+
+        lock (_gate)
+        {
+            return _closed || _thread is null
+                ? 0
+                : EnqueueGuestWorkLocked(
+                    new VulkanOrderedGuestAction(
+                        static () => { },
+                        debugName,
+                        address,
+                        byteCount));
+        }
+    }
+
     /// <summary>
     /// Sequence currently being executed by the single guest-work consumer.
     /// Intended only for address-filtered lifetime diagnostics emitted from a
@@ -1943,8 +1988,22 @@ internal static unsafe class VulkanVideoPresenter
 
         lock (_gate)
         {
-            return _availableGuestImages.TryGetValue(address, out var availableFormat) &&
-                availableFormat == guestFormat;
+            if (!_availableGuestImages.TryGetValue(address, out var availableFormat))
+            {
+                return false;
+            }
+
+            if (availableFormat == guestFormat)
+            {
+                return true;
+            }
+
+            return TryDecodeRenderTargetFormat(
+                    (availableFormat >> 8) & 0x1FFu,
+                    availableFormat & 0xFFu,
+                    out var resident) &&
+                TryDecodeRenderTargetFormat(format, numberType, out var requested) &&
+                Presenter.IsCompatibleViewFormat(resident.Format, requested.Format);
         }
     }
 
@@ -5811,13 +5870,17 @@ internal static unsafe class VulkanVideoPresenter
                     return false;
                 }
 
-                const ulong orderedVisibilityProbeNs = 2_000_000UL; // 2ms
+                if (_orderedVisibilityProbeNs == 0)
+                {
+                    return false;
+                }
+
                 var waitResult = _vk.WaitForFences(
                     _device,
                     1,
                     &fence,
                     true,
-                    orderedVisibilityProbeNs);
+                    _orderedVisibilityProbeNs);
                 if (waitResult == Result.Timeout)
                 {
                     return false;
@@ -5918,7 +5981,19 @@ internal static unsafe class VulkanVideoPresenter
                 return false;
             }
 
-            WriteBackAllDirtyGuestBuffers(_activeGuestQueue.Name);
+            if (work.RequiresGuestBufferWriteBack)
+            {
+                if (work.HasSelectiveGuestBufferWriteBack)
+                {
+                    MakeGuestBufferRangeCpuVisible(
+                        work.WriteBackAddress,
+                        work.WriteBackLength);
+                }
+                else
+                {
+                    WriteBackAllDirtyGuestBuffers(_activeGuestQueue.Name);
+                }
+            }
             work.Action();
             if (_traceVulkanShaderEnabled)
             {
@@ -11701,7 +11776,10 @@ internal static unsafe class VulkanVideoPresenter
                 new DirtyGuestBufferRange(start, end - start, queueName, timeline));
         }
 
-        private void WriteBackAllDirtyGuestBuffers(string? queueName = null)
+        private void WriteBackAllDirtyGuestBuffers(
+            string? queueName = null,
+            ulong requestedAddress = 0,
+            ulong requestedByteCount = 0)
         {
             var memory = _guestMemory;
             if (memory is null)
@@ -11709,14 +11787,40 @@ internal static unsafe class VulkanVideoPresenter
                 return;
             }
 
+            var selective = requestedAddress != 0 && requestedByteCount != 0;
+            var requestedEnd = selective && requestedAddress > ulong.MaxValue - requestedByteCount
+                ? ulong.MaxValue
+                : requestedAddress + requestedByteCount;
+
             foreach (var allocation in _guestBufferAllocations)
             {
+                var allocationEnd = allocation.BaseAddress > ulong.MaxValue - allocation.Size
+                    ? ulong.MaxValue
+                    : allocation.BaseAddress + allocation.Size;
+                if (selective &&
+                    (requestedAddress >= allocationEnd ||
+                     allocation.BaseAddress >= requestedEnd))
+                {
+                    continue;
+                }
+
                 for (var index = allocation.DirtyRanges.Count - 1; index >= 0; index--)
                 {
                     var range = allocation.DirtyRanges[index];
                     if ((queueName is not null &&
                          !string.Equals(range.QueueName, queueName, StringComparison.Ordinal)) ||
                         range.Timeline > _completedTimeline)
+                    {
+                        continue;
+                    }
+
+                    var guestRangeStart = allocation.BaseAddress + range.Offset;
+                    var guestRangeEnd = guestRangeStart > ulong.MaxValue - range.Length
+                        ? ulong.MaxValue
+                        : guestRangeStart + range.Length;
+                    if (selective &&
+                        (requestedAddress >= guestRangeEnd ||
+                         guestRangeStart >= requestedEnd))
                     {
                         continue;
                     }
@@ -12010,6 +12114,33 @@ internal static unsafe class VulkanVideoPresenter
                     }
                 }
             }
+        }
+
+        private void MakeGuestBufferRangeCpuVisible(ulong address, ulong byteCount)
+        {
+            var end = address > ulong.MaxValue - byteCount
+                ? ulong.MaxValue
+                : address + byteCount;
+            foreach (var allocation in _guestBufferAllocations)
+            {
+                var allocationEnd = allocation.BaseAddress > ulong.MaxValue - allocation.Size
+                    ? ulong.MaxValue
+                    : allocation.BaseAddress + allocation.Size;
+                if (address >= allocationEnd || allocation.BaseAddress >= end)
+                {
+                    continue;
+                }
+
+                WaitForGuestBufferAllocationForCpuVisibility(allocation);
+            }
+
+            // Indirect arguments may be produced by a compute queue and consumed
+            // by graphics. Once their actual Vulkan allocations are complete,
+            // publish every overlapping dirty range regardless of logical queue.
+            WriteBackAllDirtyGuestBuffers(
+                queueName: null,
+                requestedAddress: address,
+                requestedByteCount: byteCount);
         }
 
         private void RecordChunkedComputeDispatch(
@@ -12631,10 +12762,20 @@ internal static unsafe class VulkanVideoPresenter
                             Console.Error.WriteLine(
                                 $"[LOADER][TRACE] vk.guest_write_sample " +
                                 $"addr=0x{target.Address:X16} write={writeCount} " +
+                                $"shader=0x{work.ShaderAddress:X16} " +
                                 $"vs_bytes={work.Draw.VertexSpirv.Length} " +
                                 $"ps_bytes={work.Draw.PixelSpirv.Length} ps_hash={pixelDigest} " +
                                 $"vertices={work.Draw.VertexCount} instances={work.Draw.InstanceCount} " +
                                 $"primitive=0x{work.Draw.PrimitiveType:X} " +
+                                $"depth=0x{work.DepthTarget?.Address ?? 0:X16}:" +
+                                $"t{(work.Draw.RenderState.Depth.TestEnable ? 1 : 0)}:" +
+                                $"w{(work.Draw.RenderState.Depth.WriteEnable ? 1 : 0)}:" +
+                                $"c{work.Draw.RenderState.Depth.CompareOp} " +
+                                $"viewport={FormatGuestViewport(work.Draw.RenderState.Viewport)} " +
+                                $"scissor={FormatGuestScissor(work.Draw.RenderState.Scissor)} " +
+                                $"cull={((work.Draw.RenderState.Raster.CullFront ? 1 : 0) | (work.Draw.RenderState.Raster.CullBack ? 2 : 0))} " +
+                                $"blend={(work.Draw.RenderState.Blend.Enable ? 1 : 0)}:" +
+                                $"{work.Draw.RenderState.Blend.WriteMask:X} " +
                                 $"readback={(shouldTraceWrite ? 1 : 0)} textures=[{sampledTextures}]");
                         }
 
@@ -15112,10 +15253,12 @@ internal static unsafe class VulkanVideoPresenter
                                 $"sample_unique={CountSampledUniquePixels(bytes, bytesPerPixel)}");
                         }
 
-                        if (++_intervalReadbackCount % 25 == 0)
-                        {
-                            DumpGuestImageBytes(image, bytes);
-                        }
+                        _intervalReadbackCount++;
+                        // Interval tracing is an explicit diagnostic opt-in.
+                        // Preserve every sampled surface when a dump directory
+                        // is configured so sibling 512x384 views can be compared
+                        // at the same point in the frame sequence.
+                        DumpGuestImageBytes(image, bytes);
 
                         return;
                     }
@@ -16149,7 +16292,11 @@ internal static unsafe class VulkanVideoPresenter
                     return false;
                 }
 
-                if (image.Width < 1280 || image.Height < 720)
+                // Explicit address filters are also used for small embedded
+                // render targets (for example Castlevania's 512x384 DS
+                // surface). Keep the broad interval trace restricted to HD,
+                // but honor an exact opt-in regardless of dimensions.
+                if (!addressMatched && (image.Width < 1280 || image.Height < 720))
                 {
                     return false;
                 }
@@ -16922,6 +17069,16 @@ internal static unsafe class VulkanVideoPresenter
             _hostMovieLumaUploadedFrameSerial = -1;
             _hostMovieChromaUploadedFrameSerial = -1;
         }
+
+        private static string FormatGuestViewport(GuestViewport? viewport) =>
+            viewport is { } value
+                ? $"{value.X:G5},{value.Y:G5},{value.Width:G5},{value.Height:G5}"
+                : "default";
+
+        private static string FormatGuestScissor(GuestRect? scissor) =>
+            scissor is { } value
+                ? $"{value.X},{value.Y},{value.Width},{value.Height}"
+                : "default";
 
 
         private void RecordUpload(uint imageIndex, int frameSlot)

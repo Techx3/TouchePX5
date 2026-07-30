@@ -377,6 +377,12 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public long SubmitOrderedGuestAction(Action action, string debugName) =>
         MetalVideoPresenter.SubmitOrderedGuestAction(action, debugName);
 
+    public long SubmitOrderedGuestBufferReadback(
+        ulong address,
+        ulong byteCount,
+        string debugName) =>
+        MetalVideoPresenter.SubmitOrderedGuestAction(static () => { }, debugName);
+
     public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) =>
         MetalVideoPresenter.SubmitOrderedGuestFlipWait(videoOutHandle, displayBufferIndex);
 

@@ -32,6 +32,7 @@ public static class SaveDataExports
     private const uint MountModeCreate = 1u << 2;
     private const uint MountModeCreate2 = 1u << 5;
     private const int MountResultSize = 0x40;
+    private const int MaxMountSlots = 16;
     // Emulator guard against corrupt or misread sizes, not a platform limit.
     private const ulong SaveDataMemoryMaxSize = 64UL * 1024 * 1024;
     private static readonly object _stateGate = new();
@@ -52,10 +53,7 @@ public static class SaveDataExports
             _events.Clear();
         }
 
-        lock (_mountGate)
-        {
-            _mounts.Clear();
-        }
+        ClearMounts();
     }
 
     // Additional error codes and the async-event model (see sceSaveDataGetEventResult).
@@ -166,7 +164,11 @@ public static class SaveDataExports
     }
 
     [SysAbiExport(Nid = "yKDy8S5yLA0", ExportName = "sceSaveDataTerminate", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
-    public static int SaveDataTerminate(CpuContext ctx) => SetReturn(ctx, 0);
+    public static int SaveDataTerminate(CpuContext ctx)
+    {
+        ClearMounts();
+        return SetReturn(ctx, 0);
+    }
 
     // ---- mount variants (all share the SceSaveDataMount layout) ----
     [SysAbiExport(Nid = "32HQAQdwM2o", ExportName = "sceSaveDataMount", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
@@ -771,11 +773,34 @@ public static class SaveDataExports
                 Directory.CreateDirectory(savePath);
             }
 
-            const string mountPoint = "/savedata0";
-            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, savePath);
+            string? mountPoint = null;
             lock (_mountGate)
             {
-                _mounts[mountPoint] = new MountEntry(savePath, dirName, userId);
+                foreach (var entry in _mounts.Values)
+                {
+                    if (string.Equals(entry.SlotDir, savePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return SetReturn(ctx, OrbisSaveDataErrorBusy);
+                    }
+                }
+
+                for (var slot = 0; slot < MaxMountSlots; slot++)
+                {
+                    var candidate = $"/savedata{slot}";
+                    if (_mounts.ContainsKey(candidate))
+                    {
+                        continue;
+                    }
+
+                    mountPoint = candidate;
+                    _mounts.Add(mountPoint, new MountEntry(savePath, dirName, userId));
+                    break;
+                }
+            }
+
+            if (mountPoint is null)
+            {
+                return SetReturn(ctx, OrbisSaveDataErrorBusy);
             }
 
             Span<byte> result = stackalloc byte[MountResultSize];
@@ -784,8 +809,15 @@ public static class SaveDataExports
             BinaryPrimitives.WriteUInt32LittleEndian(result[0x1C..], createIfMissing && !existed ? 1u : 0u);
             if (!ctx.Memory.TryWrite(resultAddress, result))
             {
+                lock (_mountGate)
+                {
+                    _mounts.Remove(mountPoint);
+                }
+
                 return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
+
+            KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, savePath);
 
             TraceSaveData(
                 $"{operation} user={userId} title={sanitizedTitleId} dir={dirName} blocks={blocks} " +
@@ -960,6 +992,21 @@ public static class SaveDataExports
         }
 
         return SetReturn(ctx, 0);
+    }
+
+    private static void ClearMounts()
+    {
+        string[] mountPoints;
+        lock (_mountGate)
+        {
+            mountPoints = [.. _mounts.Keys];
+            _mounts.Clear();
+        }
+
+        foreach (var mountPoint in mountPoints)
+        {
+            KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
+        }
     }
 
     private static bool TryReadSearchCond(CpuContext ctx, ulong address, out SearchCond cond)

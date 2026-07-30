@@ -46,6 +46,9 @@ public static partial class AgcExports
     private const uint ItNumInstances = 0x2F;
     private const uint ItDrawIndexMultiAuto = 0x30;
     private const uint ItDrawIndexOffset2 = 0x35;
+    private const uint ItDrawIndexIndirectMulti = 0x38;
+    private const uint DrawIndexedIndirectArgsSize = 20;
+    private const uint DrawIndexedIndirectMaxScan = 1024;
     private const uint ItWriteData = 0x37;
     private const uint ItDispatchDirect = 0x15;
     private const uint ItDispatchIndirect = 0x16;
@@ -635,9 +638,11 @@ public static partial class AgcExports
         public uint NextResource { get; set; } = 1;
         public ulong WorkSequence { get; set; }
         public ulong SubmissionSequence { get; set; }
+        public Dictionary<ulong, uint> EmptyIndirectArgumentReads { get; } = new();
         public bool WaitMonitorRunning { get; set; }
         public object WaitMonitorSignalGate { get; } = new();
         public long WaitMonitorSignalVersion { get; set; }
+        public long LastSubmitWaitScanTicks { get; set; }
     }
 
     private readonly record struct RegisteredAgcResource(
@@ -1996,6 +2001,32 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "1q1titRBL6o",
+        ExportName = "sceAgcDcbDrawIndirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDrawIndirect(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var dataOffset = (uint)ctx[CpuRegister.Rsi];
+        if (commandBufferAddress == 0 ||
+            !TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(5, ItDrawIndirect, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, dataOffset) ||
+            !TryWriteUInt32(ctx, commandAddress + 8, 0) ||
+            !TryWriteUInt32(ctx, commandAddress + 12, 0) ||
+            !TryWriteUInt32(ctx, commandAddress + 16, 0))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.dcb_draw_indirect buf=0x{commandBufferAddress:X16} " +
+            $"cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
         Nid = "Yw0jKSqop+E",
         ExportName = "sceAgcDcbDrawIndexAuto",
         Target = Generation.Gen5,
@@ -2050,6 +2081,38 @@ public static partial class AgcExports
         TraceAgc(
             $"agc.dcb_draw_index_indirect buf=0x{commandBufferAddress:X16} " +
             $"cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} modifier=0x{modifier:X8}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "ypVBz4uPKcQ",
+        ExportName = "sceAgcDcbDrawIndexIndirectMulti",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDrawIndexIndirectMulti(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var dataOffset = (uint)ctx[CpuRegister.Rsi];
+        var drawCount = (uint)ctx[CpuRegister.Rdx];
+        var modifier = (uint)ctx[CpuRegister.R8];
+        if (commandBufferAddress == 0 ||
+            !TryAllocateCommandDwords(ctx, commandBufferAddress, 8, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(8, ItDrawIndexIndirectMulti, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, dataOffset) ||
+            !TryWriteUInt32(ctx, commandAddress + 8, 0) ||
+            !TryWriteUInt32(ctx, commandAddress + 12, 0) ||
+            !TryWriteUInt32(ctx, commandAddress + 16, 0) ||
+            !TryWriteUInt32(ctx, commandAddress + 20, drawCount) ||
+            !TryWriteUInt32(ctx, commandAddress + 24, DrawIndexedIndirectArgsSize) ||
+            !TryWriteUInt32(ctx, commandAddress + 28, modifier))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.dcb_draw_index_indirect_multi buf=0x{commandBufferAddress:X16} " +
+            $"cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} " +
+            $"draws={drawCount} stride={DrawIndexedIndirectArgsSize} modifier=0x{modifier:X8}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -3185,7 +3248,7 @@ public static partial class AgcExports
                 dwordCount,
                 ++gpuState.SubmissionSequence,
                 tracePackets);
-            DrainResumableDcbs(ctx, gpuState, tracePackets);
+            DrainResumableDcbs(ctx, gpuState, tracePackets, throttleSubmitScan: true);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -3243,7 +3306,7 @@ public static partial class AgcExports
                 dwordCount,
                 ++gpuState.SubmissionSequence,
                 tracePackets);
-            DrainResumableDcbs(ctx, gpuState, tracePackets);
+            DrainResumableDcbs(ctx, gpuState, tracePackets, throttleSubmitScan: true);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -3811,7 +3874,19 @@ public static partial class AgcExports
                 }
             }
 
-            if (TryReadSubmittedDrawCount(
+            if (TrySubmitSubmittedIndirectDraws(
+                    ctx,
+                    gpuState,
+                    state,
+                    currentAddress,
+                    length,
+                    op))
+            {
+                // Indirect arguments carry per-draw instance count, first index
+                // and vertex offset. They are expanded above so each guest draw
+                // reaches Vulkan with its own state.
+            }
+            else if (TryReadSubmittedDrawCount(
                     ctx,
                     state,
                     currentAddress,
@@ -3836,7 +3911,8 @@ public static partial class AgcExports
                 var indexed = op is
                     ItDrawIndex2 or
                     ItDrawIndexOffset2 or
-                    ItDrawIndexIndirect;
+                    ItDrawIndexIndirect or
+                    ItDrawIndexIndirectMulti;
                 state.SawIndexedDraw |= indexed;
                 TryTranslateGuestDraw(ctx, gpuState, state, indexCount, indexed);
             }
@@ -4196,6 +4272,7 @@ public static partial class AgcExports
         op is ItDispatchDirect or ItDispatchIndirect ||
         op is ItDrawIndirect or
             ItDrawIndexIndirect or
+            ItDrawIndexIndirectMulti or
             ItDrawIndex2 or
             ItDrawIndexAuto or
             ItDrawIndexMultiAuto or
@@ -5242,6 +5319,19 @@ public static partial class AgcExports
             ? deadlockMs
             : 500L) * System.Diagnostics.Stopwatch.Frequency / 1000L;
 
+    // Submitted DCBs can arrive hundreds of thousands of times per second.
+    // Re-scanning every outstanding waiter on every submit becomes O(submits ×
+    // waiters) in titles such as Demon's Souls, which keeps thousands of GPU
+    // timeline waits in flight. The dedicated wait monitor below still checks
+    // direct CPU label writes continuously; submit paths only need a bounded
+    // low-latency poll. Four milliseconds stays well below one 60 Hz frame.
+    private static readonly long _gpuWaitSubmitScanIntervalTicks =
+        (long.TryParse(
+             Environment.GetEnvironmentVariable("SHARPEMU_GPU_WAIT_SCAN_INTERVAL_MS"),
+             out var waitScanMs) && waitScanMs >= 0
+            ? waitScanMs
+            : 4L) * System.Diagnostics.Stopwatch.Frequency / 1000L;
+
     // Reads the WAIT_REG_MEM watched address, reference, mask, and 3-bit compare
     // function for both the AGC NOP-encapsulated (RWaitMem32/64) and the standard
     // ItWaitRegMem packet layouts.
@@ -5724,11 +5814,23 @@ public static partial class AgcExports
     private static int DrainResumableDcbs(
         CpuContext ctx,
         SubmittedGpuState gpuState,
-        bool tracePackets)
+        bool tracePackets,
+        bool throttleSubmitScan = false)
     {
         if (!_gpuWaitSuspendEnabled)
         {
             return 0;
+        }
+
+        if (throttleSubmitScan && _gpuWaitSubmitScanIntervalTicks > 0)
+        {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (now - gpuState.LastSubmitWaitScanTicks < _gpuWaitSubmitScanIntervalTicks)
+            {
+                return 0;
+            }
+
+            gpuState.LastSubmitWaitScanTicks = now;
         }
 
         var resumedCount = 0;
@@ -6186,19 +6288,169 @@ public static partial class AgcExports
 
                 drawCount = (control >> 21) & 0x7FFu;
                 return true;
-            case ItDrawIndirect or ItDrawIndexIndirect
-                when packetLength >= 5 && state.IndirectArgsAddress != 0:
-                if (!TryReadUInt32(ctx, packetAddress + 4, out var dataOffset))
-                {
-                    return false;
-                }
-
-                return TryReadUInt32(
-                    ctx,
-                    state.IndirectArgsAddress + dataOffset,
-                    out drawCount);
             default:
                 return false;
+        }
+    }
+
+    private static bool TrySubmitSubmittedIndirectDraws(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        uint packetLength,
+        uint op)
+    {
+        var indexed = op is ItDrawIndexIndirect or ItDrawIndexIndirectMulti;
+        if ((!indexed && op != ItDrawIndirect) ||
+            packetLength < 5 ||
+            state.IndirectArgsAddress == 0 ||
+            !TryReadUInt32(ctx, packetAddress + 4, out var dataOffset))
+        {
+            return false;
+        }
+
+        var commandSize = indexed ? DrawIndexedIndirectArgsSize : 16u;
+        var commandCount = 1u;
+        var stride = commandSize;
+        if (op == ItDrawIndexIndirectMulti)
+        {
+            if (packetLength < 8 ||
+                !TryReadUInt32(ctx, packetAddress + 20, out commandCount) ||
+                !TryReadUInt32(ctx, packetAddress + 24, out stride))
+            {
+                return false;
+            }
+
+            stride = Math.Max(stride, commandSize);
+            commandCount = commandCount == 0
+                ? DrawIndexedIndirectMaxScan
+                : Math.Min(commandCount, 4096u);
+        }
+
+        EnsureIndirectArgumentsCpuVisible(
+            ctx,
+            gpuState,
+            state.IndirectArgsAddress + dataOffset,
+            commandCount,
+            stride,
+            commandSize);
+
+        var savedInstanceCount = state.InstanceCount;
+        var savedDrawIndexOffset = state.DrawIndexOffset;
+        var hadBaseVertex = state.UcRegisters.TryGetValue(GeIndxOffset, out var savedBaseVertex);
+        try
+        {
+            for (var draw = 0u; draw < commandCount; draw++)
+            {
+                var args = state.IndirectArgsAddress + dataOffset + ((ulong)draw * stride);
+                if (!TryReadUInt32(ctx, args, out var elementCount) ||
+                    !TryReadUInt32(ctx, args + 4, out var instanceCount) ||
+                    !TryReadUInt32(ctx, args + 8, out var firstElement))
+                {
+                    break;
+                }
+
+                if (op == ItDrawIndexIndirectMulti && commandCount == DrawIndexedIndirectMaxScan &&
+                    elementCount == 0 && instanceCount == 0)
+                {
+                    break;
+                }
+
+                if (elementCount == 0 || instanceCount == 0)
+                {
+                    continue;
+                }
+
+                var baseVertex = firstElement;
+                if (indexed)
+                {
+                    if (!TryReadUInt32(ctx, args + 12, out baseVertex))
+                    {
+                        break;
+                    }
+
+                    state.DrawIndexOffset = firstElement;
+                }
+                else
+                {
+                    state.DrawIndexOffset = 0;
+                }
+
+                state.InstanceCount = instanceCount;
+                state.UcRegisters[GeIndxOffset] = baseVertex;
+                state.FrameDrawCount++;
+                state.SawIndexedDraw |= indexed;
+                TryTranslateGuestDraw(ctx, gpuState, state, elementCount, indexed);
+            }
+        }
+        finally
+        {
+            state.InstanceCount = savedInstanceCount;
+            state.DrawIndexOffset = savedDrawIndexOffset;
+            if (hadBaseVertex)
+            {
+                state.UcRegisters[GeIndxOffset] = savedBaseVertex;
+            }
+            else
+            {
+                state.UcRegisters.Remove(GeIndxOffset);
+            }
+        }
+
+        return true;
+    }
+
+    private const int IndirectArgumentReadbackTimeoutMilliseconds = 250;
+    private const uint EmptyIndirectArgumentReadbackInterval = 60;
+
+    private static void EnsureIndirectArgumentsCpuVisible(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        ulong argumentsAddress,
+        uint commandCount,
+        uint stride,
+        uint commandSize)
+    {
+        var readableCommands = Math.Min(commandCount, DrawIndexedIndirectMaxScan);
+        var hasExecutableDraw = false;
+        for (var draw = 0u; draw < readableCommands; draw++)
+        {
+            var address = argumentsAddress + ((ulong)draw * stride);
+            if (TryReadUInt32(ctx, address, out var elementCount) &&
+                TryReadUInt32(ctx, address + 4, out var instanceCount) &&
+                elementCount != 0 && instanceCount != 0)
+            {
+                hasExecutableDraw = true;
+                break;
+            }
+        }
+
+        if (hasExecutableDraw)
+        {
+            gpuState.EmptyIndirectArgumentReads.Remove(argumentsAddress);
+            return;
+        }
+
+        var emptyReads = gpuState.EmptyIndirectArgumentReads.GetValueOrDefault(argumentsAddress) + 1;
+        gpuState.EmptyIndirectArgumentReads[argumentsAddress] = emptyReads;
+        if (emptyReads != 1 && emptyReads % EmptyIndirectArgumentReadbackInterval != 0)
+        {
+            return;
+        }
+
+        var byteCount = readableCommands == 0
+            ? commandSize
+            : ((ulong)(readableCommands - 1) * stride) + commandSize;
+        var sequence = GuestGpu.Current.SubmitOrderedGuestBufferReadback(
+            argumentsAddress,
+            byteCount,
+            $"indirect_args_readback 0x{argumentsAddress:X16}+0x{byteCount:X}");
+        if (sequence != 0)
+        {
+            GuestGpu.Current.WaitForGuestWork(
+                sequence,
+                IndirectArgumentReadbackTimeoutMilliseconds);
         }
     }
 
@@ -13475,7 +13727,7 @@ public static partial class AgcExports
                     ParseSubmittedDcb(ctx, gpuState, gpuState.Graphics, commandAddress, dwordCount, tracePackets);
                 }
 
-                DrainResumableDcbs(ctx, gpuState, tracePackets);
+                DrainResumableDcbs(ctx, gpuState, tracePackets, throttleSubmitScan: true);
             }
             finally
             {

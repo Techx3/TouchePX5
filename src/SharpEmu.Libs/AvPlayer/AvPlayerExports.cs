@@ -42,6 +42,8 @@ public static class AvPlayerExports
         public int Height { get; set; }
         public double FramesPerSecond { get; set; } = 30.0;
         public ulong DurationMilliseconds { get; set; }
+        public bool HasVideo { get; set; } = true;
+        public bool HasAudio { get; set; } = true;
         public bool Started { get; set; }
         public bool Paused { get; set; }
         public bool Looping { get; set; }
@@ -458,14 +460,16 @@ public static class AvPlayerExports
         lock (StateGate)
         {
             if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var foundPlayer) ||
-                foundPlayer.SourcePath is null || oldStream > 1 || newStream > 1 ||
+                foundPlayer.SourcePath is null ||
+                oldStream >= GetStreamCount(foundPlayer) ||
+                newStream >= GetStreamCount(foundPlayer) ||
                 oldStream != newStream)
             {
                 return SetReturn(ctx, OperationFailed);
             }
             player = foundPlayer;
 
-            if (newStream == 0)
+            if (IsVideoStream(player, newStream))
             {
                 player.VideoEnabled = true;
             }
@@ -477,7 +481,7 @@ public static class AvPlayerExports
             Trace($"change_stream handle=0x{player.Handle:X16} old={oldStream} new={newStream}");
         }
 
-        if (newStream == 1)
+        if (IsAudioStream(player, newStream))
         {
             ActivateAudioSession(player);
         }
@@ -587,6 +591,18 @@ public static class AvPlayerExports
             if (player.RawAudioFrame is null ||
                 !ReadExactly(player.AudioDecoderOutput, player.RawAudioFrame))
             {
+                player.ResetAudioDecoder();
+                if (player.Looping && !player.HasVideo)
+                {
+                    player.PlaybackClock.Restart();
+                }
+                else if (!player.HasVideo)
+                {
+                    player.EndOfStream = true;
+                    player.Started = false;
+                    player.PlaybackClock.Stop();
+                    InvalidateAudioSession(player);
+                }
                 return SetReturn(ctx, 0);
             }
             if (player.AudioBufferBase == 0)
@@ -663,7 +679,11 @@ public static class AvPlayerExports
     {
         lock (StateGate)
         {
-            return SetReturn(ctx, Players.ContainsKey(ctx[CpuRegister.Rdi]) ? 2 : InvalidParameters);
+            return SetReturn(
+                ctx,
+                Players.TryGetValue(ctx[CpuRegister.Rdi], out var player)
+                    ? checked((int)GetStreamCount(player))
+                    : InvalidParameters);
         }
     }
 
@@ -715,17 +735,16 @@ public static class AvPlayerExports
         lock (StateGate)
         {
             if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
-                streamIndex > 1 || infoAddress == 0 || player.Width <= 0 || player.Height <= 0)
+                streamIndex >= GetStreamCount(player) || infoAddress == 0)
             {
                 return SetReturn(ctx, InvalidParameters);
             }
 
             Span<byte> info = stackalloc byte[infoSize];
             info.Clear();
-            BinaryPrimitives.WriteUInt32LittleEndian(
-                info[0..],
-                streamIndex == 0 ? 1u : 2u); // 1=video, 2=audio
-            if (streamIndex == 0)
+            var isVideo = IsVideoStream(player, streamIndex);
+            BinaryPrimitives.WriteUInt32LittleEndian(info[0..], isVideo ? 1u : 2u);
+            if (isVideo)
             {
                 BinaryPrimitives.WriteUInt32LittleEndian(info[8..], checked((uint)player.Width));
                 BinaryPrimitives.WriteUInt32LittleEndian(info[12..], checked((uint)player.Height));
@@ -759,9 +778,17 @@ public static class AvPlayerExports
             player = foundPlayer;
 
             var hostPath = ResolveGuestPath(guestPath);
-            if (hostPath is null || !ProbeVideo(hostPath, out var width, out var height, out var fps, out var duration))
+            if (hostPath is null ||
+                !ProbeMedia(
+                    hostPath,
+                    out var hasVideo,
+                    out var hasAudio,
+                    out var width,
+                    out var height,
+                    out var fps,
+                    out var duration))
             {
-                Console.Error.WriteLine($"[AVPLAYER][ERROR] Could not open guest video '{guestPath}' (resolved '{hostPath ?? "<none>"}').");
+                Console.Error.WriteLine($"[AVPLAYER][ERROR] Could not open guest media '{guestPath}' (resolved '{hostPath ?? "<none>"}').");
                 return SetReturn(ctx, OperationFailed);
             }
 
@@ -776,10 +803,14 @@ public static class AvPlayerExports
             player.Height = height;
             player.FramesPerSecond = fps;
             player.DurationMilliseconds = duration;
+            player.HasVideo = hasVideo;
+            player.HasAudio = hasAudio;
+            player.VideoEnabled = hasVideo;
+            player.AudioEnabled = hasAudio;
             player.Started = player.AutoStart;
             player.AudioSessionGeneration = Interlocked.Increment(ref _nextAudioSessionGeneration);
             autoStart = player.AutoStart;
-            Trace($"source guest='{guestPath}' host='{hostPath}' {width}x{height} fps={fps:F3} duration_ms={duration} auto_start={player.AutoStart}");
+            Trace($"source guest='{guestPath}' host='{hostPath}' video={hasVideo} audio={hasAudio} {width}x{height} fps={fps:F3} duration_ms={duration} auto_start={player.AutoStart}");
         }
 
         if (autoStart)
@@ -1246,13 +1277,17 @@ public static class AvPlayerExports
         return true;
     }
 
-    private static bool ProbeVideo(
+    private static bool ProbeMedia(
         string path,
+        out bool hasVideo,
+        out bool hasAudio,
         out int width,
         out int height,
         out double framesPerSecond,
         out ulong durationMilliseconds)
     {
+        hasVideo = false;
+        hasAudio = false;
         width = 0;
         height = 0;
         framesPerSecond = 30.0;
@@ -1277,10 +1312,8 @@ public static class AvPlayerExports
         };
         startInfo.ArgumentList.Add("-v");
         startInfo.ArgumentList.Add("error");
-        startInfo.ArgumentList.Add("-select_streams");
-        startInfo.ArgumentList.Add("v:0");
         startInfo.ArgumentList.Add("-show_entries");
-        startInfo.ArgumentList.Add("stream=width,height,avg_frame_rate,duration");
+        startInfo.ArgumentList.Add("stream=codec_type,width,height,avg_frame_rate,duration:format=duration");
         startInfo.ArgumentList.Add("-of");
         startInfo.ArgumentList.Add("default=noprint_wrappers=1");
         startInfo.ArgumentList.Add(path);
@@ -1312,6 +1345,10 @@ public static class AvPlayerExports
                 var value = line[(separator + 1)..];
                 switch (key)
                 {
+                    case "codec_type":
+                        hasVideo |= value.Equals("video", StringComparison.OrdinalIgnoreCase);
+                        hasAudio |= value.Equals("audio", StringComparison.OrdinalIgnoreCase);
+                        break;
                     case "width":
                         _ = int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out width);
                         break;
@@ -1336,7 +1373,14 @@ public static class AvPlayerExports
                         break;
                 }
             }
-            return width > 0 && height > 0 && framesPerSecond > 0;
+            if (!hasVideo)
+            {
+                width = 0;
+                height = 0;
+                framesPerSecond = 30.0;
+            }
+            return (hasVideo || hasAudio) &&
+                (!hasVideo || (width > 0 && height > 0 && framesPerSecond > 0));
         }
         catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {
@@ -1806,12 +1850,12 @@ public static class AvPlayerExports
         lock (StateGate)
         {
             if (!Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) ||
-                player.SourcePath is null || streamIndex > 1)
+                player.SourcePath is null || streamIndex >= GetStreamCount(player))
             {
                 return SetReturn(ctx, InvalidParameters);
             }
 
-            if (streamIndex == 0)
+            if (IsVideoStream(player, streamIndex))
             {
                 player.VideoEnabled = enabled;
                 if (!enabled)
@@ -1847,6 +1891,15 @@ public static class AvPlayerExports
 
         return SetReturn(ctx, 0);
     }
+
+    private static uint GetStreamCount(PlayerState player) =>
+        (uint)((player.HasVideo ? 1 : 0) + (player.HasAudio ? 1 : 0));
+
+    private static bool IsVideoStream(PlayerState player, uint streamIndex) =>
+        player.HasVideo && streamIndex == 0;
+
+    private static bool IsAudioStream(PlayerState player, uint streamIndex) =>
+        player.HasAudio && streamIndex == (player.HasVideo ? 1u : 0u);
 
     private static void InvalidateAudioSession(PlayerState player)
     {

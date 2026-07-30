@@ -327,24 +327,22 @@ internal static class KernelSocketCompatExports
         var af = unchecked((int)ctx[CpuRegister.Rdi]);
         var srcAddress = ctx[CpuRegister.Rsi];
         var dstAddress = ctx[CpuRegister.Rdx];
-        if (af != 2 || srcAddress == 0 || dstAddress == 0)
+        if (af is not 2 and not 28 || srcAddress == 0 || dstAddress == 0)
         {
             ctx[CpuRegister.Rax] = unchecked((ulong)0xFFFFFFFFFFFFFFFF);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
         if (!TryReadCString(srcAddress, ctx, out var text) ||
-            !TryParseIpv4Address(text, out var octets))
+            !IPAddress.TryParse(text, out var address) ||
+            (af == 2 && address.AddressFamily != AddressFamily.InterNetwork) ||
+            (af == 28 && address.AddressFamily != AddressFamily.InterNetworkV6))
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        Span<byte> packed = stackalloc byte[4];
-        packed[0] = octets[0];
-        packed[1] = octets[1];
-        packed[2] = octets[2];
-        packed[3] = octets[3];
+        var packed = address.GetAddressBytes();
         if (!ctx.Memory.TryWrite(dstAddress, packed))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -520,25 +518,4 @@ internal static class KernelSocketCompatExports
         return true;
     }
 
-    private static bool TryParseIpv4Address(string text, out byte[] octets)
-    {
-        octets = Array.Empty<byte>();
-        var parts = text.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (parts.Length != 4)
-        {
-            return false;
-        }
-
-        var parsed = new byte[4];
-        for (var i = 0; i < 4; i++)
-        {
-            if (!byte.TryParse(parts[i], out parsed[i]))
-            {
-                return false;
-            }
-        }
-
-        octets = parsed;
-        return true;
-    }
 }

@@ -51,7 +51,9 @@ public static class FiberExports
     private static int _contextSizeCheck;
 
     private static readonly object _fiberGate = new();
-    private static readonly ConcurrentDictionary<ulong, FiberContinuation> _continuations = new();
+    // Continuation mutations are serialized by _fiberGate. A regular dictionary
+    // avoids paying for a second layer of concurrent locking on every switch.
+    private static readonly Dictionary<ulong, FiberContinuation> _continuations = new(512);
     private static readonly ConcurrentDictionary<ulong, FiberStackRange> _stackRanges = new();
     private static readonly ConcurrentDictionary<ulong, FiberThreadState> _threadStates = new();
 
@@ -162,8 +164,11 @@ public static class FiberExports
             return SetReturn(ctx, FiberErrorState);
         }
 
-        _continuations.TryRemove(fiber, out _);
-        _stackRanges.TryRemove(fiber, out _);
+        lock (_fiberGate)
+        {
+            _continuations.Remove(fiber);
+            _stackRanges.TryRemove(fiber, out _);
+        }
         _ = TryWriteUInt32(ctx, fiber + FiberStateOffset, FiberStateTerminated);
         return SetReturn(ctx, 0);
     }
@@ -272,7 +277,7 @@ public static class FiberExports
             if (!_threadStates.TryGetValue(threadKey, out var threadState) ||
                 !TryWriteResumeArgument(ctx, threadState.RootContinuation, returnArgument))
             {
-                _continuations.TryRemove(fiberAddress, out _);
+                _continuations.Remove(fiberAddress);
                 return SetReturn(ctx, FiberErrorPermission);
             }
 
@@ -341,7 +346,7 @@ public static class FiberExports
             return SetReturn(ctx, FiberErrorInvalid);
         }
 
-        if (!TryReadFiberFields(ctx, fiber, out var fields))
+        if (!TryReadFiberFields(ctx, fiber, out var fields, includeName: true))
         {
             return SetReturn(ctx, FiberErrorInvalid);
         }
@@ -648,7 +653,7 @@ public static class FiberExports
             {
                 if (previousFiber != 0)
                 {
-                    _continuations.TryRemove(previousFiber, out _);
+                    _continuations.Remove(previousFiber);
                     _ = TryWriteUInt32(ctx, previousFiber + FiberStateOffset, FiberStateRun);
                 }
                 else
@@ -660,7 +665,7 @@ public static class FiberExports
 
             if (resumed)
             {
-                _continuations.TryRemove(fiber, out _);
+                _continuations.Remove(fiber);
             }
 
             transferTarget = targetContinuation.Context with { Rax = 0 };
@@ -977,7 +982,11 @@ public static class FiberExports
         return true;
     }
 
-    private static bool TryReadFiberFields(CpuContext ctx, ulong fiber, out FiberFields fields)
+    private static bool TryReadFiberFields(
+        CpuContext ctx,
+        ulong fiber,
+        out FiberFields fields,
+        bool includeName = false)
     {
         fields = default;
         if (!TryReadUInt32(ctx, fiber + FiberStateOffset, out var state) ||
@@ -985,8 +994,13 @@ public static class FiberExports
             !TryReadUInt64(ctx, fiber + FiberArgOnInitializeOffset, out var argOnInitialize) ||
             !TryReadUInt64(ctx, fiber + FiberContextAddressOffset, out var contextAddress) ||
             !TryReadUInt64(ctx, fiber + FiberContextSizeOffset, out var contextSize) ||
-            !TryReadUInt32(ctx, fiber + FiberFlagsOffset, out var flags) ||
-            !TryReadInlineName(ctx, fiber + FiberNameOffset, out var name))
+            !TryReadUInt32(ctx, fiber + FiberFlagsOffset, out var flags))
+        {
+            return false;
+        }
+
+        var name = string.Empty;
+        if (includeName && !TryReadInlineName(ctx, fiber + FiberNameOffset, out name))
         {
             return false;
         }

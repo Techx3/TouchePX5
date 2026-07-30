@@ -209,6 +209,10 @@ internal interface IGuestGpuBackend
     /// returns its work sequence, or 0 when nothing could be enqueued.</summary>
     long SubmitOrderedGuestAction(Action action, string debugName);
 
+    /// <summary>Publishes GPU writes overlapping a guest buffer range before
+    /// later CPU-side command decoding reads it.</summary>
+    long SubmitOrderedGuestBufferReadback(ulong address, ulong byteCount, string debugName);
+
     /// <summary>Preserves sceAgcDcbWaitUntilSafeForRendering in queue order.</summary>
     long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex);
 
