@@ -1429,6 +1429,7 @@ public sealed partial class DirectExecutionBackend
 			"Q2V+iqvjgC0" or // vsnprintf
 			"AV6ipCNa4Rw" or // strcasecmp
 			"viiwFMaNamA" or // strstr
+			"uWIYLFkkwqk" or // scePlayGoGetLocus
 			"q1cHNfGycLI" or // scePadRead
 			"xk0AcarP3V4" or // scePadOpen
 			"yH17Q6NWtVg" or // sceUserServiceGetEvent
@@ -1470,6 +1471,12 @@ public sealed partial class DirectExecutionBackend
 		var expectedPrivacyInvalidParameter =
 			string.Equals(nid, "D-CzAxQL0XI", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80960009);
+		// Fully installed titles can probe the complete 0..999 PlayGo range.
+		// BAD_CHUNK_ID is the expected answer for slots outside their package,
+		// not an emulator failure worth emitting hundreds of times per scan.
+		var expectedPlayGoBadChunkId =
+			string.Equals(nid, "uWIYLFkkwqk", StringComparison.Ordinal) &&
+			resultValue == unchecked((int)0x80B2000C);
 		if (!expectedFileProbeMiss &&
 			!expectedTimedWaitTimeout &&
 			!expectedEqueueTimeout &&
@@ -1478,7 +1485,8 @@ public sealed partial class DirectExecutionBackend
 			!expectedPollSemaBusy &&
 			!expectedNetAcceptWouldBlock &&
 			!expectedUserServiceNoEvent &&
-			!expectedPrivacyInvalidParameter)
+			!expectedPrivacyInvalidParameter &&
+			!expectedPlayGoBadChunkId)
 		{
 			return true;
 		}
