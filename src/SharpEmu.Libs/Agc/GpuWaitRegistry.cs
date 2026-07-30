@@ -175,9 +175,11 @@ internal static class GpuWaitRegistry
     /// </summary>
     public static List<WaitingDcb>? CollectSatisfied(
         object memory,
-        Func<ulong, bool, ulong?> readValue)
+        Func<ulong, bool, ulong?> readValue,
+        out int remaining)
     {
         List<WaitingDcb>? woken = null;
+        remaining = 0;
         lock (_gate)
         {
             List<ulong>? emptied = null;
@@ -199,6 +201,7 @@ internal static class GpuWaitRegistry
 
                     if (!satisfied)
                     {
+                        remaining++;
                         continue;
                     }
 

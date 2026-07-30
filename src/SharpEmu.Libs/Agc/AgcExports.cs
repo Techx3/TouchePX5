@@ -5728,8 +5728,11 @@ public static partial class AgcExports
             int remaining;
             lock (gpuState.Gate)
             {
-                resumed = DrainResumableDcbs(ctx, gpuState, tracePackets: _traceAgc);
-                remaining = GpuWaitRegistry.CountForMemory(ctx.Memory);
+                resumed = DrainResumableDcbs(
+                    ctx,
+                    gpuState,
+                    tracePackets: _traceAgc,
+                    out remaining);
                 if (_traceAgc && resumed != 0)
                 {
                     Console.Error.WriteLine(
@@ -5815,8 +5818,22 @@ public static partial class AgcExports
         CpuContext ctx,
         SubmittedGpuState gpuState,
         bool tracePackets,
+        bool throttleSubmitScan = false) =>
+        DrainResumableDcbs(
+            ctx,
+            gpuState,
+            tracePackets,
+            out _,
+            throttleSubmitScan);
+
+    private static int DrainResumableDcbs(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        bool tracePackets,
+        out int remaining,
         bool throttleSubmitScan = false)
     {
+        remaining = 0;
         if (!_gpuWaitSuspendEnabled)
         {
             return 0;
@@ -5836,10 +5853,13 @@ public static partial class AgcExports
         var resumedCount = 0;
         for (var pass = 0; pass < 256; pass++)
         {
-            var woken = GpuWaitRegistry.CollectSatisfied(ctx.Memory, (address, is64Bit) =>
-                is64Bit
-                    ? TryReadUInt64(ctx, address, out var value64) ? value64 : (ulong?)null
-                    : TryReadUInt32(ctx, address, out var value32) ? value32 : (ulong?)null);
+            var woken = GpuWaitRegistry.CollectSatisfied(
+                ctx.Memory,
+                (address, is64Bit) =>
+                    is64Bit
+                        ? TryReadUInt64(ctx, address, out var value64) ? value64 : (ulong?)null
+                        : TryReadUInt32(ctx, address, out var value32) ? value32 : (ulong?)null,
+                out remaining);
 
             // Indirect-dispatch dimension retries whose deadline elapsed are
             // resumed so they drop instead of stalling. Flag each so its immediate
