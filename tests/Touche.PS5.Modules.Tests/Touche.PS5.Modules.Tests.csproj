@@ -1,0 +1,22 @@
+<!--
+Copyright (C) 2026 Touché PX5 contributors
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Touche.Firmware\Touche.Firmware.csproj" />
+    <ProjectReference Include="..\..\src\Touche.PS5.Modules\Touche.PS5.Modules.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+</Project>
