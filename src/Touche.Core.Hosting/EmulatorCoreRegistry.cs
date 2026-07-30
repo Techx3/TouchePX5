@@ -41,6 +41,20 @@ public sealed class EmulatorCoreRegistry
         }
     }
 
+    public void RegisterOrReplace(IEmulatorAdapter adapter)
+    {
+        ArgumentNullException.ThrowIfNull(adapter);
+        if (string.IsNullOrWhiteSpace(adapter.CoreId))
+        {
+            throw new ArgumentException("An emulator adapter must expose a non-empty core ID.", nameof(adapter));
+        }
+
+        lock (_sync)
+        {
+            _adapters[adapter.CoreId] = adapter;
+        }
+    }
+
     public bool TryGet(string coreId, out IEmulatorAdapter? adapter)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(coreId);
