@@ -141,6 +141,7 @@ public sealed class LleModuleLoadPlanner
 
         var segments = new List<LleLoadSegment>();
         var hasDynamicTable = false;
+        LleDynamicTable? dynamicTable = null;
         var imageStart = ulong.MaxValue;
         var imageEnd = 0UL;
         for (var index = 0; index < programHeaderCount; index++)
@@ -149,6 +150,31 @@ public sealed class LleModuleLoadPlanner
             var type = BinaryPrimitives.ReadUInt32LittleEndian(item);
             if (type == ProgramTypeDynamic)
             {
+                if (dynamicTable is not null)
+                {
+                    throw new InvalidDataException("The ELF contains multiple dynamic table segments.");
+                }
+                var dynamicFileOffset = BinaryPrimitives.ReadUInt64LittleEndian(item[8..]);
+                var dynamicVirtualAddress = BinaryPrimitives.ReadUInt64LittleEndian(item[16..]);
+                var dynamicFileSize = BinaryPrimitives.ReadUInt64LittleEndian(item[32..]);
+                var dynamicMemorySize = BinaryPrimitives.ReadUInt64LittleEndian(item[40..]);
+                if (dynamicFileSize == 0 ||
+                    dynamicFileSize > dynamicMemorySize ||
+                    dynamicFileSize % 16 != 0)
+                {
+                    throw new InvalidDataException("The ELF dynamic table segment is invalid.");
+                }
+                EnsureFileRange(
+                    dynamicFileOffset,
+                    dynamicFileSize,
+                    artifactSize,
+                    "dynamic table segment");
+                dynamicTable = new LleDynamicTable(
+                    index,
+                    dynamicFileOffset,
+                    dynamicFileSize,
+                    dynamicVirtualAddress,
+                    dynamicMemorySize);
                 hasDynamicTable = true;
             }
             if (type != ProgramTypeLoad)
@@ -220,6 +246,7 @@ public sealed class LleModuleLoadPlanner
             ImageVirtualStart = imageStart,
             ImageSize = imageEnd - imageStart,
             HasDynamicTable = hasDynamicTable,
+            DynamicTable = dynamicTable,
             Segments = segments.ToArray(),
         };
     }

@@ -31,6 +31,7 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
             fileSystem);
 
         Assert.Equal(ModulePath, plan.ModuleVirtualPath);
+        Assert.Equal(imported.Result.Manifest.ProfileId, plan.FirmwareProfileId);
         Assert.Equal(module.Sha256, plan.ModuleHash);
         Assert.Equal(3, plan.ElfType);
         Assert.Equal(0x1010UL, plan.EntryPoint);
@@ -41,6 +42,48 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
         Assert.Equal(0x200UL, segment.FileSize);
         Assert.Equal(0x300UL, segment.MemorySize);
         Assert.Equal(LleSegmentPermissions.Read | LleSegmentPermissions.Execute, segment.Permissions);
+    }
+
+    [Fact]
+    public async Task CatalogsVerifiedDynamicRelocationsWithoutApplyingThem()
+    {
+        var imported = await ImportAsync(CreateDynamicElf(relocationType: 8));
+        var catalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(catalog.Modules);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var loadPlan = await new LleModuleLoadPlanner().BuildAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+
+        var linkPlan = await new LleModuleLinkPlanner().BuildAsync(loadPlan, fileSystem);
+
+        Assert.NotNull(loadPlan.DynamicTable);
+        Assert.Equal(0x1300UL, linkPlan.Metadata.RelaLocation);
+        Assert.Equal(24UL, linkPlan.Metadata.RelaSize);
+        var relocation = Assert.Single(linkPlan.Relocations);
+        Assert.Equal(0x1100UL, relocation.TargetVirtualAddress);
+        Assert.Equal(1U, relocation.SymbolIndex);
+        Assert.Equal(8U, relocation.Type);
+        Assert.True(linkPlan.CanApply);
+    }
+
+    [Fact]
+    public async Task ReportsUnsupportedRelocationsBeforeMemoryIsModified()
+    {
+        var imported = await ImportAsync(CreateDynamicElf(relocationType: 37));
+        var catalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(catalog.Modules);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var loadPlan = await new LleModuleLoadPlanner().BuildAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+
+        var linkPlan = await new LleModuleLinkPlanner().BuildAsync(loadPlan, fileSystem);
+
+        Assert.False(linkPlan.CanApply);
+        Assert.Equal([37U], linkPlan.UnsupportedRelocationTypes);
     }
 
     [Fact]
@@ -244,6 +287,61 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
         BinaryPrimitives.WriteUInt64LittleEndian(programHeader[40..], 0x300);
         BinaryPrimitives.WriteUInt64LittleEndian(programHeader[48..], 0x1000);
         return bytes;
+    }
+
+    private static byte[] CreateDynamicElf(uint relocationType)
+    {
+        var bytes = new byte[0x400];
+        bytes[0] = 0x7f;
+        bytes[1] = (byte)'E';
+        bytes[2] = (byte)'L';
+        bytes[3] = (byte)'F';
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(16), 3);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(18), 62);
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(20), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(24), 0x1010);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(32), 64);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(52), 64);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(54), 56);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(56), 2);
+
+        var load = bytes.AsSpan(64, 56);
+        BinaryPrimitives.WriteUInt32LittleEndian(load, 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(load[4..], 5);
+        BinaryPrimitives.WriteUInt64LittleEndian(load[8..], 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(load[16..], 0x1000);
+        BinaryPrimitives.WriteUInt64LittleEndian(load[32..], 0x400);
+        BinaryPrimitives.WriteUInt64LittleEndian(load[40..], 0x500);
+        BinaryPrimitives.WriteUInt64LittleEndian(load[48..], 0x1000);
+
+        var dynamicHeader = bytes.AsSpan(120, 56);
+        BinaryPrimitives.WriteUInt32LittleEndian(dynamicHeader, 2);
+        BinaryPrimitives.WriteUInt32LittleEndian(dynamicHeader[4..], 4);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[8..], 0x200);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[16..], 0x1200);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[32..], 64);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[40..], 64);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[48..], 8);
+
+        WriteDynamicEntry(bytes, 0x200, 7, 0x1300);
+        WriteDynamicEntry(bytes, 0x210, 8, 24);
+        WriteDynamicEntry(bytes, 0x220, 9, 24);
+        WriteDynamicEntry(bytes, 0x230, 0, 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x300), 0x1100);
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            bytes.AsSpan(0x308),
+            ((ulong)1 << 32) | relocationType);
+        BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(0x310), 4);
+        return bytes;
+    }
+
+    private static void WriteDynamicEntry(byte[] bytes, int offset, long tag, ulong value)
+    {
+        BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(offset), tag);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset + 8), value);
     }
 
     private static FirmwareModuleCatalog CreateTrustedCatalog(

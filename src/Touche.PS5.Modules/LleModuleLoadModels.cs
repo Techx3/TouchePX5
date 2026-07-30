@@ -24,6 +24,13 @@ public sealed record LleLoadSegment(
     ulong Alignment,
     LleSegmentPermissions Permissions);
 
+public sealed record LleDynamicTable(
+    int ProgramHeaderIndex,
+    ulong FileOffset,
+    ulong FileSize,
+    ulong VirtualAddress,
+    ulong MemorySize);
+
 public sealed record LleModuleLoadPlan
 {
     public required string FirmwareProfileId { get; init; }
@@ -41,6 +48,8 @@ public sealed record LleModuleLoadPlan
     public required ulong ImageSize { get; init; }
 
     public required bool HasDynamicTable { get; init; }
+
+    public LleDynamicTable? DynamicTable { get; init; }
 
     public required IReadOnlyList<LleLoadSegment> Segments { get; init; }
 }
