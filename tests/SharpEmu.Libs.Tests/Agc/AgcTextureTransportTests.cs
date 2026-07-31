@@ -90,6 +90,34 @@ public sealed class AgcTextureTransportTests
         Assert.NotEqual(threeDimensional, deeperThreeDimensional);
     }
 
+    [Fact]
+    public void UntrackedLinearTextureProbe_RefreshesOnlyWhenGuestBytesChange()
+    {
+        const ulong address = 0x20000;
+        var pixels = new byte[512 * 384 * 4];
+        var memory = new FakeCpuMemory(address, pixels.Length);
+        Assert.True(memory.TryWrite(address, pixels));
+        var identity = CreateIdentity(type: 9, depth: 1) with
+        {
+            Address = address,
+            Width = 512,
+            Height = 384,
+            Pitch = 512,
+        };
+
+        Assert.False(AgcExports.IsUntrackedLinearTextureContentUnchanged(
+            memory, identity, address, (ulong)pixels.Length));
+        Assert.True(AgcExports.IsUntrackedLinearTextureContentUnchanged(
+            memory, identity, address, (ulong)pixels.Length));
+
+        pixels[pixels.Length / 2] = 0x7F;
+        Assert.True(memory.TryWrite(address, pixels));
+        Assert.False(AgcExports.IsUntrackedLinearTextureContentUnchanged(
+            memory, identity, address, (ulong)pixels.Length));
+        Assert.True(AgcExports.IsUntrackedLinearTextureContentUnchanged(
+            memory, identity, address, (ulong)pixels.Length));
+    }
+
     private static TextureContentIdentity CreateIdentity(uint type, uint depth) =>
         new(
             Address: 0x1234,

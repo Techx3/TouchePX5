@@ -341,6 +341,13 @@ public static partial class AgcExports
     private static readonly object _softwarePresenterGate = new();
     private static readonly Dictionary<(ulong Source, ulong Destination), ulong> _softwarePresenterFingerprints = new();
     private static readonly Dictionary<(ulong Shader, ulong Source, ulong Destination), ulong> _softwareComputeBlitFingerprints = new();
+    // Windows keeps native guest-image page protection disabled by default
+    // because it regresses several titles. Linear textures can still be CPU
+    // streamed (Castlevania's 512x384 gameplay view is one), so remember a
+    // sparse content probe and only bypass the texture cache when those guest
+    // bytes actually change.
+    private static readonly ConcurrentDictionary<TextureContentIdentity, ulong>
+        _untrackedLinearTextureContentProbes = new();
     private static readonly object _registerDefaultsGate = new();
     private static readonly ConditionalWeakTable<object, RegisterDefaultsAllocation> _registerDefaultsAllocations = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
@@ -9767,12 +9774,10 @@ public static partial class AgcExports
         // When the presenter already holds this exact texture identity in
         // its cache, the texel copy below would be discarded on arrival; for
         // scenes that sample large textures every draw this copy dominated
-        // CPU time (Dead Cells menus). The dirty peek closes the race with
-        // eviction when the write tracker is on. With the tracker off,
-        // PeekDirty is always false so a cached identity keeps skipping —
-        // correct for static UI atlases. CPU-updated guest Bink planes are
-        // handled by the upload-known gate above (forced copies when the
-        // tracker cannot invalidate), not by disabling this cache skip.
+        // CPU time (Dead Cells menus). The dirty peek closes the race when
+        // write tracking is active. With it off, linear CPU-streamed textures
+        // use a sparse content probe so static atlases keep the fast path while
+        // changed gameplay/video planes ship fresh texels to the presenter.
         var sampler = ToGuestSampler(samplerDescriptor);
         // Track the guest allocation before reading its texels so a CPU
         // rewrite landing after the copy still bumps the write generation.
@@ -9783,24 +9788,35 @@ public static partial class AgcExports
             SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
                 descriptor.Address,
                 out var writeGeneration);
-        if (!_textureCopySkipDisabled &&
+        var textureIdentity = new TextureContentIdentity(
+            descriptor.Address,
+            descriptor.Width,
+            descriptor.Height,
+            descriptor.Format,
+            descriptor.NumberType,
+            descriptor.DstSelect,
+            descriptor.TileMode,
+            sourceWidth,
+            sampler,
+            isArrayed,
+            arrayUploadLayers,
+            descriptor.Type,
+            textureDepth);
+        var textureCached =
+            !_textureCopySkipDisabled &&
             descriptor.Address != 0 &&
             !SharpEmu.HLE.GuestImageWriteTracker.PeekDirty(descriptor.Address) &&
-            GuestGpu.Current.IsTextureContentCached(
-                new TextureContentIdentity(
-                    descriptor.Address,
-                    descriptor.Width,
-                    descriptor.Height,
-                    descriptor.Format,
-                    descriptor.NumberType,
-                    descriptor.DstSelect,
-                    descriptor.TileMode,
-                    sourceWidth,
-                    sampler,
-                    isArrayed,
-                    arrayUploadLayers,
-                    descriptor.Type,
-                    textureDepth)))
+            GuestGpu.Current.IsTextureContentCached(textureIdentity);
+        var cachedContentUnchanged =
+            !textureCached ||
+            hasWriteGeneration ||
+            descriptor.TileMode != 0 ||
+            IsUntrackedLinearTextureContentUnchanged(
+                ctx.Memory,
+                textureIdentity,
+                descriptor.Address + baseMipByteOffset,
+                sourceByteCount);
+        if (textureCached && cachedContentUnchanged)
         {
             texture = new GuestDrawTexture(
                 descriptor.Address,
@@ -10102,6 +10118,78 @@ public static partial class AgcExports
             Type: descriptor.Type,
             Depth: textureDepth);
         return true;
+    }
+
+    /// <summary>
+    /// Detects native CPU updates to a cached linear texture when page-fault
+    /// write tracking is unavailable. The first cached observation deliberately
+    /// refreshes once to establish a trustworthy baseline; later unchanged
+    /// draws retain the normal zero-copy cache path.
+    /// </summary>
+    internal static bool IsUntrackedLinearTextureContentUnchanged(
+        ICpuMemory memory,
+        in TextureContentIdentity identity,
+        ulong sourceAddress,
+        ulong byteCount)
+    {
+        if (sourceAddress == 0 || byteCount == 0)
+        {
+            return true;
+        }
+
+        if (_untrackedLinearTextureContentProbes.Count > 4096)
+        {
+            _untrackedLinearTextureContentProbes.Clear();
+        }
+
+        var probe = ComputeSparseTextureContentProbe(memory, sourceAddress, byteCount);
+        if (!_untrackedLinearTextureContentProbes.TryGetValue(identity, out var previous))
+        {
+            _untrackedLinearTextureContentProbes[identity] = probe;
+            return false;
+        }
+
+        if (previous == probe)
+        {
+            return true;
+        }
+
+        _untrackedLinearTextureContentProbes[identity] = probe;
+        return false;
+    }
+
+    private static ulong ComputeSparseTextureContentProbe(
+        ICpuMemory memory,
+        ulong address,
+        ulong byteCount)
+    {
+        const int sampleCount = 17;
+        Span<byte> sample = stackalloc byte[64];
+        ulong hash = 14695981039346656037UL;
+        for (var sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+        {
+            var maxOffset = byteCount > (ulong)sample.Length
+                ? byteCount - (ulong)sample.Length
+                : 0;
+            var offset = maxOffset * (ulong)sampleIndex / (sampleCount - 1);
+            var length = (int)Math.Min((ulong)sample.Length, byteCount - offset);
+            if (!memory.TryRead(address + offset, sample[..length]))
+            {
+                hash ^= 0x9E3779B97F4A7C15UL + offset;
+                hash *= 1099511628211UL;
+                continue;
+            }
+
+            for (var index = 0; index < length; index++)
+            {
+                hash ^= sample[index];
+                hash *= 1099511628211UL;
+            }
+
+            hash ^= offset + (ulong)length;
+        }
+
+        return hash ^ byteCount;
     }
 
 
