@@ -44,7 +44,7 @@ public sealed class HybridModuleResolver
         var moduleLookup = FindModule(request.ModuleName);
         var canonicalName = moduleLookup.Module is null
             ? Path.GetFileName(request.ModuleName)
-            : Path.GetFileName(moduleLookup.Module.VirtualPath);
+            : Path.GetFileName(moduleLookup.Module.ProvidesVirtualPath ?? moduleLookup.Module.VirtualPath);
         _hleModules.TryGetValue(canonicalName, out var hle);
         var (effectiveMode, overrideApplied) = GetEffectiveMode(request, canonicalName);
         var lle = EvaluateLle(request, moduleLookup);
@@ -323,19 +323,45 @@ public sealed class HybridModuleResolver
         }
         if (requestedName.StartsWith("/", StringComparison.Ordinal))
         {
-            return new ModuleLookup(
-                _catalog.Modules.FirstOrDefault(module =>
-                    string.Equals(module.VirtualPath, requestedName, StringComparison.Ordinal)),
-                Ambiguous: false);
+            return SelectPreferredModule(_catalog.Modules.Where(module =>
+                string.Equals(
+                    module.ProvidesVirtualPath ?? module.VirtualPath,
+                    requestedName,
+                    StringComparison.Ordinal)));
         }
 
-        var matches = _catalog.Modules
+        return SelectPreferredModule(_catalog.Modules
             .Where(module => string.Equals(
-                Path.GetFileName(module.VirtualPath),
+                Path.GetFileName(module.ProvidesVirtualPath ?? module.VirtualPath),
                 requestedName,
-                StringComparison.Ordinal))
+                StringComparison.Ordinal)));
+    }
+
+    private static ModuleLookup SelectPreferredModule(IEnumerable<FirmwareModule> candidates)
+    {
+        var matches = candidates.ToArray();
+        if (matches
+            .Select(module => module.ProvidesVirtualPath ?? module.VirtualPath)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .Count() > 1)
+        {
+            return new ModuleLookup(null, Ambiguous: true);
+        }
+
+        var overrides = matches
+            .Where(module => module.ProvidesVirtualPath is not null)
             .Take(2)
             .ToArray();
+        if (overrides.Length == 1)
+        {
+            return new ModuleLookup(overrides[0], Ambiguous: false);
+        }
+        if (overrides.Length > 1)
+        {
+            return new ModuleLookup(null, Ambiguous: true);
+        }
+
         return matches.Length switch
         {
             0 => default,

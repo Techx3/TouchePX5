@@ -61,6 +61,59 @@ public sealed class FirmwareModuleCatalogBuilderTests : IDisposable
     }
 
     [Fact]
+    public async Task CatalogAssociatesVerifiedElfSidecarWithProtectedSelf()
+    {
+        var objects = Path.Combine(_temporaryDirectory, "objects");
+        var self = AddObject(objects, [0x54, 0x14, 0xf5, 0xee, 0x10, 0x01, 0x01, 0x32]);
+        var elf = AddObject(objects, CreateElf64());
+        var manifest = CreateManifest(
+            ("/system/common/lib/libKernel.sprx", self),
+            ("/system/common/lib/libKernel.sprx.elf", elf));
+
+        var catalog = await new FirmwareModuleCatalogBuilder(objects).BuildAsync(manifest);
+
+        var protectedModule = Assert.Single(catalog.Modules, module => module.Format == FirmwareModuleFormat.SonySelf);
+        var sidecar = Assert.Single(catalog.Modules, module => module.Format == FirmwareModuleFormat.Elf64);
+        Assert.Equal(FirmwareModuleState.UnsupportedEncryption, protectedModule.State);
+        Assert.Equal(FirmwareModuleState.Parseable, sidecar.State);
+        Assert.Equal(protectedModule.VirtualPath, sidecar.ProvidesVirtualPath);
+        Assert.Contains("decrypted ELF override", sidecar.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CatalogReadsBoundedMetadataFromProtectedSelfWithoutMakingItLoadable()
+    {
+        var objects = Path.Combine(_temporaryDirectory, "objects");
+        var selfBytes = new byte[128];
+        new byte[] { 0x54, 0x14, 0xf5, 0xee, 0x10, 0x01, 0x01, 0x32 }
+            .CopyTo(selfBytes, 0);
+        CreateElf64().CopyTo(selfBytes, 64);
+        var self = AddObject(objects, selfBytes);
+        var manifest = CreateManifest(("/system/common/lib/libKernel.sprx", self));
+
+        var catalog = await new FirmwareModuleCatalogBuilder(objects).BuildAsync(manifest);
+
+        var module = Assert.Single(catalog.Modules);
+        Assert.Equal(FirmwareModuleFormat.SonySelf, module.Format);
+        Assert.Equal(FirmwareModuleState.UnsupportedEncryption, module.State);
+        Assert.Equal("x86-64", module.Architecture);
+        Assert.Equal(0x401000UL, module.EntryPoint);
+        Assert.Contains("0x40", module.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CatalogDoesNotAliasStandaloneElfByFileNameAlone()
+    {
+        var objects = Path.Combine(_temporaryDirectory, "objects");
+        var elf = AddObject(objects, CreateElf64());
+        var manifest = CreateManifest(("/system/common/lib/libKernel.sprx.elf", elf));
+
+        var catalog = await new FirmwareModuleCatalogBuilder(objects).BuildAsync(manifest);
+
+        Assert.Null(Assert.Single(catalog.Modules).ProvidesVirtualPath);
+    }
+
+    [Fact]
     public async Task CatalogIsDeterministicAndWritesSeparatelyFromManifest()
     {
         var objects = Path.Combine(_temporaryDirectory, "objects");

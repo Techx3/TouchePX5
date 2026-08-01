@@ -126,6 +126,15 @@ SELF modules are catalogued automatically. Touché PX5 does not decrypt protecte
 SELF content; cataloguing a module does not mean it can already replace its HLE
 implementation.
 
+For research with a legally obtained, already decrypted module, place the ELF
+next to its protected module and append `.elf` to the complete name, for example
+`common/lib/libkernel.sprx.elf`. During **Import extracted folder…**, Touché PX5
+verifies that the sidecar is a bounded x86-64 ELF and that the matching protected
+`libkernel.sprx` exists. The original SELF remains unchanged; only that exact
+guest module can prefer the verified sidecar. A renamed file without a matching
+SELF is not treated as a replacement. Compatibility approval per module hash,
+firmware profile and core version is still required before LLE execution.
+
 PS5 Backup and Restore files named `archive.dat` use the separate `SIECAF`
 format. Touché PX5 identifies and rejects them as firmware; they cannot replace
 a `PS5UPDATE.PUP` and may contain account-linked user data.

@@ -25,9 +25,11 @@ public sealed class FirmwareModuleCatalogBuilder
     private const int MaximumProgramHeaders = 4096;
     private const int MaximumDynamicEntries = 65_536;
     private const int MaximumDependencyNameBytes = 4096;
+    private const int MaximumSelfMetadataScanBytes = 1024 * 1024;
     private const long MaximumModuleBytes = 256L * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private static readonly byte[] ElfMagic = [0x7f, (byte)'E', (byte)'L', (byte)'F'];
     private readonly string _objectsRoot;
 
     public FirmwareModuleCatalogBuilder(string objectsRoot)
@@ -51,8 +53,10 @@ public sealed class FirmwareModuleCatalogBuilder
             modules.Add(await InspectAsync(artifact, objectPath, cancellationToken).ConfigureAwait(false));
         }
 
+        ApplyDecryptedElfSidecars(modules);
+
         var availableNames = modules
-            .Select(module => Path.GetFileName(module.VirtualPath))
+            .Select(module => Path.GetFileName(module.ProvidesVirtualPath ?? module.VirtualPath))
             .ToHashSet(StringComparer.Ordinal);
         for (var index = 0; index < modules.Count; index++)
         {
@@ -78,6 +82,37 @@ public sealed class FirmwareModuleCatalogBuilder
             ContentHash = contentHash,
             Modules = modules,
         };
+    }
+
+    private static void ApplyDecryptedElfSidecars(List<FirmwareModule> modules)
+    {
+        var byPath = modules.ToDictionary(module => module.VirtualPath, StringComparer.Ordinal);
+        for (var index = 0; index < modules.Count; index++)
+        {
+            var candidate = modules[index];
+            if (candidate.Format != FirmwareModuleFormat.Elf64 ||
+                candidate.State != FirmwareModuleState.Parseable ||
+                !candidate.VirtualPath.EndsWith(".elf", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var targetPath = candidate.VirtualPath[..^4];
+            if ((!targetPath.EndsWith(".sprx", StringComparison.OrdinalIgnoreCase) &&
+                 !targetPath.EndsWith(".self", StringComparison.OrdinalIgnoreCase)) ||
+                !byPath.TryGetValue(targetPath, out var protectedModule) ||
+                protectedModule.Format != FirmwareModuleFormat.SonySelf ||
+                protectedModule.State != FirmwareModuleState.UnsupportedEncryption)
+            {
+                continue;
+            }
+
+            modules[index] = candidate with
+            {
+                ProvidesVirtualPath = targetPath,
+                Reason = $"Verified decrypted ELF override for protected SELF '{targetPath}'.",
+            };
+        }
     }
 
     public static async Task WriteAsync(
@@ -142,20 +177,79 @@ public sealed class FirmwareModuleCatalogBuilder
         if (bytes.AsSpan().StartsWith(new byte[] { 0x4f, 0x15, 0x3d, 0x1d }) ||
             bytes.AsSpan().StartsWith(new byte[] { 0x54, 0x14, 0xf5, 0xee }))
         {
-            return new FirmwareModule(
-                artifact.VirtualPath,
-                artifact.Sha256,
-                FirmwareModuleFormat.SonySelf,
-                FirmwareModuleState.UnsupportedEncryption,
-                "x86-64",
-                null,
-                0,
-                false,
-                [],
-                "Sony SELF content requires a legally extracted, decrypted ELF payload.");
+            return InspectSonySelf(artifact, bytes);
         }
 
         return InspectElf64(artifact, bytes);
+    }
+
+    private static FirmwareModule InspectSonySelf(FirmwareArtifact artifact, ReadOnlySpan<byte> bytes)
+    {
+        var search = bytes[..Math.Min(bytes.Length, MaximumSelfMetadataScanBytes)];
+        var searchOffset = 0;
+        while (searchOffset <= search.Length - ElfHeaderSize64)
+        {
+            var relative = search[searchOffset..].IndexOf(ElfMagic);
+            if (relative < 0)
+            {
+                break;
+            }
+
+            var elfOffset = searchOffset + relative;
+            var elf = search[elfOffset..];
+            if ((elfOffset & 7) == 0 &&
+                elf.Length >= ElfHeaderSize64 &&
+                elf[4] == 2 && elf[5] == 1 && elf[6] == 1)
+            {
+                var machine = BinaryPrimitives.ReadUInt16LittleEndian(elf[18..]);
+                var programHeaderOffset = BinaryPrimitives.ReadUInt64LittleEndian(elf[32..]);
+                var programHeaderEntrySize = BinaryPrimitives.ReadUInt16LittleEndian(elf[54..]);
+                var programHeaderCount = BinaryPrimitives.ReadUInt16LittleEndian(elf[56..]);
+                if (machine == 0x3e &&
+                    programHeaderCount <= MaximumProgramHeaders &&
+                    (programHeaderCount == 0 || programHeaderEntrySize >= ProgramHeaderSize64) &&
+                    IsRangeInside(elf.Length, programHeaderOffset, (ulong)programHeaderEntrySize * programHeaderCount))
+                {
+                    var hasDynamicTable = false;
+                    for (var index = 0; index < programHeaderCount; index++)
+                    {
+                        var offset = checked((int)(programHeaderOffset + (ulong)index * programHeaderEntrySize));
+                        if (BinaryPrimitives.ReadUInt32LittleEndian(elf[offset..]) == ProgramTypeDynamic)
+                        {
+                            hasDynamicTable = true;
+                            break;
+                        }
+                    }
+
+                    return new FirmwareModule(
+                        artifact.VirtualPath,
+                        artifact.Sha256,
+                        FirmwareModuleFormat.SonySelf,
+                        FirmwareModuleState.UnsupportedEncryption,
+                        "x86-64",
+                        BinaryPrimitives.ReadUInt64LittleEndian(elf[24..]),
+                        programHeaderCount,
+                        hasDynamicTable,
+                        [],
+                        $"Protected Sony SELF contains bounded ELF64 metadata at 0x{elfOffset:x}; " +
+                        "payload segments still require a legally extracted, decrypted ELF sidecar.");
+                }
+            }
+
+            searchOffset = elfOffset + 1;
+        }
+
+        return new FirmwareModule(
+            artifact.VirtualPath,
+            artifact.Sha256,
+            FirmwareModuleFormat.SonySelf,
+            FirmwareModuleState.UnsupportedEncryption,
+            "x86-64",
+            null,
+            0,
+            false,
+            [],
+            "Sony SELF content requires a legally extracted, decrypted ELF payload.");
     }
 
     private static FirmwareModule InspectElf64(FirmwareArtifact artifact, ReadOnlySpan<byte> bytes)
@@ -450,6 +544,7 @@ public sealed class FirmwareModuleCatalogBuilder
         foreach (var module in modules)
         {
             AppendString(hasher, module.VirtualPath);
+            AppendString(hasher, module.ProvidesVirtualPath ?? string.Empty);
             AppendString(hasher, module.Sha256);
             hasher.AppendData([(byte)module.Format, (byte)module.State]);
             AppendString(hasher, module.Architecture ?? string.Empty);

@@ -37,7 +37,14 @@ public sealed record FirmwareModule(
     int ProgramHeaderCount,
     bool HasDynamicTable,
     IReadOnlyList<string> Dependencies,
-    string? Reason);
+    string? Reason)
+{
+    /// <summary>
+    /// Guest path replaced by this artifact. This is only populated for a verified
+    /// decrypted ELF sidecar whose name is the protected SELF path plus ".elf".
+    /// </summary>
+    public string? ProvidesVirtualPath { get; init; }
+}
 
 public sealed record FirmwareModuleCatalog
 {

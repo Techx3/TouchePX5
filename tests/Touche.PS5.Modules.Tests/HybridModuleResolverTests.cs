@@ -150,6 +150,31 @@ public sealed class HybridModuleResolverTests
     }
 
     [Fact]
+    public void VerifiedDecryptedSidecarReplacesOnlyItsProtectedSelf()
+    {
+        var protectedModule = CreateModule(
+            "/system/common/lib/libExample.sprx",
+            FirmwareModuleState.UnsupportedEncryption) with
+        {
+            Format = FirmwareModuleFormat.SonySelf,
+        };
+        var sidecar = CreateModule("/system/common/lib/libExample.sprx.elf") with
+        {
+            ProvidesVirtualPath = protectedModule.VirtualPath,
+        };
+        var resolver = new HybridModuleResolver(
+            CreateCatalog(protectedModule, sidecar),
+            [],
+            [CreateCompatibility()]);
+
+        var decision = resolver.Resolve(CreateRequest(ModuleResolutionMode.LleOnly));
+
+        Assert.Equal(ModuleImplementationKind.Lle, decision.SelectedImplementation);
+        Assert.Equal(sidecar.VirtualPath, decision.ModuleVirtualPath);
+        Assert.Equal("libExample.sprx", decision.ModuleName);
+    }
+
+    [Fact]
     public void DuplicateCompatibilityRecordsAreRejected()
     {
         var record = CreateCompatibility();
