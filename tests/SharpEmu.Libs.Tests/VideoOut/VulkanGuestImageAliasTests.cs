@@ -79,7 +79,6 @@ public sealed class VulkanGuestImageAliasTests
                 Format.R8G8B8A8Srgb,
                 Format.R8G8B8A8Unorm));
     }
-
     [Theory]
     [InlineData(0u)]
     [InlineData(10u)]
