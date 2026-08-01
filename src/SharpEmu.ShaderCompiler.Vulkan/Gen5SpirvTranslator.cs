@@ -333,7 +333,8 @@ public static partial class Gen5SpirvTranslator
         private readonly record struct SpirvPixelOutput(
             uint Variable,
             uint Type,
-            Gen5PixelOutputKind Kind);
+            Gen5PixelOutputKind Kind,
+            byte ComponentMapping = Gen5ComponentMapping.Identity);
 
         public CompilationContext(
             Gen5SpirvStage stage,
@@ -699,6 +700,11 @@ public static partial class Gen5SpirvTranslator
                     _stage == Gen5SpirvStage.Vertex
                         ? _evaluation.VertexInputs ?? []
                         : []);
+                Gen5SpirvDiagnosticArtifact.TryWrite(
+                    _stage,
+                    _state,
+                    _evaluation,
+                    shader);
                 return true;
             }
             catch (Exception exception)
@@ -1324,7 +1330,11 @@ public static partial class Gen5SpirvTranslator
                         binding.HostLocation);
                     _pixelOutputs.Add(
                         binding.GuestSlot,
-                        new SpirvPixelOutput(variable, outputType, binding.Kind));
+                        new SpirvPixelOutput(
+                            variable,
+                            outputType,
+                            binding.Kind,
+                            binding.ComponentMapping));
                     _interfaces.Add(variable);
                 }
             }
@@ -4158,9 +4168,17 @@ public static partial class Gen5SpirvTranslator
             var components = new uint[checked((int)componentCount)];
             for (var component = 0; component < components.Length; component++)
             {
-                components[component] = Bitcast(
-                    _intType,
-                    LoadImageIntegerAddress(image, start + component));
+                // Vulkan has no portable 1D-array fallback compatible with the
+                // presenter's existing 2D image views. RDNA DIM_1D therefore
+                // uses a 2D host image whose synthetic Y coordinate must be
+                // zero. Reading vaddr+1 here consumed an unrelated VGPR and
+                // made 256x1 palette IMAGE_LOAD operations intermittently
+                // return black.
+                components[component] = image.Dimension == 0 && component == 1
+                    ? _module.Constant(_intType, 0)
+                    : Bitcast(
+                        _intType,
+                        LoadImageIntegerAddress(image, start + component));
             }
 
             return _module.AddInstruction(
@@ -4178,15 +4196,17 @@ public static partial class Gen5SpirvTranslator
             var components = new uint[checked((int)componentCount)];
             for (var component = 0; component < components.Length; component++)
             {
-                components[component] = ClampSignedCoordinate(
-                    Bitcast(
-                        _intType,
-                        LoadImageIntegerAddress(image, start + component)),
-                    _module.AddInstruction(
-                        SpirvOp.CompositeExtract,
-                        _intType,
-                        imageSize,
-                        (uint)component));
+                components[component] = image.Dimension == 0 && component == 1
+                    ? _module.Constant(_intType, 0)
+                    : ClampSignedCoordinate(
+                        Bitcast(
+                            _intType,
+                            LoadImageIntegerAddress(image, start + component)),
+                        _module.AddInstruction(
+                            SpirvOp.CompositeExtract,
+                            _intType,
+                            imageSize,
+                            (uint)component));
             }
 
             return _module.AddInstruction(
@@ -4478,6 +4498,22 @@ public static partial class Gen5SpirvTranslator
                         Gen5PixelOutputKind.Sint => Bitcast(_intType, raw),
                         _ => Bitcast(_floatType, raw),
                     };
+                }
+
+                // CB_COLOR*_INFO.COMP_SWAP can route a different exported
+                // component into each attachment channel. Permuting the ids we
+                // already hold costs nothing: no extra SPIR-V is emitted, and
+                // the identity mapping leaves the array untouched.
+                if (output.ComponentMapping != Gen5ComponentMapping.Identity)
+                {
+                    var permuted = new uint[4];
+                    for (var component = 0; component < 4; component++)
+                    {
+                        permuted[component] = values[
+                            Gen5ComponentMapping.Map(output.ComponentMapping, component)];
+                    }
+
+                    values = permuted;
                 }
 
                 var vector = _module.AddInstruction(

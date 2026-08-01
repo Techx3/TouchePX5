@@ -24,6 +24,48 @@ public sealed class KernelMemoryCompatExportsTests
     private const ulong SpanSizeOutAddress = GuestMemoryBase + 0x110;
 
     [Fact]
+    public void Mkdir_GuestRootReturnsAlreadyExists()
+    {
+        const ulong pathAddress = GuestMemoryBase + 0x100;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(pathAddress, "/");
+        context[CpuRegister.Rdi] = pathAddress;
+
+        var result = KernelMemoryCompatExports.KernelMkdir(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_ALREADY_EXISTS, result);
+    }
+
+    [Theory]
+    [InlineData("/dev/random")]
+    [InlineData("/dev/urandom")]
+    public void RandomDevice_CanOpenReadAndClose(string guestPath)
+    {
+        const ulong pathAddress = GuestMemoryBase + 0x100;
+        const ulong bufferAddress = GuestMemoryBase + 0x200;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(pathAddress, guestPath);
+        context[CpuRegister.Rdi] = pathAddress;
+        context[CpuRegister.Rsi] = 0;
+
+        Assert.Equal(0, KernelMemoryCompatExports.KernelOpenUnderscore(context));
+        var fd = unchecked((int)context[CpuRegister.Rax]);
+        context[CpuRegister.Rdi] = unchecked((ulong)fd);
+        context[CpuRegister.Rsi] = bufferAddress;
+        context[CpuRegister.Rdx] = 32;
+
+        Assert.Equal(0, KernelMemoryCompatExports.KernelReadUnderscore(context));
+        Assert.Equal(32UL, context[CpuRegister.Rax]);
+        var randomBytes = new byte[32];
+        Assert.True(memory.TryRead(bufferAddress, randomBytes));
+
+        context[CpuRegister.Rdi] = unchecked((ulong)fd);
+        Assert.Equal(0, KernelMemoryCompatExports.KernelCloseUnderscore(context));
+    }
+
+    [Fact]
     public void PosixStat_MissingFileReturnsMinusOne()
     {
         const ulong memoryBase = 0x1_0000_0000;
@@ -36,6 +78,21 @@ public sealed class KernelMemoryCompatExportsTests
         context[CpuRegister.Rsi] = statAddress;
 
         var result = KernelMemoryCompatExports.PosixStat(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void PosixUnlink_MissingFileReturnsMinusOne()
+    {
+        const ulong pathAddress = GuestMemoryBase + 0x100;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(pathAddress, "/temp0/__touchepx5_missing_file__.tmp");
+        context[CpuRegister.Rdi] = pathAddress;
+
+        var result = KernelMemoryCompatExports.PosixUnlink(context);
 
         Assert.Equal(-1, result);
         Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
@@ -235,6 +292,43 @@ public sealed class KernelMemoryCompatExportsTests
         finally
         {
             ReleaseDirectMemory(context, allocationStart, allocationLength);
+        }
+    }
+
+    [Fact]
+    public void AllocateDirectMemory_UnconstrainedRangeSkipsSystemLowBand()
+    {
+        const ulong expectedStart = 0x1000_0000;
+        const ulong length = 0x4000;
+        var context = new CpuContext(new FakeCpuMemory(GuestMemoryBase, 0x1000), Generation.Gen5);
+
+        context[CpuRegister.Rdi] = 0;
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = length;
+        context[CpuRegister.Rcx] = 0x4000;
+        context[CpuRegister.R8] = 0;
+        context[CpuRegister.R9] = AllocationOutAddress;
+
+        Assert.Equal(0, KernelMemoryCompatExports.KernelAllocateDirectMemory(context));
+        Assert.True(context.TryReadUInt64(AllocationOutAddress, out var allocatedAddress));
+        Assert.Equal(expectedStart, allocatedAddress);
+
+        ReleaseDirectMemory(context, allocatedAddress, length);
+    }
+
+    [Fact]
+    public void AllocateDirectMemory_ExplicitZeroBasedWindowCanUseOffsetZero()
+    {
+        const ulong length = 0x4000;
+        var context = new CpuContext(new FakeCpuMemory(GuestMemoryBase, 0x1000), Generation.Gen5);
+
+        try
+        {
+            AllocateDirectMemory(context, 0, length);
+        }
+        finally
+        {
+            ReleaseDirectMemory(context, 0, length);
         }
     }
 
@@ -450,5 +544,49 @@ public sealed class KernelMemoryCompatExportsTests
         var result = KernelMemoryCompatExports.KernelMunmap(context);
 
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, result);
+    }
+
+    [Fact]
+    public void Munmap_PartialOverlapPreservesBothReservationSlices()
+    {
+        const ulong memoryBase = 0x14_0000_0000;
+        const ulong reservedLength = 0x1_0000;
+        const ulong removedStart = memoryBase + 0x4000;
+        const ulong removedLength = 0x4000;
+        const ulong infoAddress = memoryBase + 0x1_8000;
+        var memory = new FakeCpuMemory(memoryBase, 0x2_0000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        KernelMemoryCompatExports.RegisterReservedVirtualRange(memoryBase, reservedLength);
+
+        context[CpuRegister.Rdi] = removedStart;
+        context[CpuRegister.Rsi] = removedLength;
+        Assert.Equal(0, KernelMemoryCompatExports.KernelMunmap(context));
+
+        AssertVirtualRegion(context, memoryBase, infoAddress, memoryBase, removedStart);
+        AssertVirtualRegion(
+            context,
+            removedStart + removedLength,
+            infoAddress,
+            removedStart + removedLength,
+            memoryBase + reservedLength);
+    }
+
+    private static void AssertVirtualRegion(
+        CpuContext context,
+        ulong queryAddress,
+        ulong infoAddress,
+        ulong expectedStart,
+        ulong expectedEnd)
+    {
+        context[CpuRegister.Rdi] = queryAddress;
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = infoAddress;
+        context[CpuRegister.Rcx] = 0x48;
+
+        Assert.Equal(0, KernelMemoryCompatExports.KernelVirtualQuery(context));
+        Assert.True(context.TryReadUInt64(infoAddress, out var actualStart));
+        Assert.True(context.TryReadUInt64(infoAddress + 8, out var actualEnd));
+        Assert.Equal(expectedStart, actualStart);
+        Assert.Equal(expectedEnd, actualEnd);
     }
 }

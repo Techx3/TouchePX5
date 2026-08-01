@@ -12,6 +12,7 @@ using System.Threading;
 using System.Runtime.InteropServices;
 using System.Linq;
 using System.Globalization;
+using System.Security.Cryptography;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -51,6 +52,9 @@ public static partial class KernelMemoryCompatExports
     private const int SeekCur = 1;
     private const int SeekEnd = 2;
     private const ulong DirectMemorySizeBytes = 16384UL * 1024 * 1024;
+    // The low direct-memory band is reserved by the system. Unconstrained
+    // allocations start above it; an explicit guest window may still include 0.
+    private const ulong DirectMemoryDefaultAllocationBase = 0x1000_0000;
     private const ulong UnsetMainDirectMemoryPoolBase = ulong.MaxValue;
     private const ulong FlexibleMemorySizeBytes = 448UL * 1024 * 1024;
     private const int OrbisVirtualQueryInfoSize = 72;
@@ -101,6 +105,7 @@ public static partial class KernelMemoryCompatExports
         _binkGuestCompletionShims = new();
     private static readonly Dictionary<int, string> _observedBinkGuestFiles = new();
     private static readonly Dictionary<int, OpenDirectory> _openDirectories = new();
+    private static readonly HashSet<int> _randomDeviceFileDescriptors = new();
     private static readonly object _libcAllocGate = new();
     private static readonly object _memoryGate = new();
     private static readonly object _ioTraceGate = new();
@@ -1462,6 +1467,24 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        if (IsRandomDevicePath(guestPath))
+        {
+            if (ResolveOpenAccess(flags) != FileAccess.Read || IsMutatingOpen(flags))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            }
+
+            var randomFd = AllocateGuestFileDescriptor();
+            lock (_fdGate)
+            {
+                _randomDeviceFileDescriptors.Add(randomFd);
+            }
+
+            LogOpenTrace($"_open random-device path='{guestPath}' flags=0x{flags:X8} fd={randomFd}");
+            ctx[CpuRegister.Rax] = unchecked((ulong)randomFd);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
         var hostPath = ResolveGuestPath(guestPath);
         var access = ResolveOpenAccess(flags);
         var mode = ResolveOpenMode(flags, access);
@@ -2071,6 +2094,19 @@ public static partial class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
+        Nid = "VAzswvTOCzI",
+        ExportName = "unlink",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixUnlink(CpuContext ctx)
+    {
+        var result = KernelUnlink(ctx);
+        return result == (int)OrbisGen2Result.ORBIS_GEN2_OK
+            ? 0
+            : PosixFailure(ctx, result);
+    }
+
+    [SysAbiExport(
         Nid = "1-LFLmRFxxM",
         ExportName = "sceKernelMkdir",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -2088,6 +2124,15 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        // The guest root always exists even though it intentionally has no
+        // direct host path. Cat Quest III probes mkdir("/") during startup and
+        // expects the POSIX EEXIST result before continuing initialization.
+        if (string.Equals(guestPath, "/", StringComparison.Ordinal))
+        {
+            LogOpenTrace("mkdir exists path='/' (guest root)");
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_ALREADY_EXISTS;
+        }
+
         var hostPath = ResolveGuestPath(guestPath);
         if (IsReadOnlyGuestMutationPath(guestPath))
         {
@@ -2099,18 +2144,21 @@ public static partial class KernelMemoryCompatExports
         {
             if (File.Exists(hostPath) || Directory.Exists(hostPath))
             {
+                LogOpenTrace($"mkdir exists path='{guestPath}' host='{hostPath}'");
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_ALREADY_EXISTS;
             }
 
             var parentDirectory = Path.GetDirectoryName(hostPath);
             if (string.IsNullOrWhiteSpace(parentDirectory) || !Directory.Exists(parentDirectory))
             {
+                LogOpenTrace($"mkdir missing-parent path='{guestPath}' host='{hostPath}' parent='{parentDirectory}'");
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
             Directory.CreateDirectory(hostPath);
             if (!Directory.Exists(hostPath))
             {
+                LogOpenTrace($"mkdir create-failed path='{guestPath}' host='{hostPath}'");
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
@@ -2198,7 +2246,12 @@ public static partial class KernelMemoryCompatExports
         string? observedBinkPath = null;
         lock (_fdGate)
         {
-            if (_openFiles.Remove(fd, out stream))
+            if (_randomDeviceFileDescriptors.Remove(fd))
+            {
+                ctx[CpuRegister.Rax] = 0;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+            else if (_openFiles.Remove(fd, out stream))
             {
                 _binkGuestCompletionShims.Remove(fd);
                 if (_observedBinkGuestFiles.Remove(fd, out observedBinkPath))
@@ -2248,6 +2301,25 @@ public static partial class KernelMemoryCompatExports
         if (requested == 0 || fd == 0)
         {
             ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        bool isRandomDevice;
+        lock (_fdGate)
+        {
+            isRandomDevice = _randomDeviceFileDescriptors.Contains(fd);
+        }
+
+        if (isRandomDevice)
+        {
+            var randomBytes = GC.AllocateUninitializedArray<byte>(requested);
+            RandomNumberGenerator.Fill(randomBytes);
+            if (!ctx.Memory.TryWrite(bufferAddress, randomBytes))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)requested);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
@@ -2753,7 +2825,15 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
             }
 
-            var searchStart = searchStartRaw < 0 ? 0UL : (ulong)searchStartRaw;
+            var isWindowed = searchStartRaw > 0 ||
+                (searchEndRaw > 0 && (ulong)searchEndRaw < DirectMemorySizeBytes);
+            var searchStart = searchStartRaw < 0
+                ? DirectMemoryDefaultAllocationBase
+                : (ulong)searchStartRaw;
+            if (!isWindowed)
+            {
+                searchStart = Math.Max(searchStart, DirectMemoryDefaultAllocationBase);
+            }
             var searchEnd = searchEndRaw <= 0
                 ? DirectMemorySizeBytes
                 : Math.Min((ulong)searchEndRaw, DirectMemorySizeBytes);
@@ -2895,18 +2975,19 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
-        if (searchStartRaw < 0)
+        var isWindowed = searchStartRaw > 0 ||
+            (searchEndRaw > 0 && (ulong)searchEndRaw < limit);
+        searchStart = searchStartRaw < 0
+            ? DirectMemoryDefaultAllocationBase
+            : (ulong)searchStartRaw;
+        if (!isWindowed)
         {
-            searchStart = 0;
-        }
-        else
-        {
-            searchStart = (ulong)searchStartRaw;
+            searchStart = Math.Max(searchStart, DirectMemoryDefaultAllocationBase);
         }
 
         if (searchStart >= searchEnd)
         {
-            searchStart = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
         // PS5 direct memory is allocated in 16 KiB pages; when the guest does
@@ -2992,7 +3073,10 @@ public static partial class KernelMemoryCompatExports
                 allocationLimit = ulong.MaxValue;
             }
 
-            if (!TryAllocateDirectMemoryLocked(0, allocationLimit, length, effectiveAlignment, memoryType, allocationLimit, out aligned))
+            var allocationStart = _mainDirectMemoryPoolBase == UnsetMainDirectMemoryPoolBase
+                ? DirectMemoryDefaultAllocationBase
+                : _mainDirectMemoryPoolBase;
+            if (!TryAllocateDirectMemoryLocked(allocationStart, allocationLimit, length, effectiveAlignment, memoryType, allocationLimit, out aligned))
             {
                 var poolBase = _mainDirectMemoryPoolBase == UnsetMainDirectMemoryPoolBase
                     ? AlignUp(GetDirectMemoryHighWaterMarkLocked(), effectiveAlignment)
@@ -3000,7 +3084,7 @@ public static partial class KernelMemoryCompatExports
 
                 if (_mainDirectMemoryPoolBase == UnsetMainDirectMemoryPoolBase &&
                     TryAddU64(poolBase, DirectMemorySizeBytes, out var shiftedLimit) &&
-                    TryAllocateDirectMemoryLocked(0, shiftedLimit, length, effectiveAlignment, memoryType, shiftedLimit, out aligned))
+                    TryAllocateDirectMemoryLocked(poolBase, shiftedLimit, length, effectiveAlignment, memoryType, shiftedLimit, out aligned))
                 {
                     _mainDirectMemoryPoolBase = poolBase;
                     if (ShouldTraceDirectMemory())
@@ -3454,27 +3538,10 @@ public static partial class KernelMemoryCompatExports
         var removedAny = false;
         lock (_memoryGate)
         {
-            var removedRegions = _mappedRegions.Values
-                .Where(region =>
-                    region.Address >= address &&
-                    region.Address < rangeEnd &&
-                    region.Length <= rangeEnd - region.Address)
-                .ToArray();
-
-            if (removedRegions.Length == 0 && !physicallyBacked)
+            removedAny = RemoveMappedRegionRangeLocked(address, rangeEnd);
+            if (!removedAny && !physicallyBacked)
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            }
-
-            foreach (var mappedRegion in removedRegions)
-            {
-                removedAny |= _mappedRegions.Remove(mappedRegion.Address);
-                if (mappedRegion.IsFlexible)
-                {
-                    _allocatedFlexibleBytes = mappedRegion.Length >= _allocatedFlexibleBytes
-                        ? 0
-                        : _allocatedFlexibleBytes - mappedRegion.Length;
-                }
             }
         }
 
@@ -6302,6 +6369,67 @@ public static partial class KernelMemoryCompatExports
         _mappedRegions[start] = replacement;
     }
 
+    /// <summary>
+    /// Removes every portion of a tracked mapping that overlaps [start, end),
+    /// preserving the left and right slices. Host pages remain owned by the
+    /// guest address space; this only releases virtual-memory bookkeeping.
+    /// </summary>
+    private static bool RemoveMappedRegionRangeLocked(ulong start, ulong end)
+    {
+        if (end <= start)
+        {
+            return false;
+        }
+
+        List<MappedRegion>? overlapping = null;
+        foreach (var region in _mappedRegions.Values)
+        {
+            if (region.Length == 0 ||
+                !TryAddU64(region.Address, region.Length, out var regionEnd))
+            {
+                continue;
+            }
+
+            if (region.Address < end && regionEnd > start)
+            {
+                (overlapping ??= []).Add(region);
+            }
+        }
+
+        if (overlapping is null)
+        {
+            return false;
+        }
+
+        foreach (var region in overlapping)
+        {
+            _mappedRegions.Remove(region.Address);
+            var regionEnd = region.Address + region.Length;
+            var removedStart = Math.Max(region.Address, start);
+            var removedEnd = Math.Min(regionEnd, end);
+
+            if (region.IsFlexible)
+            {
+                var removedLength = removedEnd - removedStart;
+                _allocatedFlexibleBytes = removedLength >= _allocatedFlexibleBytes
+                    ? 0
+                    : _allocatedFlexibleBytes - removedLength;
+            }
+
+            if (region.Address < removedStart)
+            {
+                AddMappedRegionSliceLocked(region, region.Address, removedStart, region.Protection);
+            }
+
+            if (removedEnd < regionEnd)
+            {
+                AddMappedRegionSliceLocked(region, removedEnd, regionEnd, region.Protection);
+            }
+        }
+
+        return true;
+    }
+
     private static void AddMappedRegionSliceLocked(
         MappedRegion source,
         ulong start,
@@ -7198,8 +7326,10 @@ public static partial class KernelMemoryCompatExports
 
         string? hostPath = null;
         bool isDirectory = false;
+        bool isRandomDevice;
         lock (_fdGate)
         {
+            isRandomDevice = _randomDeviceFileDescriptors.Contains(fd);
             if (_openDirectories.TryGetValue(fd, out var directory))
             {
                 hostPath = directory.Path;
@@ -7209,6 +7339,20 @@ public static partial class KernelMemoryCompatExports
             {
                 hostPath = stream.Name;
             }
+        }
+
+        if (isRandomDevice)
+        {
+            var now = DateTime.UtcNow;
+            return TryWriteKernelStat(
+                ctx,
+                statAddress,
+                isDirectory: false,
+                size: 0,
+                now,
+                now,
+                now,
+                "device:random");
         }
 
         if (!string.IsNullOrWhiteSpace(hostPath))
@@ -7231,6 +7375,10 @@ public static partial class KernelMemoryCompatExports
 
         return !string.IsNullOrWhiteSpace(hostPath) && TryWriteHostPathStat(ctx, statAddress, hostPath!, isDirectory);
     }
+
+    private static bool IsRandomDevicePath(string guestPath) =>
+        string.Equals(guestPath, "/dev/random", StringComparison.Ordinal) ||
+        string.Equals(guestPath, "/dev/urandom", StringComparison.Ordinal);
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath)
     {

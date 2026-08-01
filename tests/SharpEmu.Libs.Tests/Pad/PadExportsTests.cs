@@ -30,4 +30,48 @@ public sealed class PadExportsTests
         _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
         Assert.Equal(expected, PadExports.PadSetTiltCorrectionState(_ctx));
     }
+
+    [Theory]
+    [InlineData(Generation.Gen5, false, 0, true)]
+    [InlineData(Generation.Gen5, false, 1, true)]
+    [InlineData(Generation.Gen5, false, 2, true)]
+    [InlineData(Generation.Gen4, false, 0, true)]
+    [InlineData(Generation.Gen4, false, 1, false)]
+    [InlineData(Generation.Gen4, false, 2, false)]
+    [InlineData(Generation.Gen4, true, 2, true)]
+    [InlineData(Generation.Gen5, true, 3, false)]
+    public void PortTypeAcceptance_MatchesGeneration(
+        Generation generation,
+        bool extended,
+        int type,
+        bool expected)
+    {
+        Assert.Equal(expected, PadExports.IsPortTypeAccepted(generation, extended, type));
+    }
+
+    [Fact]
+    public void DeviceClassParseData_ReturnsStandardClassWithoutExtendedPayload()
+    {
+        const ulong padDataAddress = Base + 0x100;
+        const ulong classDataAddress = Base + 0x300;
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = padDataAddress;
+        _ctx[CpuRegister.Rdx] = classDataAddress;
+
+        Assert.Equal(0, PadExports.PadDeviceClassParseData(_ctx));
+
+        var classData = new byte[0x18];
+        Assert.True(_memory.TryRead(classDataAddress, classData));
+        Assert.All(classData, value => Assert.Equal(0, value));
+    }
+
+    [Fact]
+    public void DeviceClassParseData_RejectsInvalidHandle()
+    {
+        _ctx[CpuRegister.Rdi] = 2;
+        _ctx[CpuRegister.Rsi] = Base + 0x100;
+        _ctx[CpuRegister.Rdx] = Base + 0x300;
+
+        Assert.Equal(InvalidHandle, PadExports.PadDeviceClassParseData(_ctx));
+    }
 }

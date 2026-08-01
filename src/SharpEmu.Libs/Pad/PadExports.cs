@@ -23,6 +23,7 @@ public static class PadExports
     private const int PrimaryPadHandle = 1;
     private const int ControllerInformationSize = 0x1C;
     private const int PadDataSize = 0x78;
+    private const int PadDeviceClassDataSize = 0x18;
 
     // Real firmware hands out small non-negative handles; 0 is valid. Some titles
     // (Monster Truck Championship) read pad state with handle 0, and rejecting it
@@ -94,8 +95,8 @@ public static class PadExports
         return ctx.SetReturn(PrimaryPadHandle);
     }
 
-    // scePadOpen rejects a non-null 4th arg and non-standard ports; scePadOpenExt accepts a
-    // ScePadOpenExtParam* plus ports 1/2 (racing titles retry scePadOpenExt(type=2) forever if rejected).
+    // Gen5 titles use the regular scePadOpen entry point with port types 1/2 as well.
+    // Keep Gen4 scePadOpen strict while scePadOpenExt accepts all known port types.
     private static int PadOpenCore(CpuContext ctx, bool extended)
     {
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
@@ -112,7 +113,7 @@ public static class PadExports
             return ctx.SetReturn(OrbisPadErrorDeviceNoHandle);
         }
 
-        var typeAccepted = extended ? type is 0 or 1 or 2 : type == StandardPortType;
+        var typeAccepted = IsPortTypeAccepted(ctx.TargetGeneration, extended, type);
         if (userId != PrimaryUserId || !typeAccepted || index != 0 || (!extended && parameterAddress != 0))
         {
             return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
@@ -129,6 +130,10 @@ public static class PadExports
 
         return ctx.SetReturn(PrimaryPadHandle);
     }
+
+    internal static bool IsPortTypeAccepted(Generation generation, bool extended, int type) =>
+        type is 0 or 1 or 2 &&
+        (extended || generation == Generation.Gen5 || type == StandardPortType);
 
     [SysAbiExport(
         Nid = "6ncge5+l5Qs",
@@ -273,6 +278,39 @@ public static class PadExports
         BinaryPrimitives.WriteInt32LittleEndian(information[0x00..], 0);
 
         return ctx.Memory.TryWrite(informationAddress, information)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "IHPqcbc0zCA",
+        ExportName = "scePadDeviceClassParseData",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadDeviceClassParseData(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var dataAddress = ctx[CpuRegister.Rsi];
+        var classDataAddress = ctx[CpuRegister.Rdx];
+        if (!IsPrimaryPadHandle(handle))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (dataAddress == 0 || classDataAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // The emulated controller is the standard class, not a wheel, guitar,
+        // drum kit or flight stick. The class-specific payload is therefore
+        // present but explicitly invalid and fully zero-initialised.
+        Span<byte> classData = stackalloc byte[PadDeviceClassDataSize];
+        classData.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(classData[0x00..], 0);
+        classData[0x04] = 0;
+
+        return ctx.Memory.TryWrite(classDataAddress, classData)
             ? ctx.SetReturn(0)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }

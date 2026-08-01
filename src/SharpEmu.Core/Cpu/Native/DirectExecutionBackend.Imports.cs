@@ -399,7 +399,7 @@ public sealed partial class DirectExecutionBackend
 				Console.Error.Flush();
 			}
 		}
-		if (!flag0 && !isGuestWorker)
+		if (!flag0)
 		{
 			RecordRecentImportTrace(
 				num,

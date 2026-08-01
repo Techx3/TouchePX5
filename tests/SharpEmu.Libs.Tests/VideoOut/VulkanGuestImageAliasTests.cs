@@ -79,4 +79,28 @@ public sealed class VulkanGuestImageAliasTests
                 Format.R8G8B8A8Srgb,
                 Format.R8G8B8A8Unorm));
     }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(10u)]
+    [InlineData(24u)]
+    public void EqualTileModesCanReuseGuestImage(uint tileMode)
+    {
+        Assert.True(
+            VulkanVideoPresenter.HasMatchingGuestImageTileMode(tileMode, tileMode));
+    }
+
+    [Theory]
+    [InlineData(0u, 10u)]
+    [InlineData(10u, 24u)]
+    [InlineData(24u, 0u)]
+    public void DifferentTileModesRequireDistinctGuestImages(
+        uint existingTileMode,
+        uint requestedTileMode)
+    {
+        Assert.False(
+            VulkanVideoPresenter.HasMatchingGuestImageTileMode(
+                existingTileMode,
+                requestedTileMode));
+    }
 }

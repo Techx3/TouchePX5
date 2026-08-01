@@ -116,6 +116,15 @@ public interface IGuestThreadScheduler
         ulong handler,
         int exceptionType,
         out string? error);
+
+    /// <summary>
+    /// Delivers an exception queued for the current primary guest executor
+    /// while it is blocked inside an HLE wait. This preserves the target host
+    /// thread identity required by stop-the-world collectors.
+    /// </summary>
+    bool TryDeliverPendingGuestExceptionAtCurrentSafePoint(
+        CpuContext currentContext,
+        out string? error);
 }
 
 public readonly record struct GuestImportCallFrame(
@@ -311,7 +320,8 @@ public static class GuestThreadExecution
         string reason,
         string? wakeKey = null,
         IGuestThreadBlockWaiter? waiter = null,
-        long blockDeadlineTimestamp = 0)
+        long blockDeadlineTimestamp = 0,
+        bool requireContinuation = false)
     {
         if (!IsGuestThread)
         {
@@ -326,6 +336,21 @@ public static class GuestThreadExecution
         {
             _pendingBlockContinuation = continuation;
             _pendingBlockContinuationValid = true;
+        }
+        else if (context is not null && requireContinuation)
+        {
+            // A cooperative guest-thread block is only resumable when the
+            // import boundary supplied a valid continuation.  Reporting a
+            // pending block without one makes the scheduler mark the thread
+            // Blocked forever because there is no RIP/RSP to resume later.
+            // Let the export use its host-thread fallback instead.
+            _pendingBlockReason = null;
+            _pendingBlockWakeKey = null;
+            _pendingBlockWaiter = null;
+            _pendingBlockDeadlineTimestamp = 0;
+            _pendingBlockContinuation = default;
+            _pendingBlockContinuationValid = false;
+            return false;
         }
         else
         {
@@ -345,13 +370,15 @@ public static class GuestThreadExecution
         string? wakeKey,
         Func<int> resumeHandler,
         Func<bool> wakeHandler,
-        long blockDeadlineTimestamp = 0) =>
+        long blockDeadlineTimestamp = 0,
+        bool requireContinuation = false) =>
         RequestCurrentThreadBlock(
             context,
             reason,
             wakeKey,
             new DelegateGuestThreadBlockWaiter(resumeHandler, wakeHandler),
-            blockDeadlineTimestamp);
+            blockDeadlineTimestamp,
+            requireContinuation);
 
     public static bool TryConsumeCurrentThreadBlock(out string reason)
     {

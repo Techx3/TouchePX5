@@ -59,6 +59,9 @@ public static partial class AgcExports
     private const uint ItReleaseMem = 0x49;
     private const uint ItDmaData = 0x50;
     private const uint ItRewind = 0x59;
+    private const uint ItLoadUconfigReg = 0x5E;
+    private const uint ItLoadShReg = 0x5F;
+    private const uint ItLoadContextReg = 0x61;
     private const uint ItSetContextReg = 0x69;
     private const uint ItSetShReg = 0x76;
     private const uint ItSetUconfigReg = 0x79;
@@ -259,7 +262,7 @@ public static partial class AgcExports
     private static readonly ConcurrentDictionary<
         (ulong Es, ulong EsState, ulong Ps, ulong PsState, ulong OutputLayout,
          uint OutputCount, uint Attributes, uint PsInputEna, uint PsInputAddr,
-         ulong PsInputCntl, ulong AliasAlignment),
+         ulong PsInputCntl, ulong AliasAlignment, ulong ExportMapping),
         (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel)> _graphicsShaderCache = new();
     private static readonly ConcurrentDictionary<
         (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ,
@@ -493,6 +496,39 @@ public static partial class AgcExports
             return maximumMipLevels;
         }
     }
+
+    // CB_COLOR*_INFO.COMP_SWAP picks which exported component each attachment
+    // channel stores. Only the one combination we have measured is mapped: a
+    // single-channel target with SWAP_ALT_REV keeps the shader's ALPHA, which
+    // Castlevania uses to build the title-logo mask (the consumer then swizzles
+    // that lone channel back into alpha, confirming the intent). Everything
+    // else stays identity rather than inventing semantics for combinations no
+    // title has exercised here -- a wrong guess would corrupt working games.
+    private static byte GetRenderTargetComponentMapping(RenderTargetDescriptor target)
+    {
+        if (!_honorSingleChannelCompSwap ||
+            target.CompSwap != CompSwapAltReversed ||
+            !IsSingleChannelRenderTargetFormat(target.Format))
+        {
+            return Gen5ComponentMapping.Identity;
+        }
+
+        // result[0] = export[3]; the remaining components are never stored by a
+        // one-channel attachment, so leave them in their identity slots.
+        return unchecked((byte)((Gen5ComponentMapping.Identity & 0xFC) | 0x3));
+    }
+
+    private const uint CompSwapAltReversed = 3;
+
+    // Only the 8-bit single-channel layout, which is the one measured. The
+    // wider 16- and 32-bit single-channel formats plausibly behave the same,
+    // but no title here has exercised them and a wrong guess would corrupt
+    // games that work today.
+    private static bool IsSingleChannelRenderTargetFormat(uint format) =>
+        format is 1;
+
+    private static readonly bool _honorSingleChannelCompSwap =
+        Environment.GetEnvironmentVariable("SHARPEMU_HONOR_SINGLE_CHANNEL_COMP_SWAP") == "1";
 
     private readonly record struct RenderTargetDescriptor(
         uint Slot,
@@ -3456,6 +3492,16 @@ public static partial class AgcExports
     public static int SuspendPoint(CpuContext ctx)
     {
         TraceAgc("agc.suspend_point");
+
+        // Treat the guest suspend point as a cooperative scheduling boundary.
+        // Returning immediately can leave Unity's graphics worker spinning here,
+        // starving the worker that submits the DCB it just finished building.
+        _ = GuestThreadExecution.RequestCurrentThreadBlock(
+            ctx,
+            "agc_suspend_point",
+            blockDeadlineTimestamp: GuestThreadExecution.ComputeDeadlineTimestamp(
+                TimeSpan.FromMilliseconds(1)));
+
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -4142,7 +4188,8 @@ public static partial class AgcExports
                             BaseArrayLayer: pendingDisplayTarget.BaseArrayLayer,
                             LayerCount: pendingDisplayTarget.LayerCount,
                             MipLevel: pendingDisplayTarget.MipLevel,
-                            CompSwap: pendingDisplayTarget.CompSwap)],
+                            CompSwap: pendingDisplayTarget.CompSwap,
+                            TileMode: pendingDisplayTarget.TileMode)],
                         pendingComposite.VertexShader,
                         pendingComposite.VertexCount,
                         pendingComposite.InstanceCount,
@@ -6424,7 +6471,8 @@ public static partial class AgcExports
                 ItSetContextReg => state.CxRegisters,
                 _ => state.UcRegisters,
             };
-            for (uint index = 0; index < packetLength - 2; index++)
+            var valueCount = BoundRegisterLoadCount(startRegister, packetLength - 2);
+            for (uint index = 0; index < valueCount; index++)
             {
                 if (!TryReadUInt32(
                         ctx,
@@ -6441,6 +6489,12 @@ public static partial class AgcExports
                 }
             }
 
+            return;
+        }
+
+        if (op is ItLoadContextReg or ItLoadShReg or ItLoadUconfigReg)
+        {
+            ApplySubmittedRegisterShadow(ctx, state, packetAddress, packetLength, op);
             return;
         }
 
@@ -6480,6 +6534,11 @@ public static partial class AgcExports
             var decodedRegisterOffset = register == RCxRegsIndirect
                 ? DecodeIndirectCxRegisterOffset(registerOffset)
                 : NormalizeIndirectRegisterOffset(registerOffset);
+            if (decodedRegisterOffset >= RegisterSpaceDwords)
+            {
+                continue;
+            }
+
             destination[decodedRegisterOffset] = value;
             if (register == RUcRegsIndirect)
             {
@@ -6490,6 +6549,101 @@ public static partial class AgcExports
 
     internal static uint NormalizeIndirectRegisterOffset(uint rawOffset) =>
         rawOffset & ~RegisterSelectorMask;
+
+    private const uint RegisterSpaceDwords = 0x400;
+
+    internal static uint BoundRegisterLoadCount(uint registerOffset, uint requestedCount)
+    {
+        if (registerOffset >= RegisterSpaceDwords)
+        {
+            return 0;
+        }
+
+        return Math.Min(requestedCount, RegisterSpaceDwords - registerOffset);
+    }
+
+    private static void ApplySubmittedRegisterShadow(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        uint packetLength,
+        uint op)
+    {
+        // Header + address lo/hi + at least one (offset,count) range.
+        if (packetLength < 5 ||
+            !TryReadUInt32(ctx, packetAddress + 4, out var addressLow) ||
+            !TryReadUInt32(ctx, packetAddress + 8, out var addressHigh))
+        {
+            return;
+        }
+
+        var shadowAddress = ((ulong)(addressHigh & 0xFFFFu) << 32) | addressLow;
+        if (shadowAddress == 0)
+        {
+            return;
+        }
+
+        var ranges = new List<(uint Offset, uint[] Values)>();
+        var anyValue = false;
+        for (uint packetIndex = 3; packetIndex + 1 < packetLength; packetIndex += 2)
+        {
+            if (!TryReadUInt32(ctx, packetAddress + ((ulong)packetIndex * 4), out var rawOffset) ||
+                !TryReadUInt32(ctx, packetAddress + ((ulong)(packetIndex + 1) * 4), out var rawCount))
+            {
+                return;
+            }
+
+            var registerOffset = rawOffset & 0xFFFFu;
+            var count = BoundRegisterLoadCount(registerOffset, rawCount & 0xFFFFu);
+            if (count == 0)
+            {
+                continue;
+            }
+
+            var values = new uint[count];
+            for (uint index = 0; index < count; index++)
+            {
+                if (!TryReadUInt32(
+                        ctx,
+                        shadowAddress + ((ulong)(registerOffset + index) * sizeof(uint)),
+                        out var value))
+                {
+                    return;
+                }
+
+                values[index] = value;
+                anyValue |= value != 0;
+            }
+
+            ranges.Add((registerOffset, values));
+        }
+
+        // An empty shadow is not a valid reset. Applying it would erase state
+        // established by an inline/indirect SET packet immediately beforehand.
+        if (!anyValue)
+        {
+            return;
+        }
+
+        var destination = op switch
+        {
+            ItLoadShReg => state.ShRegisters,
+            ItLoadContextReg => state.CxRegisters,
+            _ => state.UcRegisters,
+        };
+        foreach (var (registerOffset, values) in ranges)
+        {
+            for (uint index = 0; index < values.Length; index++)
+            {
+                var destinationOffset = registerOffset + index;
+                destination[destinationOffset] = values[index];
+                if (op == ItLoadUconfigReg)
+                {
+                    ApplyUcIndexTypeIfNeeded(state, destinationOffset, values[index]);
+                }
+            }
+        }
+    }
 
     internal static uint DecodeIndirectCxRegisterOffset(uint rawOffset)
     {
@@ -7698,10 +7852,13 @@ public static partial class AgcExports
         // byte positions. Replaces a per-draw LINQ + string build that allocated on every
         // draw, cache hit or not; the target count disambiguates trailing zero bytes.
         var outputLayout = 0UL;
+        var exportMapping = 0UL;
         for (var index = 0; index < renderTargets.Length; index++)
         {
             outputLayout |= (ulong)(((renderTargets[index].Slot & 0x3Fu) << 2) |
                 (uint)renderTargetOutputKinds[index]) << (index * 8);
+            exportMapping |= (ulong)GetRenderTargetComponentMapping(renderTargets[index])
+                << (index * 8);
         }
 
         var attributeCount = requiredVertexOutputCount;
@@ -7723,7 +7880,8 @@ public static partial class AgcExports
             psInputEna,
             psInputAddr,
             psInputCntlFingerprint,
-            _storageBufferOffsetAlignment);
+            _storageBufferOffsetAlignment,
+            exportMapping);
 
         var guestGlobalBuffers =
             pixelEvaluation.GlobalMemoryBindings.Count +
@@ -7781,7 +7939,8 @@ public static partial class AgcExports
                     pixelOutputs[location] = new Gen5PixelOutputBinding(
                         renderTargets[location].Slot,
                         (uint)location,
-                        renderTargetOutputKinds[location]);
+                        renderTargetOutputKinds[location],
+                        GetRenderTargetComponentMapping(renderTargets[location]));
                 }
 
                 if (!GuestGpu.Current.TryCompilePixelShader(
@@ -7921,7 +8080,8 @@ public static partial class AgcExports
                 BaseArrayLayer: renderTargets[index].BaseArrayLayer,
                 LayerCount: renderTargets[index].LayerCount,
                 MipLevel: renderTargets[index].MipLevel,
-                CompSwap: renderTargets[index].CompSwap);
+                CompSwap: renderTargets[index].CompSwap,
+                TileMode: renderTargets[index].TileMode);
         }
 
         var pixelUserDataCount = Math.Min(pixelEvaluation.InitialScalarRegisters.Count, 8);

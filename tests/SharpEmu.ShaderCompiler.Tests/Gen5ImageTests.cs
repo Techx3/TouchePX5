@@ -62,13 +62,184 @@ public sealed class Gen5ImageTests
             expectedComponents: 3);
     }
 
-    private static byte[] CompileImageOperation(string opcode, uint dimension)
+    [Fact]
+    public void SampledImageLoadUsesIntegerFetchInsteadOfStorageRead()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation("ImageLoad", dimension: 1));
+
+        Assert.Single(instructions, item => item.Opcode == SpirvOp.ImageFetch);
+        Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.ImageRead);
+        var imageType = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.TypeImage);
+        Assert.Equal(1u, imageType.Operands[6]);
+    }
+
+    [Fact]
+    public void ImageLoadSharingDescriptorWithStoreUsesStorageRead()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation(
+                "ImageLoad",
+                dimension: 1,
+                storageAliasOpcode: "ImageStore"));
+
+        Assert.Single(instructions, item => item.Opcode == SpirvOp.ImageRead);
+        Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.ImageFetch);
+        var imageType = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.TypeImage);
+        Assert.Equal(2u, imageType.Operands[6]);
+    }
+
+    [Theory]
+    [InlineData(0x1u, 1)]
+    [InlineData(0x5u, 2)]
+    [InlineData(0xFu, 4)]
+    public void ImageLoadDmaskControlsReturnedComponentCount(
+        uint dmask,
+        int expectedComponents)
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation("ImageLoad", dimension: 1, dmask: dmask));
+        var fetch = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.ImageFetch);
+        var resultId = fetch.Operands[1];
+
+        Assert.Equal(
+            expectedComponents,
+            instructions.Count(item =>
+                item.Opcode == SpirvOp.CompositeExtract &&
+                item.Operands.Length >= 3 &&
+                item.Operands[2] == resultId));
+    }
+
+    [Theory]
+    [InlineData(44u, SpirvOp.TypeFloat, -1)] // RGBA8_UNORM
+    [InlineData(48u, SpirvOp.TypeInt, 0)]    // RGBA8_UINT
+    [InlineData(49u, SpirvOp.TypeInt, 1)]    // RGBA8_SINT
+    public void ImageLoadPreservesDescriptorNumericKind(
+        uint unifiedFormat,
+        SpirvOp expectedScalarType,
+        int expectedSignedness)
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation(
+                "ImageLoad",
+                dimension: 1,
+                unifiedFormat: unifiedFormat));
+        var imageType = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.TypeImage);
+        var scalarTypeId = imageType.Operands[1];
+        var scalarType = Assert.Single(
+            instructions,
+            item => item.Opcode == expectedScalarType &&
+                    item.Operands[0] == scalarTypeId);
+
+        if (expectedScalarType == SpirvOp.TypeInt)
+        {
+            Assert.Equal((uint)expectedSignedness, scalarType.Operands[2]);
+        }
+    }
+
+    [Fact]
+    public void OneDimensionalImageLoadSynthesizesZeroHostYCoordinate()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation("ImageLoad", dimension: 0));
+        var fetch = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.ImageFetch);
+        var coordinateId = fetch.Operands[3];
+        var coordinate = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.CompositeConstruct &&
+                    item.Operands.Length == 4 &&
+                    item.Operands[1] == coordinateId);
+        var syntheticY = coordinate.Operands[3];
+
+        Assert.Contains(
+            instructions,
+            item => item.Opcode == SpirvOp.Constant &&
+                    item.Operands.Length == 3 &&
+                    item.Operands[1] == syntheticY &&
+                    item.Operands[2] == 0);
+    }
+
+    [Fact]
+    public void PaletteDescriptorDecodesSizeMinusOneFieldsExactly()
+    {
+        const ulong address = 0x0000_1234_5678_0000;
+        var descriptor = CreateDescriptor(
+            unifiedFormat: 44,
+            width: 256,
+            height: 1,
+            address: address);
+
+        Assert.True(
+            Gen5ImageDescriptor.TryDecode(
+                descriptor,
+                out var decoded,
+                out var error),
+            error);
+        Assert.Equal(address, decoded.BaseAddress);
+        Assert.Equal(256u, decoded.Width);
+        Assert.Equal(1u, decoded.Height);
+        Assert.Equal(8u, decoded.DataFormat);
+        Assert.Equal(0u, decoded.NumberFormat);
+        Assert.Equal(9u, decoded.ResourceType);
+        Assert.Equal(0xFACu, decoded.DstSelect);
+    }
+
+    [Fact]
+    public void DiagnosticArtifactCorrelatesGuestBindingWithSpirvFetch()
+    {
+        var compilation = CompileImageOperationWithContext(
+            "ImageLoad",
+            dimension: 0,
+            dmask: 0xF,
+            unifiedFormat: 44);
+        var artifact = Gen5SpirvDiagnosticArtifact.Create(
+            Gen5SpirvStage.Compute,
+            compilation.State,
+            compilation.Evaluation,
+            compilation.Shader);
+
+        var binding = Assert.Single(artifact.ImageBindings);
+        Assert.Equal(nameof(SpirvOp.ImageFetch), binding.ExpectedSpirvOpcode);
+        Assert.Equal("combined_image_sampler", binding.VulkanDescriptorType);
+        Assert.Equal(256u, binding.Descriptor?.Width);
+        Assert.True(artifact.SpirvImageOperations.ContainsKey(nameof(SpirvOp.ImageFetch)));
+    }
+
+    private static byte[] CompileImageOperation(
+        string opcode,
+        uint dimension,
+        uint dmask = 0xF,
+        uint unifiedFormat = 71,
+        string? storageAliasOpcode = null) =>
+        CompileImageOperationWithContext(
+            opcode,
+            dimension,
+            dmask,
+            unifiedFormat,
+            storageAliasOpcode).Shader.Spirv;
+
+    private static CompiledImageOperation CompileImageOperationWithContext(
+        string opcode,
+        uint dimension,
+        uint dmask = 0xF,
+        uint unifiedFormat = 71,
+        string? storageAliasOpcode = null)
     {
         var addressRegisters = dimension == 2
             ? new uint[] { 0, 1, 2 }
             : [0, 1];
         var control = new Gen5ImageControl(
-            Dmask: 0xF,
+            Dmask: dmask,
             VectorAddress: 0,
             AddressRegisters: addressRegisters,
             VectorData: 4,
@@ -101,21 +272,37 @@ public sealed class Gen5ImageTests
             [],
             null);
         var scalarRegisters = new uint[256];
-        var descriptor = new uint[8];
-        descriptor[1] = 71u << 20; // FORMAT_16_16_16_16_FLOAT
-        descriptor[3] = (dimension == 2 ? 10u : 9u) << 28;
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [
+        var descriptor = CreateDescriptor(
+            unifiedFormat,
+            width: 256,
+            height: 1,
+            address: 0x0000_1234_5678_0000,
+            resourceType: dimension == 2 ? 10u : 9u);
+        var bindings = new List<Gen5ImageBinding>
+        {
+            new(
+                imageInstruction.Pc,
+                imageInstruction.Opcode,
+                control,
+                descriptor,
+                new uint[4],
+                null),
+        };
+        if (storageAliasOpcode is not null)
+        {
+            bindings.Add(
                 new Gen5ImageBinding(
-                    imageInstruction.Pc,
-                    imageInstruction.Opcode,
+                    imageInstruction.Pc + 8,
+                    storageAliasOpcode,
                     control,
                     descriptor,
                     new uint[4],
-                    null),
-            ],
+                    null));
+        }
+        var evaluation = new Gen5ShaderEvaluation(
+            scalarRegisters,
+            scalarRegisters,
+            bindings,
             []);
 
         Assert.True(
@@ -128,7 +315,32 @@ public sealed class Gen5ImageTests
                 out var shader,
                 out var error),
             error);
-        return shader.Spirv;
+        return new CompiledImageOperation(state, evaluation, shader);
+    }
+
+    private static uint[] CreateDescriptor(
+        uint unifiedFormat,
+        uint width,
+        uint height,
+        ulong address,
+        uint resourceType = 9)
+    {
+        Assert.InRange(width, 1u, 65536u);
+        Assert.InRange(height, 1u, 65536u);
+        var widthMinusOne = width - 1;
+        var descriptor = new uint[8];
+        var shiftedAddress = address >> 8;
+        descriptor[0] = (uint)shiftedAddress;
+        descriptor[1] =
+            (uint)((shiftedAddress >> 32) & 0xFFu) |
+            (unifiedFormat << 20) |
+            ((widthMinusOne & 0x3u) << 30);
+        descriptor[2] =
+            ((widthMinusOne >> 2) & 0x3FFFu) |
+            (((height - 1) & 0xFFFFu) << 14);
+        descriptor[3] = 0xFACu | (resourceType << 28);
+        descriptor[4] = width - 1;
+        return descriptor;
     }
 
     private static IReadOnlyList<ParsedSpirvInstruction> ReadSpirvInstructions(
@@ -194,4 +406,9 @@ public sealed class Gen5ImageTests
     private readonly record struct ParsedSpirvInstruction(
         SpirvOp Opcode,
         uint[] Operands);
+
+    private readonly record struct CompiledImageOperation(
+        Gen5ShaderState State,
+        Gen5ShaderEvaluation Evaluation,
+        Gen5SpirvShader Shader);
 }

@@ -89,6 +89,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ulong GuestThreadHandle,
 		int ManagedThreadId);
 
+	private sealed class RecentImportTraceBuffer
+	{
+		public readonly RecentImportTraceEntry[] Entries = new RecentImportTraceEntry[64];
+
+		public int Count;
+
+		public int WriteIndex;
+
+		public void Reset()
+		{
+			Count = 0;
+			WriteIndex = 0;
+		}
+	}
+
 #pragma warning disable CS0649
 	private struct EXCEPTION_POINTERS
 	{
@@ -306,11 +321,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly Dictionary<string, ulong> _runtimeSymbolsByName = new Dictionary<string, ulong>(StringComparer.Ordinal);
 
-	private readonly RecentImportTraceEntry[] _recentImportTrace = new RecentImportTraceEntry[64];
-
-	private int _recentImportTraceCount;
-
-	private int _recentImportTraceWriteIndex;
+	private readonly ThreadLocal<RecentImportTraceBuffer> _recentImportTrace = new(
+		static () => new RecentImportTraceBuffer());
 
 	private readonly string[] _distinctImportNidHistory = new string[128];
 
@@ -1141,8 +1153,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		result = OrbisGen2Result.ORBIS_GEN2_OK;
 		LastError = null;
 		InitializeRuntimeSymbolIndex(runtimeSymbols);
-		_recentImportTraceCount = 0;
-		_recentImportTraceWriteIndex = 0;
+		_recentImportTrace.Value!.Reset();
 		_distinctImportNidHistoryCount = 0;
 		_distinctImportNidHistoryWriteIndex = 0;
 		_lastDistinctImportNid = string.Empty;
@@ -4936,6 +4947,71 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 	}
 
+	public bool TryDeliverPendingGuestExceptionAtCurrentSafePoint(
+		CpuContext currentContext,
+		out string? error)
+	{
+		error = null;
+		if (Volatile.Read(ref _pendingGuestExceptionCount) == 0)
+		{
+			return false;
+		}
+
+		var threadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
+		if (threadHandle == 0)
+		{
+			threadHandle = _currentExternalGuestThreadHandle;
+		}
+
+		lock (_guestThreadGate)
+		{
+			if (threadHandle == 0 || !_pendingGuestExceptions.ContainsKey(threadHandle))
+			{
+				return false;
+			}
+		}
+
+		if (!GuestThreadExecution.TryGetCurrentImportCallFrame(out var frame))
+		{
+			error = "current guest import frame is unavailable";
+			return false;
+		}
+
+		DeliverPendingGuestExceptionAtSafePoint(
+			currentContext,
+			CaptureImportBoundaryContinuation(currentContext, frame));
+		return true;
+	}
+
+	private static GuestCpuContinuation CaptureImportBoundaryContinuation(
+		CpuContext context,
+		GuestImportCallFrame frame) =>
+		new(
+			Rip: frame.ReturnRip,
+			Rsp: frame.ResumeRsp,
+			ReturnSlotAddress: frame.ReturnSlotAddress,
+			Rflags: context.Rflags,
+			FsBase: context.FsBase,
+			GsBase: context.GsBase,
+			Rax: context[CpuRegister.Rax],
+			Rcx: context[CpuRegister.Rcx],
+			Rdx: context[CpuRegister.Rdx],
+			Rbx: context[CpuRegister.Rbx],
+			Rbp: context[CpuRegister.Rbp],
+			Rsi: context[CpuRegister.Rsi],
+			Rdi: context[CpuRegister.Rdi],
+			R8: context[CpuRegister.R8],
+			R9: context[CpuRegister.R9],
+			R10: context[CpuRegister.R10],
+			R11: context[CpuRegister.R11],
+			R12: context[CpuRegister.R12],
+			R13: context[CpuRegister.R13],
+			R14: context[CpuRegister.R14],
+			R15: context[CpuRegister.R15],
+			FpuControlWord: context.FpuControlWord,
+			Mxcsr: context.Mxcsr,
+			RestoreFullFpuState: false);
+
 	private void QueuePendingGuestExceptionLocked(
 		ulong threadHandle,
 		PendingGuestException pending)
@@ -7102,6 +7178,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 		}
 		_guestContextTransferFrames.Dispose();
+		_recentImportTrace.Dispose();
 		if (_lowIndexedTableScratch != 0)
 		{
 			VirtualFree((void*)_lowIndexedTableScratch, 0u, 32768u);
