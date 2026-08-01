@@ -153,6 +153,8 @@
   "Options.Env.WritableApp0.Desc": "Permitir que los títulos creen y escriban archivos dentro de su carpeta de instalación.\nNecesario para dumps sin empaquetar que guardan sus datos o configuración en /app0.",
   "Options.Env.VkValidation.Desc": "Activar las capas de validación de Vulkan para depurar la GPU.\nLento. Requiere tener instalado el SDK de Vulkan.",
   "Options.Env.DumpSpirv.Desc": "Volcar los shaders AGC y sus traducciones SPIR-V a la carpeta shader-dumps.\nÚsalo al informar de errores de shaders o de renderizado.",
+  "Options.Env.DropStaleAliasedDepth.Desc": "Ignorar un búfer de profundidad cuya dirección es en realidad una superficie de color sobrante.\nCorrige títulos que muestran la pantalla de juego en negro (Castlevania Dominus Collection).",
+  "Options.Env.HonorRtCompSwap.Desc": "Respetar el orden de canales del render target (CB_COLOR_INFO.COMP_SWAP).\nCorrige títulos cuyos colores aparecen con el rojo y el azul intercambiados.",
   "Options.Env.LogDirectMemory.Desc": "Registrar en la consola las asignaciones de memoria directa y sus fallos.\nÚsalo cuando un juego se aborte o se cierre durante el arranque.",
   "Options.Env.LogIo.Desc": "Registrar en la consola la apertura y lectura de archivos y la resolución de rutas.\nÚsalo cuando un juego no encuentre sus archivos de datos durante el arranque.",
   "Options.Env.LogNp.Desc": "Registrar en la consola las llamadas a la biblioteca NP (PlayStation Network).",

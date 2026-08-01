@@ -123,13 +123,41 @@ internal readonly record struct GuestRasterState(
 
 // CompareOp uses the GCN DB_DEPTH_CONTROL ZFUNC encoding, which matches the
 // Vulkan CompareOp ordering (0=Never through 7=Always).
+internal readonly record struct GuestStencilFaceState(
+    uint FailOp,
+    uint PassOp,
+    uint DepthFailOp,
+    uint CompareOp,
+    uint CompareMask,
+    uint WriteMask,
+    uint Reference)
+{
+    public static GuestStencilFaceState Default { get; } = new(
+        0,
+        0,
+        0,
+        7,
+        0xFF,
+        0xFF,
+        0);
+}
+
 internal readonly record struct GuestDepthState(
     bool TestEnable,
     bool WriteEnable,
     uint CompareOp,
-    bool ClearEnable = false)
+    bool ClearEnable = false,
+    bool StencilTestEnable = false,
+    bool StencilClearEnable = false,
+    GuestStencilFaceState FrontStencil = default,
+    GuestStencilFaceState BackStencil = default)
 {
-    public static GuestDepthState Default { get; } = new(false, false, 7, false);
+    public static GuestDepthState Default { get; } = new(
+        false,
+        false,
+        7,
+        FrontStencil: GuestStencilFaceState.Default,
+        BackStencil: GuestStencilFaceState.Default);
 }
 
 /// <summary>Factors/funcs are raw guest CB_BLEND*_CONTROL register bitfields; the
@@ -195,7 +223,10 @@ internal sealed record GuestRenderTarget(
     uint MipLevels = 1,
     uint BaseArrayLayer = 0,
     uint LayerCount = 1,
-    uint MipLevel = 0);
+    uint MipLevel = 0,
+    // CB_COLOR*_INFO.COMP_SWAP[12:11] — the channel order the guest expects to
+    // find in memory: 0=STD(RGBA), 1=ALT(BGRA), 2=STD_REV, 3=ALT_REV.
+    uint CompSwap = 0);
 
 /// <summary>Guest DB surface bound alongside a color render target.</summary>
 internal sealed record GuestDepthTarget(
@@ -206,7 +237,14 @@ internal sealed record GuestDepthTarget(
     uint GuestFormat,
     uint SwizzleMode,
     float ClearDepth,
-    bool ReadOnly)
+    bool ReadOnly,
+    ulong StencilReadAddress = 0,
+    ulong StencilWriteAddress = 0,
+    uint StencilFormat = 0,
+    uint ClearStencil = 0)
 {
     public ulong Address => WriteAddress != 0 ? WriteAddress : ReadAddress;
+    public bool HasStencil =>
+        StencilFormat != 0 &&
+        (StencilReadAddress != 0 || StencilWriteAddress != 0);
 }

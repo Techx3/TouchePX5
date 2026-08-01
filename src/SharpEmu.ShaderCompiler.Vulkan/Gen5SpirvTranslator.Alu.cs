@@ -349,10 +349,7 @@ public static partial class Gen5SpirvTranslator
                 case "VMaxF32":
                     result = EmitFloatExtBinary(instruction, 40);
                     break;
-                case "VMadF32":
                 case "VFmaF32":
-                case "VMadMkF32":
-                case "VMadAkF32":
                 case "VFmaMkF32":
                 case "VFmaAkF32":
                     result = EmitFloatResult(
@@ -364,7 +361,6 @@ public static partial class Gen5SpirvTranslator
                             GetFloatSource(instruction, 1),
                             GetFloatSource(instruction, 2)));
                     break;
-                case "VMacF32":
                 case "VFmacF32":
                 {
                     var addend = Bitcast(_floatType, LoadV(destination));
@@ -376,6 +372,41 @@ public static partial class Gen5SpirvTranslator
                             GetFloatSource(instruction, 0),
                             GetFloatSource(instruction, 1),
                             addend));
+                    break;
+                }
+                case "VMadF32":
+                case "VMadMkF32":
+                case "VMadAkF32":
+                {
+                    // MAD rounds after the multiply and again after the add.
+                    // Keep both operations separate and forbid driver FMA
+                    // contraction; VFmaF32 is the fused instruction.
+                    var product = EmitPreciseFloat(
+                        SpirvOp.FMul,
+                        GetFloatSource(instruction, 0),
+                        GetFloatSource(instruction, 1));
+                    result = EmitFloatResult(
+                        instruction,
+                        EmitPreciseFloat(
+                            SpirvOp.FAdd,
+                            product,
+                            GetFloatSource(instruction, 2)));
+                    break;
+                }
+                case "VMacF32":
+                {
+                    // MAC has the same two-rounding behavior as MUL followed
+                    // by ADD, using the old destination as its addend.
+                    var product = EmitPreciseFloat(
+                        SpirvOp.FMul,
+                        GetFloatSource(instruction, 0),
+                        GetFloatSource(instruction, 1));
+                    result = EmitFloatResult(
+                        instruction,
+                        EmitPreciseFloat(
+                            SpirvOp.FAdd,
+                            product,
+                            Bitcast(_floatType, LoadV(destination))));
                     break;
                 }
                 case "VMin3F32":

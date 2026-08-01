@@ -10,6 +10,12 @@
 logs/
 .tmp/
 
+# Local research material and private test data.
+local-data/
+
+# Renderer capture logs and raw surface dumps (multi-GB).
+diagnostics/
+
 x86/
 x64/
 arm64/

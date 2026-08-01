@@ -401,10 +401,26 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             try
             {
-                if (Environment.GetEnvironmentVariable(
-                        "SHARPEMU_TRACE_TITLE_INTERFACE") == "1" &&
-                    _state.Program.Address is 0x0000000500780000ul or
-                        0x0000000500781200ul)
+                var traceInterfaceAddress =
+                    Environment.GetEnvironmentVariable(
+                        "SHARPEMU_TRACE_SHADER_INTERFACE_ADDRESS");
+                var traceRequestedInterface =
+                    !string.IsNullOrWhiteSpace(traceInterfaceAddress) &&
+                    ulong.TryParse(
+                        traceInterfaceAddress.StartsWith(
+                            "0x",
+                            StringComparison.OrdinalIgnoreCase)
+                            ? traceInterfaceAddress[2..]
+                            : traceInterfaceAddress,
+                        System.Globalization.NumberStyles.HexNumber,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out var requestedInterfaceAddress) &&
+                    requestedInterfaceAddress == _state.Program.Address;
+                if ((Environment.GetEnvironmentVariable(
+                         "SHARPEMU_TRACE_TITLE_INTERFACE") == "1" &&
+                     _state.Program.Address is 0x0000000500780000ul or
+                         0x0000000500781200ul) ||
+                    traceRequestedInterface)
                 {
                     Console.Error.WriteLine(
                         $"[AGC][TITLE-INTERFACE] stage={_stage} " +
@@ -1660,6 +1676,8 @@ public static partial class Gen5SpirvTranslator
 
                 CapturePixelVgprs(instruction);
                 CapturePixelVgprPoints(instruction);
+                CapturePixelFloatColor(instruction);
+                CapturePixelUintColor(instruction);
                 MarkPixelPath(instruction);
                 CapturePixelExec(instruction);
             }
@@ -1705,6 +1723,10 @@ public static partial class Gen5SpirvTranslator
                 var hasTargetBlock = hasTarget && TryFindBlock(blocks, targetPc, out targetBlock);
                 var targetExits = hasTarget && IsExitBranchTarget(_state.Program.Instructions, targetPc);
                 var hasCondition = TryGetBranchCondition(terminator.Opcode, out var condition);
+                if (ShouldForceBranchFallthrough(terminator))
+                {
+                    condition = _module.ConstantBool(false);
+                }
                 if (!hasTarget || (!hasTargetBlock && !targetExits) || !hasCondition)
                 {
                     error =
@@ -1739,6 +1761,36 @@ public static partial class Gen5SpirvTranslator
             }
 
             return true;
+        }
+
+        private bool ShouldForceBranchFallthrough(
+            Gen5ShaderInstruction instruction)
+        {
+            var address = Environment.GetEnvironmentVariable(
+                "SHARPEMU_FORCE_BRANCH_FALLTHROUGH_ADDRESS");
+            var pcText = Environment.GetEnvironmentVariable(
+                "SHARPEMU_FORCE_BRANCH_FALLTHROUGH_PC");
+            if (string.IsNullOrWhiteSpace(address) ||
+                string.IsNullOrWhiteSpace(pcText) ||
+                !ProgramAddressMatches(address))
+            {
+                return false;
+            }
+
+            var span = pcText.AsSpan();
+            var style = System.Globalization.NumberStyles.Integer;
+            if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                span = span[2..];
+                style = System.Globalization.NumberStyles.HexNumber;
+            }
+
+            return uint.TryParse(
+                       span,
+                       style,
+                       System.Globalization.CultureInfo.InvariantCulture,
+                       out var pc) &&
+                   instruction.Pc == pc;
         }
 
         private static string FormatBlockStarts(IReadOnlyList<ShaderBlock> blocks)
@@ -3540,15 +3592,12 @@ public static partial class Gen5SpirvTranslator
                         imageObject);
                     var coordinateComponentCount =
                         ImageCoordinateComponentCount(resource);
-                    var imageSize = _module.AddInstruction(
-                        SpirvOp.ImageQuerySizeLod,
-                        _module.TypeVector(_intType, coordinateComponentCount),
-                        fetchedImage,
-                        UInt(mipLevel));
-                    var coordinates = BuildClampedIntegerCoordinates(
+                    // IMAGE_LOAD uses the guest integer texel coordinates as-is.
+                    // Clamping them changes GCN's lookup semantics and, notably,
+                    // corrupts indexed-texture palette fetches.
+                    var coordinates = BuildIntegerCoordinates(
                         image,
                         0,
-                        imageSize,
                         coordinateComponentCount);
                     sampled = _module.AddInstruction(
                         SpirvOp.ImageFetch,
@@ -3836,13 +3885,50 @@ public static partial class Gen5SpirvTranslator
                     captureBase = requestedCaptureBase;
                 }
                 captureBase = captureBase <= 252 ? captureBase : 248u;
-                for (var component = 0; component < 4; component++)
+
+                if (resource.ComponentKind == ImageComponentKind.Uint &&
+                    outputValues.Count > 0 &&
+                    string.Equals(
+                        Environment.GetEnvironmentVariable(
+                            "SHARPEMU_CAPTURE_PIXEL_IMAGE_NORMALIZE_UINT"),
+                        "1",
+                        StringComparison.Ordinal))
                 {
-                    StoreV(
-                        captureBase + (uint)component,
-                        component < outputValues.Count
-                            ? outputValues[component]
-                            : Bitcast(_uintType, Float(1)));
+                    var captureMax = 15u;
+                    if (uint.TryParse(
+                            Environment.GetEnvironmentVariable(
+                                "SHARPEMU_CAPTURE_PIXEL_IMAGE_UINT_MAX"),
+                            out var requestedCaptureMax) &&
+                        requestedCaptureMax > 0)
+                    {
+                        captureMax = requestedCaptureMax;
+                    }
+
+                    var normalized = _module.AddInstruction(
+                        SpirvOp.ConvertUToF,
+                        _floatType,
+                        outputValues[0]);
+                    normalized = _module.AddInstruction(
+                        SpirvOp.FDiv,
+                        _floatType,
+                        normalized,
+                        Float(captureMax));
+                    var normalizedRaw = Bitcast(_uintType, normalized);
+                    StoreV(captureBase, normalizedRaw);
+                    StoreV(captureBase + 1u, normalizedRaw);
+                    StoreV(captureBase + 2u, normalizedRaw);
+                    StoreV(captureBase + 3u, Bitcast(_uintType, Float(1)));
+                }
+                else
+                {
+                    for (var component = 0; component < 4; component++)
+                    {
+                        StoreV(
+                            captureBase + (uint)component,
+                            component < outputValues.Count
+                                ? outputValues[component]
+                                : Bitcast(_uintType, Float(1)));
+                    }
                 }
             }
 
@@ -4576,18 +4662,7 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
-            var span = addressFilter.AsSpan();
-            if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-            {
-                span = span[2..];
-            }
-
-            return ulong.TryParse(
-                       span,
-                       System.Globalization.NumberStyles.HexNumber,
-                       System.Globalization.CultureInfo.InvariantCulture,
-                       out var address) &&
-                   _state.Program.Address == address;
+            return ProgramAddressMatches(addressFilter);
         }
 
         private bool PixelImageCaptureAddressMatches()
@@ -4599,18 +4674,7 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var span = addressFilter.AsSpan();
-            if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-            {
-                span = span[2..];
-            }
-
-            return ulong.TryParse(
-                       span,
-                       System.Globalization.NumberStyles.HexNumber,
-                       System.Globalization.CultureInfo.InvariantCulture,
-                       out var address) &&
-                   _state.Program.Address == address;
+            return ProgramAddressMatches(addressFilter);
         }
 
         private void CapturePixelVgprs(Gen5ShaderInstruction instruction)
@@ -4683,18 +4747,32 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
+            return ProgramAddressMatches(addressFilter);
+        }
+
+        private bool ProgramAddressMatches(string addressFilter)
+        {
             var span = addressFilter.AsSpan();
             if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
             {
                 span = span[2..];
             }
 
-            return ulong.TryParse(
-                       span,
-                       System.Globalization.NumberStyles.HexNumber,
-                       System.Globalization.CultureInfo.InvariantCulture,
-                       out var address) &&
-                   _state.Program.Address == address;
+            if (!ulong.TryParse(
+                    span,
+                    System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var address))
+            {
+                return false;
+            }
+
+            // Game modules are relocated on every launch. A filter that fits
+            // in 20 bits denotes the stable shader offset within the module;
+            // larger values retain the existing exact-address behavior.
+            return address <= 0xFFFFFul
+                ? (_state.Program.Address & 0xFFFFFul) == address
+                : _state.Program.Address == address;
         }
 
         private void CapturePixelVgprPoints(Gen5ShaderInstruction instruction)
@@ -4734,6 +4812,111 @@ public static partial class Gen5SpirvTranslator
                         Environment.GetEnvironmentVariable(
                             "SHARPEMU_CAPTURE_PIXEL_VGPR_IGNORE_EXEC") != "1");
             }
+        }
+
+        private void CapturePixelFloatColor(Gen5ShaderInstruction instruction)
+        {
+            if (_stage != Gen5SpirvStage.Pixel ||
+                !PixelVgprCaptureAddressMatches())
+            {
+                return;
+            }
+
+            var captureText = Environment.GetEnvironmentVariable(
+                "SHARPEMU_CAPTURE_PIXEL_FLOAT_COLOR");
+            if (string.IsNullOrWhiteSpace(captureText))
+            {
+                return;
+            }
+
+            var fields = captureText.Split(':');
+            if (fields.Length != 3 ||
+                !uint.TryParse(fields[0], out var pc) ||
+                !uint.TryParse(fields[1], out var redSource) ||
+                !uint.TryParse(fields[2], out var greenSource) ||
+                pc != instruction.Pc ||
+                redSource >= 256 ||
+                greenSource >= 256)
+            {
+                return;
+            }
+
+            var destinationBase = 248u;
+            if (uint.TryParse(
+                    Environment.GetEnvironmentVariable(
+                        "SHARPEMU_CAPTURE_PIXEL_VGPR_DEST_BASE"),
+                    out var requestedDestinationBase) &&
+                requestedDestinationBase <= 252)
+            {
+                destinationBase = requestedDestinationBase;
+            }
+
+            var guardWithExec = Environment.GetEnvironmentVariable(
+                "SHARPEMU_CAPTURE_PIXEL_VGPR_IGNORE_EXEC") != "1";
+            StoreV(destinationBase, LoadV(redSource), guardWithExec);
+            StoreV(destinationBase + 1u, LoadV(greenSource), guardWithExec);
+            StoreV(destinationBase + 2u, Bitcast(_uintType, Float(0)), guardWithExec);
+            StoreV(destinationBase + 3u, Bitcast(_uintType, Float(1)), guardWithExec);
+        }
+
+        private void CapturePixelUintColor(Gen5ShaderInstruction instruction)
+        {
+            if (_stage != Gen5SpirvStage.Pixel ||
+                !PixelVgprCaptureAddressMatches())
+            {
+                return;
+            }
+
+            var captureText = Environment.GetEnvironmentVariable(
+                "SHARPEMU_CAPTURE_PIXEL_UINT_COLOR");
+            if (string.IsNullOrWhiteSpace(captureText))
+            {
+                return;
+            }
+
+            var fields = captureText.Split(':');
+            if (fields.Length != 4 ||
+                !uint.TryParse(fields[0], out var pc) ||
+                !uint.TryParse(fields[1], out var redSource) ||
+                !uint.TryParse(fields[2], out var greenSource) ||
+                !uint.TryParse(fields[3], out var maximum) ||
+                pc != instruction.Pc ||
+                redSource >= 256 ||
+                greenSource >= 256 ||
+                maximum == 0)
+            {
+                return;
+            }
+
+            var destinationBase = 248u;
+            if (uint.TryParse(
+                    Environment.GetEnvironmentVariable(
+                        "SHARPEMU_CAPTURE_PIXEL_VGPR_DEST_BASE"),
+                    out var requestedDestinationBase) &&
+                requestedDestinationBase <= 252)
+            {
+                destinationBase = requestedDestinationBase;
+            }
+
+            uint Normalize(uint source)
+            {
+                var value = _module.AddInstruction(
+                    SpirvOp.ConvertUToF,
+                    _floatType,
+                    LoadV(source));
+                return _module.AddInstruction(
+                    SpirvOp.FDiv,
+                    _floatType,
+                    value,
+                    Float(maximum));
+            }
+
+            var guardWithExec = Environment.GetEnvironmentVariable(
+                "SHARPEMU_CAPTURE_PIXEL_VGPR_IGNORE_EXEC") != "1";
+            StoreV(destinationBase, Bitcast(_uintType, Normalize(redSource)), guardWithExec);
+            StoreV(destinationBase + 1u, Bitcast(_uintType, Normalize(greenSource)), guardWithExec);
+            StoreV(destinationBase + 2u, Bitcast(_uintType, Float(0)), guardWithExec);
+            StoreV(destinationBase + 3u, Bitcast(_uintType, Float(1)), guardWithExec);
         }
 
         private void MarkPixelPath(Gen5ShaderInstruction instruction)
@@ -4823,18 +5006,7 @@ public static partial class Gen5SpirvTranslator
                 return PixelExportDebugAddressMatches();
             }
 
-            var span = addressFilter.AsSpan();
-            if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-            {
-                span = span[2..];
-            }
-
-            return ulong.TryParse(
-                       span,
-                       System.Globalization.NumberStyles.HexNumber,
-                       System.Globalization.CultureInfo.InvariantCulture,
-                       out var address) &&
-                   _state.Program.Address == address;
+            return ProgramAddressMatches(addressFilter);
         }
 
         private uint LoadCompressedExportComponent(

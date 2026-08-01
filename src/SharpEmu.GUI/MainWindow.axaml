@@ -465,6 +465,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
+                      <local:SettingRow x:Name="EnvDropStaleAliasedDepthRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_DROP_STALE_ALIASED_DEPTH"
+                                        Description="Ignore a depth buffer whose address is really a leftover color surface.&#10;Fixes titles that render a black gameplay screen (Castlevania Dominus Collection).">
+                        <ToggleSwitch x:Name="EnvDropStaleAliasedDepthToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="EnvHonorRtCompSwapRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_HONOR_RT_COMP_SWAP"
+                                        Description="Honor the render target's channel order (CB_COLOR_INFO.COMP_SWAP).&#10;Fixes titles whose colors show up with red and blue exchanged.">
+                        <ToggleSwitch x:Name="EnvHonorRtCompSwapToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </local:SettingRow>
+
                       <local:SettingRow x:Name="EnvLogDirectMemoryRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_LOG_DIRECT_MEMORY"
                                         Description="Log direct memory allocations and failures to the console.&#10;Use when a game aborts or exits during boot.">
                         <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" OnContent="On" OffContent="Off"

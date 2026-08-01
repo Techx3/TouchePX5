@@ -118,6 +118,35 @@ public sealed class AgcTextureTransportTests
             memory, identity, address, (ulong)pixels.Length));
     }
 
+    [Theory]
+    [InlineData(256u, 1u, 10u, 0u, 9u, 1024UL, true)]
+    [InlineData(16u, 1u, 10u, 0u, 9u, 64UL, true)]
+    [InlineData(257u, 1u, 10u, 0u, 9u, 1028UL, false)]
+    [InlineData(256u, 2u, 10u, 0u, 9u, 2048UL, false)]
+    [InlineData(256u, 1u, 10u, 1u, 9u, 1024UL, false)]
+    [InlineData(256u, 1u, 11u, 0u, 9u, 1024UL, false)]
+    [InlineData(256u, 1u, 10u, 0u, 10u, 1024UL, false)]
+    [InlineData(256u, 1u, 10u, 0u, 9u, 4097UL, false)]
+    public void SmallLinearPaletteClassifier_IsNarrowlyScoped(
+        uint width,
+        uint height,
+        uint format,
+        uint tileMode,
+        uint type,
+        ulong byteCount,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            AgcExports.IsSmallLinearPaletteDescriptor(
+                width,
+                height,
+                format,
+                tileMode,
+                type,
+                byteCount));
+    }
+
     private static TextureContentIdentity CreateIdentity(uint type, uint depth) =>
         new(
             Address: 0x1234,
