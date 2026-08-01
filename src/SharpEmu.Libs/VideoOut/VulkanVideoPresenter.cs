@@ -148,6 +148,9 @@ internal static unsafe class VulkanVideoPresenter
                 ? ImageViewType.Type2DArray
                 : ImageViewType.Type2D;
 
+    internal static ComponentMapping GetGuestComponentMapping(uint dstSelect) =>
+        Presenter.ToVkComponentMapping(dstSelect);
+
     internal enum StorageImageComponentKind
     {
         Float,
@@ -10411,7 +10414,7 @@ internal static unsafe class VulkanVideoPresenter
             return vkSampler;
         }
 
-        private static ComponentMapping ToVkComponentMapping(uint dstSelect)
+        internal static ComponentMapping ToVkComponentMapping(uint dstSelect)
         {
             return new ComponentMapping(
                 ToVkComponentSwizzle(dstSelect & 0x7),

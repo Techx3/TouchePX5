@@ -700,6 +700,11 @@ public static partial class Gen5SpirvTranslator
                     _stage == Gen5SpirvStage.Vertex
                         ? _evaluation.VertexInputs ?? []
                         : []);
+                Gen5SpirvDiagnosticArtifact.TryWrite(
+                    _stage,
+                    _state,
+                    _evaluation,
+                    shader);
                 return true;
             }
             catch (Exception exception)
@@ -4163,9 +4168,17 @@ public static partial class Gen5SpirvTranslator
             var components = new uint[checked((int)componentCount)];
             for (var component = 0; component < components.Length; component++)
             {
-                components[component] = Bitcast(
-                    _intType,
-                    LoadImageIntegerAddress(image, start + component));
+                // Vulkan has no portable 1D-array fallback compatible with the
+                // presenter's existing 2D image views. RDNA DIM_1D therefore
+                // uses a 2D host image whose synthetic Y coordinate must be
+                // zero. Reading vaddr+1 here consumed an unrelated VGPR and
+                // made 256x1 palette IMAGE_LOAD operations intermittently
+                // return black.
+                components[component] = image.Dimension == 0 && component == 1
+                    ? _module.Constant(_intType, 0)
+                    : Bitcast(
+                        _intType,
+                        LoadImageIntegerAddress(image, start + component));
             }
 
             return _module.AddInstruction(
@@ -4183,15 +4196,17 @@ public static partial class Gen5SpirvTranslator
             var components = new uint[checked((int)componentCount)];
             for (var component = 0; component < components.Length; component++)
             {
-                components[component] = ClampSignedCoordinate(
-                    Bitcast(
-                        _intType,
-                        LoadImageIntegerAddress(image, start + component)),
-                    _module.AddInstruction(
-                        SpirvOp.CompositeExtract,
-                        _intType,
-                        imageSize,
-                        (uint)component));
+                components[component] = image.Dimension == 0 && component == 1
+                    ? _module.Constant(_intType, 0)
+                    : ClampSignedCoordinate(
+                        Bitcast(
+                            _intType,
+                            LoadImageIntegerAddress(image, start + component)),
+                        _module.AddInstruction(
+                            SpirvOp.CompositeExtract,
+                            _intType,
+                            imageSize,
+                            (uint)component));
             }
 
             return _module.AddInstruction(
