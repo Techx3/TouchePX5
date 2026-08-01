@@ -139,7 +139,8 @@ public sealed class FirmwareModuleCatalogBuilder
         {
             return CreateFailure(artifact, FirmwareModuleState.RuntimeIncompatible, "CAS object failed hash verification.");
         }
-        if (bytes.AsSpan().StartsWith(new byte[] { 0x4f, 0x15, 0x3d, 0x1d }))
+        if (bytes.AsSpan().StartsWith(new byte[] { 0x4f, 0x15, 0x3d, 0x1d }) ||
+            bytes.AsSpan().StartsWith(new byte[] { 0x54, 0x14, 0xf5, 0xee }))
         {
             return new FirmwareModule(
                 artifact.VirtualPath,

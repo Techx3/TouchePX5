@@ -204,7 +204,8 @@ public sealed class FirmwareDirectoryScanner
         ReadOnlySpan<byte> header)
     {
         if ((header.Length >= 4 && header[0] == 0x7f && header[1..].StartsWith("ELF"u8)) ||
-            header.StartsWith(new byte[] { 0x4f, 0x15, 0x3d, 0x1d }))
+            header.StartsWith(new byte[] { 0x4f, 0x15, 0x3d, 0x1d }) ||
+            header.StartsWith(new byte[] { 0x54, 0x14, 0xf5, 0xee }))
         {
             return (FirmwareArtifactKind.ElfOrSelf, FirmwareArtifactState.Recognized);
         }

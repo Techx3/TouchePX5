@@ -1123,17 +1123,39 @@ public partial class MainWindow : Window
             });
             var result = await _firmwareManager.InstallAsync(sourcePath, progress);
             _settings.ActiveFirmwareSha256 = result.Firmware.Sha256;
+            FirmwareImportResult? profileResult = null;
+            if (result.Firmware.ContainerKind == FirmwareContainerKind.DecryptedPup)
+            {
+                FirmwareProgressBar.IsIndeterminate = true;
+                FirmwareStatusText.Text = Localization.Instance.Get("Options.Firmware.Extracted.Scanning");
+                profileResult = await ImportInstalledFirmwareFileSystemsAsync(result.Firmware);
+                _settings.ActiveFirmwareProfileId = profileResult.Manifest.ProfileId;
+                _settings.EnableExperimentalFirmwareLle = true;
+            }
             _settings.Save();
             RefreshFirmwareControls();
             FirmwareStatusText.Foreground = SuccessLineBrush;
-            FirmwareStatusText.Text = Localization.Instance.Format(
-                result.AlreadyInstalled
-                    ? "Options.Firmware.AlreadyInstalled"
-                    : "Options.Firmware.Installed",
-                result.Firmware.ContainerFormat,
-                result.Firmware.Sha256);
+            FirmwareStatusText.Text = profileResult is null
+                ? Localization.Instance.Format(
+                    result.AlreadyInstalled
+                        ? "Options.Firmware.AlreadyInstalled"
+                        : "Options.Firmware.Installed",
+                    result.Firmware.ContainerFormat,
+                    result.Firmware.Sha256)
+                : Localization.Instance.Format(
+                    profileResult.AlreadyImported
+                        ? "Options.Firmware.Extracted.AlreadyImported"
+                        : "Options.Firmware.Extracted.Imported",
+                    profileResult.Manifest.Artifacts.Count,
+                    profileResult.ModuleCatalog?.Modules.Count ?? 0,
+                    profileResult.Manifest.ProfileId);
         }
-        catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is
+            InvalidDataException or
+            IOException or
+            UnauthorizedAccessException or
+            OverflowException or
+            System.Text.Json.JsonException)
         {
             FirmwareStatusText.Foreground = ErrorLineBrush;
             FirmwareStatusText.Text = Localization.Instance.Format(
@@ -1143,7 +1165,40 @@ public partial class MainWindow : Window
         finally
         {
             InstallFirmwareButton.IsEnabled = true;
+            FirmwareProgressBar.IsIndeterminate = false;
             FirmwareProgressBar.IsVisible = false;
+        }
+    }
+
+    private async Task<FirmwareImportResult> ImportInstalledFirmwareFileSystemsAsync(
+        InstalledFirmware firmware)
+    {
+        var installationDirectory = Path.GetDirectoryName(firmware.PackagePath)
+            ?? throw new InvalidDataException("The installed firmware path is invalid.");
+        var entriesDirectory = Path.Combine(installationDirectory, "entries");
+        var expandedDirectory = Path.Combine(
+            installationDirectory,
+            $".expanded-profile-{Guid.NewGuid():N}");
+        try
+        {
+            var expander = new FirmwareFileSystemExpander();
+            await Task.Run(() => expander.ExpandAsync(entriesDirectory, expandedDirectory));
+            var importer = new FirmwareDirectoryImporter(_firmwareProfileRepository.StoreRoot);
+            return await Task.Run(() => importer.ImportAsync(expandedDirectory));
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(expandedDirectory))
+                {
+                    Directory.Delete(expandedDirectory, recursive: true);
+                }
+            }
+            catch (Exception)
+            {
+                // A stale temporary expansion is harmless and remains local.
+            }
         }
     }
 

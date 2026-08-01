@@ -101,6 +101,24 @@ public sealed class FirmwareDirectoryImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task ScanAndCatalogRecognizePs5SelfMagic()
+    {
+        var root = Path.Combine(_temporaryDirectory, "ps5-self");
+        Directory.CreateDirectory(Path.Combine(root, "system", "common", "lib"));
+        var modulePath = Path.Combine(root, "system", "common", "lib", "libkernel.sprx");
+        File.WriteAllBytes(modulePath, [0x54, 0x14, 0xf5, 0xee, 0x10, 0x01, 0x01, 0x32]);
+        var store = Path.Combine(_temporaryDirectory, "ps5-self-store");
+
+        var imported = await new FirmwareDirectoryImporter(store).ImportAsync(root);
+
+        var artifact = Assert.Single(imported.Manifest.Artifacts);
+        Assert.Equal(FirmwareArtifactKind.ElfOrSelf, artifact.Kind);
+        var module = Assert.Single(imported.ModuleCatalog!.Modules);
+        Assert.Equal(FirmwareModuleFormat.SonySelf, module.Format);
+        Assert.Equal(FirmwareModuleState.UnsupportedEncryption, module.State);
+    }
+
+    [Fact]
     public async Task ReimportRejectsTamperedCasObject()
     {
         var source = CreateExtractedTree("tamper-source", reverseCreationOrder: false);
