@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import Counter
 import hashlib
 import re
 import sys
@@ -17,6 +18,17 @@ NID_SUFFIX = bytes.fromhex("518d64a635ded8c1e6b039b1c3e55230")
 NID_PATTERN = re.compile(r"^[A-Za-z0-9+-]{11}$")
 DEFAULT_NAMES_FILE = Path(__file__).resolve().with_name("ps5_names.txt")
 DEFAULT_EXPORT_FILE = Path(__file__).resolve().parents[1] / "artifacts" / "aerolib.txt"
+DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+UNRESOLVED_IMPORT_PATTERN = re.compile(
+    r"Import#\d+\s+unresolved:\s+nid=([A-Za-z0-9+\-]{11})"
+)
+FAILED_IMPORT_PATTERN = re.compile(
+    r"Import#\d+\s+result:\s+(.+?)\s+\(([A-Za-z0-9+\-]{11})\)"
+)
+EXPORT_ATTRIBUTE_PATTERN = re.compile(r"\[SysAbiExport\((.*?)\)\]", re.DOTALL)
+ATTRIBUTE_STRING_PATTERN = re.compile(
+    r'\b(Nid|ExportName|LibraryName)\s*=\s*"([^"]*)"'
+)
 
 
 def compute_nid(export_name: str) -> str:
@@ -108,6 +120,158 @@ def export_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def build_name_catalog(path: Path) -> dict[str, str]:
+    return {compute_nid(name): name for name in read_names(path)}
+
+
+def scan_implemented_exports(source_root: Path) -> dict[str, list[str]]:
+    exports: dict[str, list[str]] = {}
+    try:
+        source_files = source_root.rglob("*.cs")
+        for source_file in source_files:
+            text = source_file.read_text(encoding="utf-8")
+            for match in EXPORT_ATTRIBUTE_PATTERN.finditer(text):
+                fields = dict(ATTRIBUTE_STRING_PATTERN.findall(match.group(1)))
+                export_name = fields.get("ExportName", "")
+                nid = fields.get("Nid", "")
+                if not nid and export_name:
+                    nid = compute_nid(export_name)
+                if not NID_PATTERN.fullmatch(nid):
+                    continue
+
+                line = text.count("\n", 0, match.start()) + 1
+                library = fields.get("LibraryName", "")
+                label = export_name or "(explicit NID)"
+                if library:
+                    label += f" [{library}]"
+                try:
+                    display_path = source_file.relative_to(source_root)
+                except ValueError:
+                    display_path = source_file
+                label += f" — {display_path}:{line}"
+                exports.setdefault(nid, []).append(label)
+    except OSError as error:
+        raise SystemExit(
+            f"Unable to scan source tree '{source_root}': {error}"
+        ) from error
+    return exports
+
+
+def parse_import_diagnostics(
+    path: Path,
+) -> tuple[Counter[str], Counter[tuple[str, str]]]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise SystemExit(f"Unable to read log '{path}': {error}") from error
+
+    unresolved = Counter(UNRESOLVED_IMPORT_PATTERN.findall(text))
+    failed = Counter(
+        (nid, result.strip())
+        for result, nid in FAILED_IMPORT_PATTERN.findall(text)
+    )
+    return unresolved, failed
+
+
+def markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ")
+
+
+def render_audit_report(
+    log_path: Path,
+    catalog: dict[str, str],
+    implemented: dict[str, list[str]],
+    unresolved: Counter[str],
+    failed: Counter[tuple[str, str]],
+    limit: int,
+) -> str:
+    unresolved_rows = unresolved.most_common(limit or None)
+    failed_rows = failed.most_common(limit or None)
+    lines = [
+        "# PS5 ABI Runtime Audit",
+        "",
+        f"Log: `{log_path}`",
+        "",
+        f"- Unique unresolved NIDs: **{len(unresolved)}**",
+        f"- Unresolved calls: **{sum(unresolved.values())}**",
+        f"- Unique non-success results: **{len(failed)}**",
+        f"- Non-success calls: **{sum(failed.values())}**",
+        "",
+        "## Unresolved imports",
+        "",
+        "| Calls | NID | Catalog name | Local implementation |",
+        "| ---: | --- | --- | --- |",
+    ]
+    if unresolved_rows:
+        for nid, count in unresolved_rows:
+            locations = "<br>".join(implemented.get(nid, [])) or "Missing"
+            lines.append(
+                f"| {count} | `{nid}` | "
+                f"{markdown_cell(catalog.get(nid, 'Unknown'))} | "
+                f"{markdown_cell(locations)} |"
+            )
+    else:
+        lines.append("| 0 | — | — | None |")
+
+    lines.extend(
+        [
+            "",
+            "## Imports returning errors",
+            "",
+            "These imports are registered, but their behavior or guest arguments may still need work.",
+            "",
+            "| Calls | NID | Catalog name | Result | Local implementation |",
+            "| ---: | --- | --- | --- | --- |",
+        ]
+    )
+    if failed_rows:
+        for (nid, result), count in failed_rows:
+            locations = "<br>".join(implemented.get(nid, [])) or "Not found"
+            lines.append(
+                f"| {count} | `{nid}` | "
+                f"{markdown_cell(catalog.get(nid, 'Unknown'))} | "
+                f"{markdown_cell(result)} | {markdown_cell(locations)} |"
+            )
+    else:
+        lines.append("| 0 | — | — | — | None |")
+
+    lines.extend(
+        [
+            "",
+            "This report is generated only from Touché PX5 source, its local name catalog, "
+            "and runtime diagnostics. It does not embed third-party SDK source code.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def audit_log(args: argparse.Namespace) -> int:
+    catalog = build_name_catalog(args.names)
+    implemented = scan_implemented_exports(args.source_root)
+    unresolved, failed = parse_import_diagnostics(args.log)
+    report = render_audit_report(
+        args.log,
+        catalog,
+        implemented,
+        unresolved,
+        failed,
+        args.limit,
+    )
+
+    if args.output:
+        try:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(report, encoding="utf-8", newline="\n")
+        except OSError as error:
+            print(f"Unable to write audit report '{args.output}': {error}", file=sys.stderr)
+            return 1
+        print(f"Wrote ABI audit to {args.output}")
+    else:
+        print(report)
+    return 0
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Inspect the SharpEmu PS5 export-name/NID catalog.",
@@ -116,7 +280,8 @@ def create_parser() -> argparse.ArgumentParser:
             "  python scripts/aerolib_catalog.py lookup Zxa0VhQVTsk\n"
             "  python scripts/aerolib_catalog.py lookup sceKernelWaitSema\n"
             "  python scripts/aerolib_catalog.py search VideoOut --limit 20\n"
-            "  python scripts/aerolib_catalog.py export"
+            "  python scripts/aerolib_catalog.py export\n"
+            "  python scripts/aerolib_catalog.py audit-log emulator.log"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -167,6 +332,30 @@ def create_parser() -> argparse.ArgumentParser:
         help="output ordering (default: nid)",
     )
     export_parser.set_defaults(handler=export_catalog)
+
+    audit_parser = subparsers.add_parser(
+        "audit-log",
+        help="rank unresolved and failing imports found in an emulator log",
+    )
+    audit_parser.add_argument("log", type=Path, help="Touché PX5 diagnostic log")
+    audit_parser.add_argument(
+        "--source-root",
+        type=Path,
+        default=DEFAULT_SOURCE_ROOT,
+        help=f"C# source tree (default: {DEFAULT_SOURCE_ROOT})",
+    )
+    audit_parser.add_argument(
+        "--output",
+        type=Path,
+        help="optional Markdown output path; stdout is used when omitted",
+    )
+    audit_parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="maximum rows per section; 0 means unlimited",
+    )
+    audit_parser.set_defaults(handler=audit_log)
 
     return parser
 
