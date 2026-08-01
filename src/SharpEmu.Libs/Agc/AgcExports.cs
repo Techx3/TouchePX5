@@ -3489,6 +3489,16 @@ public static partial class AgcExports
     public static int SuspendPoint(CpuContext ctx)
     {
         TraceAgc("agc.suspend_point");
+
+        // Treat the guest suspend point as a cooperative scheduling boundary.
+        // Returning immediately can leave Unity's graphics worker spinning here,
+        // starving the worker that submits the DCB it just finished building.
+        _ = GuestThreadExecution.RequestCurrentThreadBlock(
+            ctx,
+            "agc_suspend_point",
+            blockDeadlineTimestamp: GuestThreadExecution.ComputeDeadlineTimestamp(
+                TimeSpan.FromMilliseconds(1)));
+
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
