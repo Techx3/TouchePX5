@@ -1832,7 +1832,15 @@ internal static unsafe class VulkanVideoPresenter
         {
             if (_closed ||
                 _thread is null ||
-                !_availableGuestImages.ContainsKey(address))
+                !_availableGuestImages.ContainsKey(address) ||
+                // sceVideoOutRegisterBuffers records the address before AGC
+                // has necessarily produced a Vulkan image for it. Treating
+                // registration alone as residency accepts the ordered flip,
+                // suppresses AGC's translated-draw fallback, then fails later
+                // in ExecuteOrderedGuestFlip because _guestImages has no
+                // source. A queued GPU writer is the narrow evidence that the
+                // image will exist by the time this ordered flip executes.
+                !_guestImageWorkSequences.ContainsKey(address))
             {
                 return false;
             }

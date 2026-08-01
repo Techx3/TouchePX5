@@ -52,7 +52,20 @@ public enum Gen5PixelOutputKind
 public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
-    Gen5PixelOutputKind Kind);
+    Gen5PixelOutputKind Kind,
+    // Which of the shader's exported components feeds each attachment
+    // component, two bits each: result[i] = export[(ComponentMapping >> i*2) & 3].
+    // CB_COLOR*_INFO.COMP_SWAP decides this; 0xE4 (0,1,2,3) is the identity the
+    // host format already gives, so most targets keep it and pay nothing.
+    byte ComponentMapping = Gen5ComponentMapping.Identity);
+
+public static class Gen5ComponentMapping
+{
+    public const byte Identity = 0xE4;
+
+    public static uint Map(byte mapping, int component) =>
+        (uint)((mapping >> (component * 2)) & 0x3);
+}
 
 public readonly record struct Gen5ShaderResourceMapping(
     Gen5ShaderResourceKind Kind,

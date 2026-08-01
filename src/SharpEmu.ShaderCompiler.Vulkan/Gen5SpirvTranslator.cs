@@ -333,7 +333,8 @@ public static partial class Gen5SpirvTranslator
         private readonly record struct SpirvPixelOutput(
             uint Variable,
             uint Type,
-            Gen5PixelOutputKind Kind);
+            Gen5PixelOutputKind Kind,
+            byte ComponentMapping = Gen5ComponentMapping.Identity);
 
         public CompilationContext(
             Gen5SpirvStage stage,
@@ -1324,7 +1325,11 @@ public static partial class Gen5SpirvTranslator
                         binding.HostLocation);
                     _pixelOutputs.Add(
                         binding.GuestSlot,
-                        new SpirvPixelOutput(variable, outputType, binding.Kind));
+                        new SpirvPixelOutput(
+                            variable,
+                            outputType,
+                            binding.Kind,
+                            binding.ComponentMapping));
                     _interfaces.Add(variable);
                 }
             }
@@ -4478,6 +4483,22 @@ public static partial class Gen5SpirvTranslator
                         Gen5PixelOutputKind.Sint => Bitcast(_intType, raw),
                         _ => Bitcast(_floatType, raw),
                     };
+                }
+
+                // CB_COLOR*_INFO.COMP_SWAP can route a different exported
+                // component into each attachment channel. Permuting the ids we
+                // already hold costs nothing: no extra SPIR-V is emitted, and
+                // the identity mapping leaves the array untouched.
+                if (output.ComponentMapping != Gen5ComponentMapping.Identity)
+                {
+                    var permuted = new uint[4];
+                    for (var component = 0; component < 4; component++)
+                    {
+                        permuted[component] = values[
+                            Gen5ComponentMapping.Map(output.ComponentMapping, component)];
+                    }
+
+                    values = permuted;
                 }
 
                 var vector = _module.AddInstruction(

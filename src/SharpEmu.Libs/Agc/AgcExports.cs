@@ -259,7 +259,7 @@ public static partial class AgcExports
     private static readonly ConcurrentDictionary<
         (ulong Es, ulong EsState, ulong Ps, ulong PsState, ulong OutputLayout,
          uint OutputCount, uint Attributes, uint PsInputEna, uint PsInputAddr,
-         ulong PsInputCntl, ulong AliasAlignment),
+         ulong PsInputCntl, ulong AliasAlignment, ulong ExportMapping),
         (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel)> _graphicsShaderCache = new();
     private static readonly ConcurrentDictionary<
         (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ,
@@ -493,6 +493,39 @@ public static partial class AgcExports
             return maximumMipLevels;
         }
     }
+
+    // CB_COLOR*_INFO.COMP_SWAP picks which exported component each attachment
+    // channel stores. Only the one combination we have measured is mapped: a
+    // single-channel target with SWAP_ALT_REV keeps the shader's ALPHA, which
+    // Castlevania uses to build the title-logo mask (the consumer then swizzles
+    // that lone channel back into alpha, confirming the intent). Everything
+    // else stays identity rather than inventing semantics for combinations no
+    // title has exercised here -- a wrong guess would corrupt working games.
+    private static byte GetRenderTargetComponentMapping(RenderTargetDescriptor target)
+    {
+        if (!_honorSingleChannelCompSwap ||
+            target.CompSwap != CompSwapAltReversed ||
+            !IsSingleChannelRenderTargetFormat(target.Format))
+        {
+            return Gen5ComponentMapping.Identity;
+        }
+
+        // result[0] = export[3]; the remaining components are never stored by a
+        // one-channel attachment, so leave them in their identity slots.
+        return unchecked((byte)((Gen5ComponentMapping.Identity & 0xFC) | 0x3));
+    }
+
+    private const uint CompSwapAltReversed = 3;
+
+    // Only the 8-bit single-channel layout, which is the one measured. The
+    // wider 16- and 32-bit single-channel formats plausibly behave the same,
+    // but no title here has exercised them and a wrong guess would corrupt
+    // games that work today.
+    private static bool IsSingleChannelRenderTargetFormat(uint format) =>
+        format is 1;
+
+    private static readonly bool _honorSingleChannelCompSwap =
+        Environment.GetEnvironmentVariable("SHARPEMU_HONOR_SINGLE_CHANNEL_COMP_SWAP") == "1";
 
     private readonly record struct RenderTargetDescriptor(
         uint Slot,
@@ -7699,10 +7732,13 @@ public static partial class AgcExports
         // byte positions. Replaces a per-draw LINQ + string build that allocated on every
         // draw, cache hit or not; the target count disambiguates trailing zero bytes.
         var outputLayout = 0UL;
+        var exportMapping = 0UL;
         for (var index = 0; index < renderTargets.Length; index++)
         {
             outputLayout |= (ulong)(((renderTargets[index].Slot & 0x3Fu) << 2) |
                 (uint)renderTargetOutputKinds[index]) << (index * 8);
+            exportMapping |= (ulong)GetRenderTargetComponentMapping(renderTargets[index])
+                << (index * 8);
         }
 
         var attributeCount = requiredVertexOutputCount;
@@ -7724,7 +7760,8 @@ public static partial class AgcExports
             psInputEna,
             psInputAddr,
             psInputCntlFingerprint,
-            _storageBufferOffsetAlignment);
+            _storageBufferOffsetAlignment,
+            exportMapping);
 
         var guestGlobalBuffers =
             pixelEvaluation.GlobalMemoryBindings.Count +
@@ -7782,7 +7819,8 @@ public static partial class AgcExports
                     pixelOutputs[location] = new Gen5PixelOutputBinding(
                         renderTargets[location].Slot,
                         (uint)location,
-                        renderTargetOutputKinds[location]);
+                        renderTargetOutputKinds[location],
+                        GetRenderTargetComponentMapping(renderTargets[location]));
                 }
 
                 if (!GuestGpu.Current.TryCompilePixelShader(
