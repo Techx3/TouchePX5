@@ -59,6 +59,9 @@ public static partial class AgcExports
     private const uint ItReleaseMem = 0x49;
     private const uint ItDmaData = 0x50;
     private const uint ItRewind = 0x59;
+    private const uint ItLoadUconfigReg = 0x5E;
+    private const uint ItLoadShReg = 0x5F;
+    private const uint ItLoadContextReg = 0x61;
     private const uint ItSetContextReg = 0x69;
     private const uint ItSetShReg = 0x76;
     private const uint ItSetUconfigReg = 0x79;
@@ -6468,7 +6471,8 @@ public static partial class AgcExports
                 ItSetContextReg => state.CxRegisters,
                 _ => state.UcRegisters,
             };
-            for (uint index = 0; index < packetLength - 2; index++)
+            var valueCount = BoundRegisterLoadCount(startRegister, packetLength - 2);
+            for (uint index = 0; index < valueCount; index++)
             {
                 if (!TryReadUInt32(
                         ctx,
@@ -6485,6 +6489,12 @@ public static partial class AgcExports
                 }
             }
 
+            return;
+        }
+
+        if (op is ItLoadContextReg or ItLoadShReg or ItLoadUconfigReg)
+        {
+            ApplySubmittedRegisterShadow(ctx, state, packetAddress, packetLength, op);
             return;
         }
 
@@ -6524,6 +6534,11 @@ public static partial class AgcExports
             var decodedRegisterOffset = register == RCxRegsIndirect
                 ? DecodeIndirectCxRegisterOffset(registerOffset)
                 : NormalizeIndirectRegisterOffset(registerOffset);
+            if (decodedRegisterOffset >= RegisterSpaceDwords)
+            {
+                continue;
+            }
+
             destination[decodedRegisterOffset] = value;
             if (register == RUcRegsIndirect)
             {
@@ -6534,6 +6549,101 @@ public static partial class AgcExports
 
     internal static uint NormalizeIndirectRegisterOffset(uint rawOffset) =>
         rawOffset & ~RegisterSelectorMask;
+
+    private const uint RegisterSpaceDwords = 0x400;
+
+    internal static uint BoundRegisterLoadCount(uint registerOffset, uint requestedCount)
+    {
+        if (registerOffset >= RegisterSpaceDwords)
+        {
+            return 0;
+        }
+
+        return Math.Min(requestedCount, RegisterSpaceDwords - registerOffset);
+    }
+
+    private static void ApplySubmittedRegisterShadow(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong packetAddress,
+        uint packetLength,
+        uint op)
+    {
+        // Header + address lo/hi + at least one (offset,count) range.
+        if (packetLength < 5 ||
+            !TryReadUInt32(ctx, packetAddress + 4, out var addressLow) ||
+            !TryReadUInt32(ctx, packetAddress + 8, out var addressHigh))
+        {
+            return;
+        }
+
+        var shadowAddress = ((ulong)(addressHigh & 0xFFFFu) << 32) | addressLow;
+        if (shadowAddress == 0)
+        {
+            return;
+        }
+
+        var ranges = new List<(uint Offset, uint[] Values)>();
+        var anyValue = false;
+        for (uint packetIndex = 3; packetIndex + 1 < packetLength; packetIndex += 2)
+        {
+            if (!TryReadUInt32(ctx, packetAddress + ((ulong)packetIndex * 4), out var rawOffset) ||
+                !TryReadUInt32(ctx, packetAddress + ((ulong)(packetIndex + 1) * 4), out var rawCount))
+            {
+                return;
+            }
+
+            var registerOffset = rawOffset & 0xFFFFu;
+            var count = BoundRegisterLoadCount(registerOffset, rawCount & 0xFFFFu);
+            if (count == 0)
+            {
+                continue;
+            }
+
+            var values = new uint[count];
+            for (uint index = 0; index < count; index++)
+            {
+                if (!TryReadUInt32(
+                        ctx,
+                        shadowAddress + ((ulong)(registerOffset + index) * sizeof(uint)),
+                        out var value))
+                {
+                    return;
+                }
+
+                values[index] = value;
+                anyValue |= value != 0;
+            }
+
+            ranges.Add((registerOffset, values));
+        }
+
+        // An empty shadow is not a valid reset. Applying it would erase state
+        // established by an inline/indirect SET packet immediately beforehand.
+        if (!anyValue)
+        {
+            return;
+        }
+
+        var destination = op switch
+        {
+            ItLoadShReg => state.ShRegisters,
+            ItLoadContextReg => state.CxRegisters,
+            _ => state.UcRegisters,
+        };
+        foreach (var (registerOffset, values) in ranges)
+        {
+            for (uint index = 0; index < values.Length; index++)
+            {
+                var destinationOffset = registerOffset + index;
+                destination[destinationOffset] = values[index];
+                if (op == ItLoadUconfigReg)
+                {
+                    ApplyUcIndexTypeIfNeeded(state, destinationOffset, values[index]);
+                }
+            }
+        }
+    }
 
     internal static uint DecodeIndirectCxRegisterOffset(uint rawOffset)
     {

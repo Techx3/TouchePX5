@@ -31,4 +31,18 @@ public sealed class AgcIndirectRegisterTests
     {
         Assert.Equal(expected, AgcExports.NormalizeIndirectRegisterOffset(encoded));
     }
+
+    [Theory]
+    [InlineData(0x000u, 0x010u, 0x010u)]
+    [InlineData(0x3F0u, 0x040u, 0x010u)]
+    [InlineData(0x3FFu, 0x2000u, 0x001u)]
+    [InlineData(0x400u, 0x001u, 0x000u)]
+    [InlineData(0x800u, 0x100u, 0x000u)]
+    public void BoundRegisterLoadCountNeverCrossesRegisterSpace(
+        uint offset,
+        uint requested,
+        uint expected)
+    {
+        Assert.Equal(expected, AgcExports.BoundRegisterLoadCount(offset, requested));
+    }
 }
