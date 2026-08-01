@@ -471,9 +471,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvHonorRtCompSwapRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_HONOR_RT_COMP_SWAP"
-                                        Description="Honor the render target's channel order (CB_COLOR_INFO.COMP_SWAP).&#10;Fixes titles whose colors show up with red and blue exchanged.">
-                        <ToggleSwitch x:Name="EnvHonorRtCompSwapToggle" OnContent="On" OffContent="Off"
+                      <local:SettingRow x:Name="EnvDisableRtCompSwapRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_DISABLE_RT_COMP_SWAP"
+                                        Description="Compatibility: ignore the render target's channel order (CB_COLOR_INFO.COMP_SWAP).&#10;Only for titles that looked correct before this was honored.">
+                        <ToggleSwitch x:Name="EnvDisableRtCompSwapToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
