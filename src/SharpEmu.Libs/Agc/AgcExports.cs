@@ -345,6 +345,11 @@ public static partial class AgcExports
     private static long _labelProducerSequence;
     private static readonly object _labelProducerGate = new();
     private static readonly List<LabelProducerTrace> _labelProducers = [];
+    private const int LabelProducerSoftBound = 4096;
+    // Raised when a compaction pass frees nothing because every record is still
+    // active, so registration does not rescan the whole list on every add while
+    // a queue is suspended. Reset once compaction can make progress again.
+    private static int _labelProducerCompactionBound = LabelProducerSoftBound;
     private static readonly HashSet<(object Memory, ulong Address)>
         _tracedProducerlessWaits = new();
     private static long _shaderTranslationMissTraceCount;
@@ -640,10 +645,20 @@ public static partial class AgcExports
         public uint DrawIndexOffset { get; set; }
         public bool PredicateSkip { get; set; }
         public string QueueName { get; set; } = "graphics";
+        // Ident this queue's end-of-pipe completion interrupt is published under.
+        // The graphics queue keeps 0; a compute queue takes the owner handle it
+        // was submitted with, which is the same value the guest registers through
+        // sceAgcDriverAddEqEvent.
+        public ulong CompletionEventId { get; set; }
         public ulong ActiveSubmissionId { get; set; }
         public Queue<PendingSubmission> PendingSubmissions { get; } = new();
         public bool HasActiveSubmission { get; set; }
         public bool IsSuspended { get; set; }
+
+        // Set when parsing stops on an INDIRECT_BUFFER packet so the caller can
+        // continue into the buffer it links to.
+        public ulong PendingChainAddress { get; set; }
+        public uint PendingChainDwords { get; set; }
         public ulong CompletionEventNotifiedSubmissionId { get; set; }
         public Dictionary<(uint Op, uint Register), uint> FramePacketCounts { get; } = new();
         public uint FramePacketCount { get; set; }
@@ -3254,6 +3269,7 @@ public static partial class AgcExports
             !TryReadUInt64(ctx, packetAddress, out var commandAddress) ||
             !TryReadUInt32(ctx, packetAddress + 8, out var dwordCount))
         {
+            TraceAgc($"agc.driver_submit_dcb_rejected packet=0x{packetAddress:X16}");
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
@@ -3266,10 +3282,9 @@ public static partial class AgcExports
             }
         }
 
-        if (tracePackets)
-        {
-            TraceAgc($"agc.driver_submit_dcb packet=0x{packetAddress:X16} addr=0x{commandAddress:X16} dwords={dwordCount}");
-        }
+        TraceAgc(
+            $"agc.driver_submit_dcb packet=0x{packetAddress:X16} addr=0x{commandAddress:X16} " +
+            $"dwords={dwordCount} end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
         GuestGpu.Current.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
@@ -3316,12 +3331,10 @@ public static partial class AgcExports
             }
         }
 
-        if (tracePackets)
-        {
-            TraceAgc(
-                $"agc.driver_submit_acb owner={ownerHandle} packet=0x{packetAddress:X16} " +
-                $"addr=0x{commandAddress:X16} dwords={dwordCount}");
-        }
+        TraceAgc(
+            $"agc.driver_submit_acb owner={ownerHandle} packet=0x{packetAddress:X16} " +
+            $"addr=0x{commandAddress:X16} dwords={dwordCount} " +
+            $"end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
         GuestGpu.Current.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
@@ -3334,6 +3347,7 @@ public static partial class AgcExports
             }
 
             queueState.QueueName = $"acb.compute[{ownerHandle}]";
+            queueState.CompletionEventId = ownerHandle;
             EnqueueSubmittedDcb(
                 ctx,
                 gpuState,
@@ -3524,33 +3538,47 @@ public static partial class AgcExports
         SubmittedDcbState state,
         ulong submissionId)
     {
-        if (!ReferenceEquals(state, gpuState.Graphics) ||
-            state.CompletionEventNotifiedSubmissionId == submissionId)
+        if (state.CompletionEventNotifiedSubmissionId == submissionId)
         {
             return;
         }
 
         state.CompletionEventNotifiedSubmissionId = submissionId;
+        // Hardware raises an end-of-pipe interrupt for every submission on every
+        // queue, so this is unconditional. It stays safe for titles that do not
+        // want it because delivery is registration-gated: TriggerRegisteredEvents
+        // only queues onto equeues that registered this exact ident through
+        // sceAgcDriverAddEqEvent. Graphics keeps ident 0; a compute queue uses the
+        // owner handle it was submitted under.
+        var completionEventId = state.CompletionEventId;
+        var isGraphics = ReferenceEquals(state, gpuState.Graphics);
+        var queueName = state.QueueName;
         void TriggerCompletionEvents()
         {
             var triggered = KernelEventQueueCompatExports.TriggerRegisteredEvents(
-                ident: 0,
+                completionEventId,
                 KernelEventQueueCompatExports.KernelEventFilterGraphics,
-                data: 0);
-            if (_compatibilitySubmitCompletionEvent)
+                completionEventId);
+            // The broad fan-out wakes graphics registrations whose ident never
+            // matches anything the driver publishes. That is a compatibility
+            // guess rather than hardware behavior, so it stays opt-in and stays
+            // on the graphics queue where it was measured.
+            if (isGraphics && _compatibilitySubmitCompletionEvent)
             {
                 triggered += KernelEventQueueCompatExports.TriggerRegisteredEventsDistinct(
                     KernelEventQueueCompatExports.KernelEventFilterGraphics);
             }
             TraceAgc(
-                $"agc.driver_submit_dcb completion submission={submissionId} " +
-                $"queues={triggered}");
+                $"agc.completion_event queue={queueName} submission={submissionId} " +
+                $"event=0x{completionEventId:X} queues={triggered}");
         }
 
-        // A DCB is complete only after its translated Vulkan work and ordered
-        // guest-memory writes have finished. Put the notification on that same
-        // logical graphics queue instead of approximating completion with a
-        // timer, which can wake Unity while its upload data is still stale.
+        // A submission is complete only after its translated Vulkan work and
+        // ordered guest-memory writes have finished. Put the notification on that
+        // same logical queue instead of approximating completion with a timer or a
+        // ThreadPool hop, either of which can only make the interrupt late and
+        // reorder it against registration changes (and can wake Unity while its
+        // upload data is still stale).
         if (GuestGpu.Current.SubmitOrderedGuestAction(
                 TriggerCompletionEvents,
                 $"agc submit completion {submissionId}") == 0)
@@ -3578,32 +3606,71 @@ public static partial class AgcExports
         using var guestQueueScope = GuestGpu.Current.EnterGuestQueue(
             state.QueueName,
             state.ActiveSubmissionId);
-        var windowByteCount = checked((int)(dwordCount * sizeof(uint)));
-        var rented = GuestDataPool.Shared.Rent(windowByteCount);
-        try
+        // A submission is one link of a chain, not necessarily the whole stream:
+        // when a title's command arena fills mid-frame it continues in a fresh
+        // buffer and links the two with an INDIRECT_BUFFER packet, then submits
+        // only the first link. Stopping at the end of the submitted window drops
+        // every packet past the switch -- including the flip and the end-of-frame
+        // completion labels the guest is waiting on.
+        for (var chainDepth = 0; ; chainDepth++)
         {
-            if (ctx.Memory.TryRead(commandAddress, rented.AsSpan(0, windowByteCount)))
+            if (chainDepth > MaxSubmittedChainDepth)
             {
-                _dcbWindowBuffer = rented;
-                _dcbWindowStart = commandAddress;
-                _dcbWindowByteLength = windowByteCount;
+                TraceAgc(
+                    $"agc.dcb_chain_depth_exceeded queue={state.QueueName} " +
+                    $"submission={state.ActiveSubmissionId} addr=0x{commandAddress:X16}");
+                return false;
             }
 
-            return ParseSubmittedDcbCore(
-                ctx,
-                gpuState,
-                state,
-                commandAddress,
-                dwordCount,
-                tracePackets);
-        }
-        finally
-        {
-            _dcbWindowBuffer = null;
-            _dcbWindowByteLength = 0;
-            GuestDataPool.Shared.Return(rented);
+            state.PendingChainAddress = 0;
+            state.PendingChainDwords = 0;
+            var windowByteCount = checked((int)(dwordCount * sizeof(uint)));
+            var rented = GuestDataPool.Shared.Rent(windowByteCount);
+            bool suspended;
+            try
+            {
+                if (ctx.Memory.TryRead(commandAddress, rented.AsSpan(0, windowByteCount)))
+                {
+                    _dcbWindowBuffer = rented;
+                    _dcbWindowStart = commandAddress;
+                    _dcbWindowByteLength = windowByteCount;
+                }
+
+                suspended = ParseSubmittedDcbCore(
+                    ctx,
+                    gpuState,
+                    state,
+                    commandAddress,
+                    dwordCount,
+                    tracePackets);
+            }
+            finally
+            {
+                _dcbWindowBuffer = null;
+                _dcbWindowByteLength = 0;
+                GuestDataPool.Shared.Return(rented);
+            }
+
+            if (suspended)
+            {
+                return true;
+            }
+
+            var chainAddress = state.PendingChainAddress;
+            var chainDwords = state.PendingChainDwords;
+            if (chainAddress == 0 || chainDwords == 0 || chainDwords > 1_000_000)
+            {
+                return false;
+            }
+
+            commandAddress = chainAddress;
+            dwordCount = chainDwords;
         }
     }
+
+    // Deep enough for a title that links one continuation buffer per frame,
+    // shallow enough that a self-referencing chain cannot spin forever.
+    private const int MaxSubmittedChainDepth = 64;
 
     private static bool ParseSubmittedDcbCore(
         CpuContext ctx,
@@ -3729,6 +3796,32 @@ public static partial class AgcExports
 
                 offset += length;
                 continue;
+            }
+
+            if (op == ItIndirectBuffer &&
+                length >= 4 &&
+                TryReadUInt32(ctx, currentAddress + 4, out var chainLow) &&
+                TryReadUInt32(ctx, currentAddress + 8, out var chainHigh) &&
+                TryReadUInt32(ctx, currentAddress + 12, out var chainDwords))
+            {
+                var chainAddress = ((ulong)(chainHigh & 0xFFFFu) << 32) | chainLow;
+                var chainLength = chainDwords & 0xFFFFFu;
+                // Titles emit a zeroed INDIRECT_BUFFER as padding for a branch they
+                // decided not to take. Only a populated one redirects the stream.
+                if (chainAddress != 0 && chainLength != 0)
+                {
+                    state.PendingChainAddress = chainAddress;
+                    state.PendingChainDwords = chainLength;
+                    TraceAgc(
+                        $"agc.dcb_chain queue={state.QueueName} " +
+                        $"submission={state.ActiveSubmissionId} " +
+                        $"packet=0x{currentAddress:X16} " +
+                        $"target=0x{chainAddress:X16} dwords={chainLength}");
+
+                    // The link is a jump, not a call: whatever follows it in this
+                    // buffer is unreachable padding.
+                    return false;
+                }
             }
 
             if (op == ItNop &&
@@ -4418,9 +4511,21 @@ public static partial class AgcExports
         };
         lock (_labelProducerGate)
         {
-            if (_labelProducers.Count >= 4096)
+            if (_labelProducers.Count >= _labelProducerCompactionBound)
             {
-                _labelProducers.RemoveRange(0, 1024);
+                // Active producer records are synchronization state, not a
+                // diagnostic cache. Removing one can hide an earlier
+                // same-submission label write and make a valid in-stream fence
+                // suspend forever. Compact only completed history; if all
+                // records are active, correctness takes precedence over the
+                // soft diagnostic bound.
+                var removed = CompactCompletedEntries(
+                    _labelProducers,
+                    static candidate => candidate.Completed,
+                    targetCount: LabelProducerSoftBound * 3 / 4);
+                _labelProducerCompactionBound = removed == 0
+                    ? _labelProducers.Count * 2
+                    : LabelProducerSoftBound;
             }
 
             _labelProducers.Add(producer);
@@ -4439,6 +4544,36 @@ public static partial class AgcExports
         }
 
         return producer;
+    }
+
+    internal static int CompactCompletedEntries<T>(
+        List<T> entries,
+        Func<T, bool> isCompleted,
+        int targetCount)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        ArgumentNullException.ThrowIfNull(isCompleted);
+        targetCount = Math.Max(0, targetCount);
+
+        // Single order-preserving pass. Removing one-by-one would shift the
+        // tail on every eviction, which is quadratic on a list this size and
+        // runs while the label gate is held.
+        var removable = entries.Count - targetCount;
+        var removed = 0;
+        var write = 0;
+        for (var read = 0; read < entries.Count; read++)
+        {
+            if (removed < removable && isCompleted(entries[read]))
+            {
+                removed++;
+                continue;
+            }
+
+            entries[write++] = entries[read];
+        }
+
+        entries.RemoveRange(write, entries.Count - write);
+        return removed;
     }
 
     private static void CompleteLabelProducer(LabelProducerTrace? producer)
@@ -6135,6 +6270,13 @@ public static partial class AgcExports
                     GpuWaitRegistry.RecordProduced(
                         ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
                 }
+                else if (!wroteData && dataSelection is 1 or 2)
+                {
+                    // See ApplySubmittedReleaseMem: a dropped label write strands
+                    // every waiter on this label permanently.
+                    ReportLabelWriteFailure(
+                        "release_mem_standard", destinationAddress, data, dataSelection);
+                }
 
                 if (tracePacket)
                 {
@@ -6148,6 +6290,33 @@ public static partial class AgcExports
             packetAddress,
             writesGuestMemory ? destinationAddress : 0,
             writesGuestMemory ? writeLength : 0);
+    }
+
+    private static long _labelWriteFailureCount;
+
+    /// <summary>
+    /// Reports a GPU release-label write that could not reach guest memory.
+    /// Rate-limited (first 16, then powers of two) because a wedged queue can
+    /// retry, but never silenced: this is the difference between a diagnosable
+    /// fault and a permanently suspended graphics queue with no explanation.
+    /// </summary>
+    private static void ReportLabelWriteFailure(
+        string packet,
+        ulong destinationAddress,
+        ulong data,
+        uint dataSelection)
+    {
+        var count = Interlocked.Increment(ref _labelWriteFailureCount);
+        if (count > 16 && (count & (count - 1)) != 0)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][ERROR] agc.label_write_failed packet={packet} " +
+            $"dst=0x{destinationAddress:X16} data=0x{data:X16} " +
+            $"data_sel={dataSelection} count={count} — a suspended WAIT_REG_MEM " +
+            $"on this label can no longer be satisfied or deadlock-broken.");
     }
 
     private static (uint Destination, uint DataSelection)
@@ -6209,6 +6378,15 @@ public static partial class AgcExports
                 {
                     GpuWaitRegistry.RecordProduced(
                         ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
+                }
+                else if (!wroteData && dataSelection is 1 or 2)
+                {
+                    // A label write that fails is not a benign miss: this packet
+                    // is the producer a suspended WAIT_REG_MEM is waiting for, and
+                    // RecordProduced above is skipped, so the deadlock breaker has
+                    // no value to replay either. The queue then never resumes.
+                    // Never let that happen quietly.
+                    ReportLabelWriteFailure("release_mem", destinationAddress, data, dataSelection);
                 }
 
                 if (tracePacket)
@@ -14033,6 +14211,58 @@ public static partial class AgcExports
         }
 
         return ReturnPointer(ctx, cmd);
+    }
+
+    // Matches the 4-dword INDIRECT_BUFFER packet CbBranch writes below.
+    [SysAbiExport(
+        Nid = "uZW-mqsxkrM",
+        ExportName = "sceAgcCbBranchGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbBranchGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 4u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    // How a title continues a frame whose command arena filled: it branches from
+    // the tail of the exhausted buffer into a fresh one and submits only the first
+    // buffer, leaving the driver to follow the link. Dropping this packet strands
+    // everything written after the switch -- for UE 4.27 that is the rest of the
+    // frame, including its flip and the end-of-frame labels the guest's AGC
+    // interrupt thread needs before it will trigger the backbuffer event.
+    //
+    // The branch target and its length arrive on the stack, past six register
+    // arguments (verified against a live call: the values matched the continuation
+    // buffer the title had already written into).
+    [SysAbiExport(
+        Nid = "w1KFAHVqpaU",
+        ExportName = "sceAgcCbBranch",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbBranch(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        if (commandBufferAddress == 0 ||
+            !TryReadUInt64(ctx, ctx[CpuRegister.Rsp] + (2 * sizeof(ulong)), out var target) ||
+            !TryReadUInt64(ctx, ctx[CpuRegister.Rsp] + (3 * sizeof(ulong)), out var targetDwords))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 4, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(4, ItIndirectBuffer, RZero)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, (uint)(target & 0xFFFF_FFFFUL)) ||
+            !TryWriteUInt32(ctx, commandAddress + 8, (uint)((target >> 32) & 0xFFFFUL)) ||
+            !TryWriteUInt32(ctx, commandAddress + 12, (uint)targetDwords & 0xFFFFFu))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.cb_branch buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
+            $"target=0x{target:X16} dwords={targetDwords}");
+        return ReturnPointer(ctx, commandAddress);
     }
 
     [SysAbiExport(
