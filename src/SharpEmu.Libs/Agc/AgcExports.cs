@@ -110,6 +110,8 @@ public static partial class AgcExports
     private const uint ComputeNumThreadY = 0x208;
     private const uint ComputeNumThreadZ = 0x209;
     private const uint SpiPsInputCntl0 = 0x191;
+    private const uint RegisterSelectorMask = 0x7000_0000;
+    private const uint CxPsShaderUsageBase = 0x1000_0000;
     private const uint VgtPrimitiveType = 0x242;
     private const uint VgtIndexType = 0x243;
     // GE_INDX_OFFSET — base vertex for DrawIndexed / firstVertex for
@@ -129,8 +131,12 @@ public static partial class AgcExports
     private const uint PaClVportXOffset = 0x110;
     private const uint PaClVportYScale = 0x111;
     private const uint PaClVportYOffset = 0x112;
+    private const uint PaClVportZScale = 0x113;
+    private const uint PaClVportZOffset = 0x114;
     private const uint PaScVportZMin0 = 0xB4;
     private const uint PaScVportZMax0 = 0xB5;
+    private const uint PaClClipCntl = 0x204;
+    private const uint PaClVteCntl = 0x206;
     private const uint CbColorControl = 0x202;
     private const uint CbBlendRed = 0x105;
     private const uint CbBlendGreen = 0x106;
@@ -150,11 +156,17 @@ public static partial class AgcExports
     private const uint DbDepthView = 0x002;
     private const uint DbDepthSizeXy = 0x007;
     private const uint DbDepthClear = 0x00B;
+    private const uint DbStencilClear = 0x00A;
     private const uint DbZInfo = 0x010;
+    private const uint DbStencilInfo = 0x011;
     private const uint DbZReadBase = 0x012;
+    private const uint DbStencilReadBase = 0x013;
     private const uint DbZWriteBase = 0x014;
+    private const uint DbStencilWriteBase = 0x015;
     private const uint DbZReadBaseHi = 0x01A;
+    private const uint DbStencilReadBaseHi = 0x01B;
     private const uint DbZWriteBaseHi = 0x01C;
+    private const uint DbStencilWriteBaseHi = 0x01D;
     private const int ColorTargetCount = 8;
     private const uint PsTextureUserDataRegister = 0xC;
     private const uint VsUserDataRegister = 0x4C;
@@ -230,6 +242,8 @@ public static partial class AgcExports
     private static readonly HashSet<(ulong Es, ulong Ps, GuestDrawKind Kind)> _tracedShaderTranslations = new();
     private static readonly HashSet<(ulong Es, ulong Ps)> _tracedShaderDecodePairs = new();
     private static readonly HashSet<(ulong Es, ulong Ps, ulong Target, ulong Texture, uint VertexCount)> _tracedShaderDraws = new();
+    private static readonly HashSet<string> _tracedVertexStateSnapshots = new();
+    private static readonly HashSet<(ulong Es, ulong Ps)> _tracedPixelInterfaces = new();
     private static readonly HashSet<(ulong Ps, string Error)> _tracedShaderFailures = new();
     private static readonly HashSet<(int Handle, int Index, ulong Address, string Path)> _tracedDisplayBuffers = new();
     private static readonly HashSet<ulong> _tracedComputeShaders = new();
@@ -348,6 +362,14 @@ public static partial class AgcExports
     // bytes actually change.
     private static readonly ConcurrentDictionary<TextureContentIdentity, ulong>
         _untrackedLinearTextureContentProbes = new();
+    // Small linear palettes are commonly produced through writable global
+    // buffers and consumed immediately by IMAGE_LOAD. The Vulkan buffer is the
+    // authoritative copy until its dirty range is published back to guest
+    // memory; reading the CPU mapping too early uploads an all-black palette.
+    // Synchronize only the first upload of each palette allocation. Subsequent
+    // draws use the backend image/cache and avoid a per-frame CPU/GPU stall.
+    private static readonly ConcurrentDictionary<ulong, byte>
+        _gpuProducedPaletteReadbacks = new();
     private static readonly object _registerDefaultsGate = new();
     private static readonly ConditionalWeakTable<object, RegisterDefaultsAllocation> _registerDefaultsAllocations = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
@@ -477,7 +499,10 @@ public static partial class AgcExports
         uint TileMode,
         uint BaseArrayLayer = 0,
         uint LayerCount = 1,
-        uint MipLevel = 0);
+        uint MipLevel = 0,
+        // CB_COLOR*_INFO.COMP_SWAP[12:11]: 0=STD(RGBA), 1=ALT(BGRA),
+        // 2=STD_REV(ABGR), 3=ALT_REV(ARGB).
+        uint CompSwap = 0);
 
     private sealed record TranslatedGuestDraw(
         ulong ExportShaderAddress,
@@ -4023,7 +4048,8 @@ public static partial class AgcExports
                             MipLevels: pendingDisplayTarget.MipLevel + 1,
                             BaseArrayLayer: pendingDisplayTarget.BaseArrayLayer,
                             LayerCount: pendingDisplayTarget.LayerCount,
-                            MipLevel: pendingDisplayTarget.MipLevel)],
+                            MipLevel: pendingDisplayTarget.MipLevel,
+                            CompSwap: pendingDisplayTarget.CompSwap)],
                         pendingComposite.VertexShader,
                         pendingComposite.VertexCount,
                         pendingComposite.InstanceCount,
@@ -6268,12 +6294,32 @@ public static partial class AgcExports
             // context-register index (DB_RENDER_CONTROL), not a terminator.
             // Dropping it leaves stale depth/render-control state active in
             // later passes.
-            destination[registerOffset] = value;
+            if (registerOffset == uint.MaxValue)
+            {
+                continue;
+            }
+
+            var decodedRegisterOffset = register == RCxRegsIndirect
+                ? DecodeIndirectCxRegisterOffset(registerOffset)
+                : NormalizeIndirectRegisterOffset(registerOffset);
+            destination[decodedRegisterOffset] = value;
             if (register == RUcRegsIndirect)
             {
-                ApplyUcIndexTypeIfNeeded(state, registerOffset, value);
+                ApplyUcIndexTypeIfNeeded(state, decodedRegisterOffset, value);
             }
         }
+    }
+
+    internal static uint NormalizeIndirectRegisterOffset(uint rawOffset) =>
+        rawOffset & ~RegisterSelectorMask;
+
+    internal static uint DecodeIndirectCxRegisterOffset(uint rawOffset)
+    {
+        var offset = NormalizeIndirectRegisterOffset(rawOffset);
+        return (rawOffset & RegisterSelectorMask) == CxPsShaderUsageBase &&
+               offset < 32u
+            ? SpiPsInputCntl0 + offset
+            : offset;
     }
 
     /// <summary>
@@ -6586,7 +6632,11 @@ public static partial class AgcExports
         var hasDepthOnlyCandidate = hasExportShader &&
             !hasPixelShader &&
             depthTarget is not null &&
-            (depthState.TestEnable || depthState.WriteEnable || depthState.ClearEnable);
+            (depthState.TestEnable ||
+             depthState.WriteEnable ||
+             depthState.ClearEnable ||
+             depthState.StencilTestEnable ||
+             depthState.StencilClearEnable);
         if (hasDepthOnlyCandidate &&
             TryCreateTranslatedDepthOnlyGuestDraw(
                 ctx,
@@ -7360,6 +7410,41 @@ public static partial class AgcExports
         var psInputCntl = ReadPsInputCntlRegisters(state.CxRegisters);
         var requiredVertexOutputCount =
             GetRequiredVertexOutputCount(pixelState, psInputCntl);
+        if (_tracePixelShaderAddress == pixelShaderAddress &&
+            _tracedPixelInterfaces.Add((exportShaderAddress, pixelShaderAddress)))
+        {
+            var interpolatedAttributeCount = GetInterpolatedAttributeCount(pixelState);
+            var mappings = string.Join(
+                ',',
+                Enumerable.Range(0, checked((int)interpolatedAttributeCount))
+                    .Select(attribute =>
+                    {
+                        var control = attribute < psInputCntl.Length
+                            ? psInputCntl[attribute]
+                            : checked((uint)attribute);
+                        return $"a{attribute}=0x{control:X8}:" +
+                            (Gen5PixelInputMapping.UsesDefaultValue(control)
+                                ? "default"
+                                : $"param{Gen5PixelInputMapping.GetParameterLocation(control)}");
+                    }));
+            var parameterExports = string.Join(
+                ',',
+                exportState.Program.Instructions
+                    .Where(instruction =>
+                        instruction.Control is Gen5ExportControl { Target: >= 32 and < 64 })
+                    .Select(instruction =>
+                    {
+                        var export = (Gen5ExportControl)instruction.Control!;
+                        return $"pc0x{instruction.Pc:X}:param{export.Target - 32}:" +
+                            $"mask0x{export.EnableMask:X}:src[{string.Join(',', instruction.Sources)}]";
+                    }));
+            Console.Error.WriteLine(
+                "[LOADER][TRACE] agc.pixel_interface " +
+                $"ps=0x{pixelShaderAddress:X16} es=0x{exportShaderAddress:X16} " +
+                $"attributes={interpolatedAttributeCount} " +
+                $"required_params={requiredVertexOutputCount} " +
+                $"mappings=[{mappings}] exports=[{parameterExports}]");
+        }
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var earlyPrimitiveType);
         if (IsRectListPrimitive(earlyPrimitiveType) &&
             (exportEvaluation.VertexInputs is null || exportEvaluation.VertexInputs.Count == 0) &&
@@ -7634,6 +7719,14 @@ public static partial class AgcExports
             }
 
             vertexInputs = exportEvaluation.VertexInputs ?? [];
+
+            TraceTargetVertexState(
+                pixelShaderAddress,
+                exportShaderAddress,
+                textures,
+                vertexInputs,
+                exportEvaluation.InitialScalarRegisters,
+                exportEvaluation.ScalarRegisters);
         }
 
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
@@ -7649,7 +7742,8 @@ public static partial class AgcExports
                 MipLevels: renderTargets[index].MipLevel + 1,
                 BaseArrayLayer: renderTargets[index].BaseArrayLayer,
                 LayerCount: renderTargets[index].LayerCount,
-                MipLevel: renderTargets[index].MipLevel);
+                MipLevel: renderTargets[index].MipLevel,
+                CompSwap: renderTargets[index].CompSwap);
         }
 
         var pixelUserDataCount = Math.Min(pixelEvaluation.InitialScalarRegisters.Count, 8);
@@ -7698,6 +7792,54 @@ public static partial class AgcExports
         return true;
     }
 
+    private static void TraceTargetVertexState(
+        ulong pixelShaderAddress,
+        ulong exportShaderAddress,
+        IReadOnlyList<TranslatedImageBinding> textures,
+        IReadOnlyList<Gen5VertexInputBinding> vertexInputs,
+        IReadOnlyList<uint> initialScalars,
+        IReadOnlyList<uint> evaluatedScalars)
+    {
+        if (_tracePixelShaderAddress != pixelShaderAddress ||
+            !textures.Any(binding => binding.Descriptor.Address == 0x0000000103E2D100))
+        {
+            return;
+        }
+
+        var scalarHex = string.Join(
+            ',',
+            initialScalars.Take(32).Select(value => $"{value:X8}"));
+        var evaluatedHex = string.Join(
+            ',',
+            evaluatedScalars.Take(64).Select(value => $"{value:X8}"));
+        var inputState = string.Join(
+            ';',
+            vertexInputs.Select(input =>
+            {
+                var byteCount = Math.Min(input.DataLength, 96);
+                return
+                    $"l{input.Location}:pc0x{input.Pc:X}:a0x{input.BaseAddress:X}:" +
+                    $"s{input.Stride}:o{input.OffsetBytes}:c{input.ComponentCount}:" +
+                    $"f{input.DataFormat}:n{input.NumberFormat}:" +
+                    Convert.ToHexString(input.Data.AsSpan(0, byteCount));
+            }));
+        var signature = $"{scalarHex}|{evaluatedHex}|{inputState}";
+
+        lock (_submitTraceGate)
+        {
+            if (_tracedVertexStateSnapshots.Count >= 128 ||
+                !_tracedVertexStateSnapshots.Add(signature))
+            {
+                return;
+            }
+        }
+
+        Console.Error.WriteLine(
+            "[LOADER][TRACE] agc.vertex_snapshot " +
+            $"ps=0x{pixelShaderAddress:X16} es=0x{exportShaderAddress:X16} " +
+            $"initial=[{scalarHex}] evaluated=[{evaluatedHex}] inputs=[{inputState}]");
+    }
+
     private static bool TryAppendTranslatedImageBindings(
         IReadOnlyList<Gen5ImageBinding> bindings,
         IReadOnlyList<Gen5ImageBinding> stageBindings,
@@ -7728,7 +7870,7 @@ public static partial class AgcExports
             var isStorage = Gen5ShaderTranslator.RequiresStorageImage(
                 binding,
                 stageBindings);
-            if (_traceAgcShader || _tracePixelShaderAddress == pixelShaderAddress)
+            if (_traceAgcShader)
             {
                 Console.Error.WriteLine(
                     "[LOADER][TRACE] " +
@@ -8411,7 +8553,8 @@ public static partial class AgcExports
                 (attrib3 >> 14) & 0x1Fu,
                 sliceStart,
                 layerCount,
-                mipLevel));
+                mipLevel,
+                (info >> 11) & 0x3u));
         }
 
         return targets;
@@ -8482,20 +8625,62 @@ public static partial class AgcExports
     // bit2, ZFUNC bits[6:4] (GCN compare, matches Vulkan CompareOp ordering).
     // DB_RENDER_CONTROL (context register 0x000): DEPTH_CLEAR_ENABLE bit0.
     private const uint DbDepthControl = 0x200;
+    private const uint DbStencilControl = 0x10B;
+    private const uint DbStencilRefMask = 0x10C;
+    private const uint DbStencilRefMaskBack = 0x10D;
 
     internal static GuestDepthState DecodeDepthState(
         IReadOnlyDictionary<uint, uint> registers)
     {
         var hasDepthControl = registers.TryGetValue(DbDepthControl, out var control);
         registers.TryGetValue(DbRenderControl, out var renderControl);
+        registers.TryGetValue(DbStencilControl, out var stencilControl);
+        registers.TryGetValue(DbStencilRefMask, out var stencilMask);
+        registers.TryGetValue(DbStencilRefMaskBack, out var stencilMaskBack);
         var testEnable = (control & 0x2u) != 0;
         var writeEnable = (control & 0x4u) != 0;
         var compareOp = hasDepthControl
             ? (control >> 4) & 0x7u
             : GuestDepthState.Default.CompareOp;
         var clearEnable = (renderControl & 0x1u) != 0;
-        return new GuestDepthState(testEnable, writeEnable, compareOp, clearEnable);
+        var stencilEnable = (control & 0x1u) != 0;
+        var stencilClearEnable = (renderControl & 0x2u) != 0;
+        var frontStencil = DecodeStencilFace(
+            stencilControl,
+            stencilMask,
+            compareOp: (control >> 8) & 0x7u,
+            operationShift: 0);
+        var backStencil = (control & (1u << 7)) != 0
+            ? DecodeStencilFace(
+                stencilControl,
+                stencilMaskBack,
+                compareOp: (control >> 20) & 0x7u,
+                operationShift: 12)
+            : frontStencil;
+        return new GuestDepthState(
+            testEnable,
+            writeEnable,
+            compareOp,
+            clearEnable,
+            stencilEnable,
+            stencilClearEnable,
+            frontStencil,
+            backStencil);
     }
+
+    private static GuestStencilFaceState DecodeStencilFace(
+        uint control,
+        uint mask,
+        uint compareOp,
+        int operationShift) =>
+        new(
+            (control >> operationShift) & 0xFu,
+            (control >> (operationShift + 4)) & 0xFu,
+            (control >> (operationShift + 8)) & 0xFu,
+            compareOp,
+            (mask >> 8) & 0xFFu,
+            (mask >> 16) & 0xFFu,
+            mask & 0xFFu);
 
     private static GuestDepthTarget? DecodeDepthTarget(
         IReadOnlyDictionary<uint, uint> registers)
@@ -8503,7 +8688,9 @@ public static partial class AgcExports
         var depthState = DecodeDepthState(registers);
         if (!depthState.TestEnable &&
             !depthState.WriteEnable &&
-            !depthState.ClearEnable)
+            !depthState.ClearEnable &&
+            !depthState.StencilTestEnable &&
+            !depthState.StencilClearEnable)
         {
             return null;
         }
@@ -8524,8 +8711,19 @@ public static partial class AgcExports
         registers.TryGetValue(DbZWriteBase, out var writeBase);
         registers.TryGetValue(DbZReadBaseHi, out var readBaseHi);
         registers.TryGetValue(DbZWriteBaseHi, out var writeBaseHi);
+        registers.TryGetValue(DbStencilInfo, out var stencilInfo);
+        registers.TryGetValue(DbStencilReadBase, out var stencilReadBase);
+        registers.TryGetValue(DbStencilWriteBase, out var stencilWriteBase);
+        registers.TryGetValue(DbStencilReadBaseHi, out var stencilReadBaseHi);
+        registers.TryGetValue(DbStencilWriteBaseHi, out var stencilWriteBaseHi);
         var readAddress = ((ulong)(readBaseHi & 0xFFu) << 40) | ((ulong)readBase << 8);
         var writeAddress = ((ulong)(writeBaseHi & 0xFFu) << 40) | ((ulong)writeBase << 8);
+        var stencilReadAddress =
+            ((ulong)(stencilReadBaseHi & 0xFFu) << 40) |
+            ((ulong)stencilReadBase << 8);
+        var stencilWriteAddress =
+            ((ulong)(stencilWriteBaseHi & 0xFFu) << 40) |
+            ((ulong)stencilWriteBase << 8);
         if (readAddress == 0 && writeAddress == 0)
         {
             return null;
@@ -8546,6 +8744,9 @@ public static partial class AgcExports
         {
             clearDepth = 1f;
         }
+        var clearStencil = registers.TryGetValue(DbStencilClear, out var stencilClear)
+            ? stencilClear & 0xFFu
+            : 0u;
 
         return new GuestDepthTarget(
             readAddress,
@@ -8555,7 +8756,11 @@ public static partial class AgcExports
             guestFormat,
             (zInfo >> 4) & 0x1Fu,
             clearDepth,
-            ReadOnly: (depthView & (1u << 24)) != 0 || writeAddress == 0);
+            ReadOnly: (depthView & (1u << 24)) != 0 || writeAddress == 0,
+            stencilReadAddress,
+            stencilWriteAddress,
+            stencilInfo & 0x1u,
+            clearStencil);
     }
 
     // PA_SU_SC_MODE_CNTL (context register 0x205) carries face culling, the
@@ -8864,7 +9069,8 @@ public static partial class AgcExports
                 ',',
                 draw.RenderTargets.Select(target =>
                     $"{target.Slot}:0x{target.Address:X16}:{target.Width}x{target.Height}:" +
-                    $"fmt{target.Format}/num{target.NumberType}/tile{target.TileMode}"));
+                    $"fmt{target.Format}/num{target.NumberType}/tile{target.TileMode}" +
+                    $"/swap{target.CompSwap}"));
         var depthTarget = draw.DepthTarget is { } depth
             ? $"0x{depth.Address:X16}:{depth.Width}x{depth.Height}:" +
               $"fmt{depth.GuestFormat}/sw{depth.SwizzleMode}:" +
@@ -8946,6 +9152,12 @@ public static partial class AgcExports
             ("xoffset", PaClVportXOffset),
             ("yscale", PaClVportYScale),
             ("yoffset", PaClVportYOffset),
+            ("zscale", PaClVportZScale),
+            ("zoffset", PaClVportZOffset),
+            ("zmin", PaScVportZMin0),
+            ("zmax", PaScVportZMax0),
+            ("clip", PaClClipCntl),
+            ("vte", PaClVteCntl),
         };
         var raster = string.Join(
             ',',
@@ -9658,7 +9870,8 @@ public static partial class AgcExports
         // With the write tracker off (Windows default), IsGuestImageUploadKnown
         // uses a cheap guest-memory probe so static UI can still skip (Dead
         // Cells menus) while changing CPU content (GTA Bink) forces a copy.
-        if (!isStorage &&
+        if (!_textureCopySkipDisabled &&
+            !isStorage &&
             !wantsArrayUpload &&
             descriptor.Address != 0 &&
             GuestGpu.Current.IsGuestImageUploadKnown(
@@ -9976,6 +10189,11 @@ public static partial class AgcExports
             _arrayUploadUnsupported.TryAdd(descriptor.Address, 0);
         }
 
+        EnsureInitialGpuProducedPaletteCpuVisible(
+            descriptor,
+            descriptor.Address + baseMipByteOffset,
+            physicalSourceByteCount);
+
         var source = new byte[(int)physicalSourceByteCount];
         if (!ctx.Memory.TryRead(descriptor.Address + baseMipByteOffset, source))
         {
@@ -10120,6 +10338,52 @@ public static partial class AgcExports
         return true;
     }
 
+    internal static bool IsSmallLinearPaletteDescriptor(
+        uint width,
+        uint height,
+        uint format,
+        uint tileMode,
+        uint type,
+        ulong byteCount) =>
+        width is > 0 and <= 256 &&
+        height == 1 &&
+        format == 10 &&
+        tileMode == 0 &&
+        type == Gen5TextureType2D &&
+        byteCount is > 0 and <= 4096;
+
+    private static void EnsureInitialGpuProducedPaletteCpuVisible(
+        in TextureDescriptor descriptor,
+        ulong sourceAddress,
+        ulong byteCount)
+    {
+        if (sourceAddress == 0 ||
+            !IsSmallLinearPaletteDescriptor(
+                descriptor.Width,
+                descriptor.Height,
+                descriptor.Format,
+                descriptor.TileMode,
+                descriptor.Type,
+                byteCount) ||
+            !_gpuProducedPaletteReadbacks.TryAdd(sourceAddress, 0))
+        {
+            return;
+        }
+
+        var sequence = GuestGpu.Current.SubmitOrderedGuestBufferReadback(
+            sourceAddress,
+            byteCount,
+            $"linear_palette_readback 0x{sourceAddress:X16}+0x{byteCount:X}");
+        if (sequence == 0 || GuestGpu.Current.WaitForGuestWork(sequence, 2_000))
+        {
+            return;
+        }
+
+        // A timeout must not permanently bless the stale CPU copy. Allow a
+        // later bind to retry after the renderer drains its backlog.
+        _gpuProducedPaletteReadbacks.TryRemove(sourceAddress, out _);
+    }
+
     /// <summary>
     /// Detects native CPU updates to a cached linear texture when page-fault
     /// write tracking is unavailable. The first cached observation deliberately
@@ -10256,7 +10520,7 @@ public static partial class AgcExports
             '|',
             textures.Select(texture =>
                 $"0x{texture.Address:X}:{texture.Width}x{texture.Height}" +
-                $":f{texture.Format}/n{texture.NumberType}/d{texture.DstSelect:X3}" +
+                $":f{texture.Format}/n{texture.NumberType}/t{texture.Type}/d{texture.DstSelect:X3}" +
                 (texture.IsFallback ? ":FALLBACK" : string.Empty)));
         var positions = string.Empty;
         var positionBuffer = vertexBuffers.FirstOrDefault(buffer => buffer.Location == 0);
@@ -10414,6 +10678,11 @@ public static partial class AgcExports
             return;
         }
 
+        if (!TextureDumpDimensionsMatch(descriptor.Width, descriptor.Height))
+        {
+            return;
+        }
+
         var key = $"0x{descriptor.Address:X}-{descriptor.Width}x{descriptor.Height}";
         var occurrence = _textureDumpKeys.AddOrUpdate(key, 1, static (_, count) => count + 1);
         // First uses plus periodic later snapshots (the game reuses the same
@@ -10456,6 +10725,11 @@ public static partial class AgcExports
             return;
         }
 
+        if (!TextureDumpDimensionsMatch(descriptor.Width, descriptor.Height))
+        {
+            return;
+        }
+
         var key = $"linear-0x{descriptor.Address:X}-{descriptor.Width}x{descriptor.Height}";
         var occurrence = _textureDumpKeys.AddOrUpdate(key, 1, static (_, count) => count + 1);
         if ((occurrence > 3 && occurrence % 500 >= 3) ||
@@ -10477,6 +10751,19 @@ public static partial class AgcExports
         catch (IOException)
         {
         }
+    }
+
+    private static bool TextureDumpDimensionsMatch(uint width, uint height)
+    {
+        return TextureDumpDimensionMatches("SHARPEMU_TEXTURE_DUMP_WIDTH", width) &&
+               TextureDumpDimensionMatches("SHARPEMU_TEXTURE_DUMP_HEIGHT", height);
+    }
+
+    private static bool TextureDumpDimensionMatches(string variable, uint actual)
+    {
+        var value = Environment.GetEnvironmentVariable(variable);
+        return string.IsNullOrWhiteSpace(value) ||
+               (uint.TryParse(value, out var expected) && expected == actual);
     }
 
     private static GuestDrawTexture CreateFallbackGuestDrawTexture(

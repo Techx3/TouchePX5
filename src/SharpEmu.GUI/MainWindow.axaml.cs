@@ -269,6 +269,14 @@ public partial class MainWindow : Window
             SetEnvironmentToggle("TOUCHEPX5_VK_VALIDATION", EnvVkValidationToggle.IsChecked == true);
         EnvDumpSpirvToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("TOUCHEPX5_DUMP_SPIRV", EnvDumpSpirvToggle.IsChecked == true);
+        EnvDropStaleAliasedDepthToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle(
+                "TOUCHEPX5_DROP_STALE_ALIASED_DEPTH",
+                EnvDropStaleAliasedDepthToggle.IsChecked == true);
+        EnvHonorRtCompSwapToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle(
+                "TOUCHEPX5_HONOR_RT_COMP_SWAP",
+                EnvHonorRtCompSwapToggle.IsChecked == true);
         EnvLogDirectMemoryToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("TOUCHEPX5_LOG_DIRECT_MEMORY", EnvLogDirectMemoryToggle.IsChecked == true);
         EnvLogIoToggle.IsCheckedChanged += (_, _) =>
@@ -685,6 +693,8 @@ public partial class MainWindow : Window
         EnvWritableApp0Row.Description = loc.Get("Options.Env.WritableApp0.Desc");
         EnvVkValidationRow.Description = loc.Get("Options.Env.VkValidation.Desc");
         EnvDumpSpirvRow.Description = loc.Get("Options.Env.DumpSpirv.Desc");
+        EnvDropStaleAliasedDepthRow.Description = loc.Get("Options.Env.DropStaleAliasedDepth.Desc");
+        EnvHonorRtCompSwapRow.Description = loc.Get("Options.Env.HonorRtCompSwap.Desc");
         EnvLogDirectMemoryRow.Description = loc.Get("Options.Env.LogDirectMemory.Desc");
         EnvLogIoRow.Description = loc.Get("Options.Env.LogIo.Desc");
         EnvLogNpRow.Description = loc.Get("Options.Env.LogNp.Desc");
@@ -962,6 +972,10 @@ public partial class MainWindow : Window
         EnvWritableApp0Toggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_WRITABLE_APP0");
         EnvVkValidationToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_VK_VALIDATION");
         EnvDumpSpirvToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_DUMP_SPIRV");
+        EnvDropStaleAliasedDepthToggle.IsChecked =
+            _settings.EnvironmentToggles.Contains("TOUCHEPX5_DROP_STALE_ALIASED_DEPTH");
+        EnvHonorRtCompSwapToggle.IsChecked =
+            _settings.EnvironmentToggles.Contains("TOUCHEPX5_HONOR_RT_COMP_SWAP");
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_DIRECT_MEMORY");
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_NP");
@@ -2144,6 +2158,9 @@ public partial class MainWindow : Window
                 "0.###",
                 System.Globalization.CultureInfo.InvariantCulture));
         AddSelectedVulkanDriverManifest(_settings.VulkanDevice);
+        // VulkanVideoPresenter consumes the SHARPEMU name. Keep the legacy
+        // Touché variable as well for compatibility with older child hosts.
+        SetRuntimeEnvironmentVariable("SHARPEMU_VK_DEVICE", _settings.VulkanDevice);
         SetRuntimeEnvironmentVariable("TOUCHEPX5_VK_DEVICE", _settings.VulkanDevice);
         var activeFirmware = _firmwareManager.GetInstalled().FirstOrDefault(firmware =>
             string.Equals(firmware.Sha256, _settings.ActiveFirmwareSha256, StringComparison.OrdinalIgnoreCase));
