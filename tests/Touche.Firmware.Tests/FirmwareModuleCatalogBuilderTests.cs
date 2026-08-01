@@ -102,6 +102,33 @@ public sealed class FirmwareModuleCatalogBuilderTests : IDisposable
     }
 
     [Fact]
+    public async Task CatalogDistinguishesPlaintextAndEncryptedSelfSegments()
+    {
+        var objects = Path.Combine(_temporaryDirectory, "objects");
+        var plaintext = AddObject(objects, CreateSonySelf(0x805, CreateElf64()));
+        var encrypted = AddObject(objects, CreateSonySelf(0x80f, CreateElf64()));
+        var manifest = CreateManifest(
+            ("/system/common/lib/plain.sprx", plaintext),
+            ("/system/common/lib/encrypted.sprx", encrypted));
+
+        var catalog = await new FirmwareModuleCatalogBuilder(objects).BuildAsync(manifest);
+
+        var plainModule = Assert.Single(catalog.Modules, module => module.VirtualPath.EndsWith("plain.sprx"));
+        Assert.Equal(FirmwareModuleState.Parseable, plainModule.State);
+        Assert.NotNull(plainModule.SelfMetadata);
+        Assert.False(plainModule.SelfMetadata.HasEncryptedSegments);
+        Assert.True(plainModule.SelfMetadata.HasSignedSegments);
+        Assert.True(plainModule.SelfMetadata.HasBlockedSegments);
+        Assert.Equal(1, plainModule.SelfMetadata.SegmentCount);
+
+        var encryptedModule = Assert.Single(catalog.Modules, module => module.VirtualPath.EndsWith("encrypted.sprx"));
+        Assert.Equal(FirmwareModuleState.UnsupportedEncryption, encryptedModule.State);
+        Assert.NotNull(encryptedModule.SelfMetadata);
+        Assert.True(encryptedModule.SelfMetadata.HasEncryptedSegments);
+        Assert.True(encryptedModule.SelfMetadata.HasCompressedSegments);
+    }
+
+    [Fact]
     public async Task CatalogDoesNotAliasStandaloneElfByFileNameAlone()
     {
         var objects = Path.Combine(_temporaryDirectory, "objects");
@@ -183,6 +210,27 @@ public sealed class FirmwareModuleCatalogBuilderTests : IDisposable
         bytes[0x180] = 0;
         Encoding.UTF8.GetBytes(dependency).CopyTo(bytes.AsSpan(0x181));
         bytes[0x181 + dependency.Length] = 0;
+        return bytes;
+    }
+
+    private static byte[] CreateSonySelf(ulong segmentFlags, byte[] embeddedElf)
+    {
+        const int headerSize = 0x40;
+        var bytes = new byte[headerSize + embeddedElf.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, 0xeef51454);
+        bytes[4] = 0x10;
+        bytes[5] = 0x01;
+        bytes[6] = 0x01;
+        bytes[7] = 0x32;
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(8), 0x101);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(0x0c), headerSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x10), (ulong)bytes.Length);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(0x18), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x20), segmentFlags);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x28), headerSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x30), (ulong)embeddedElf.Length);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(0x38), (ulong)embeddedElf.Length);
+        embeddedElf.CopyTo(bytes, headerSize);
         return bytes;
     }
 

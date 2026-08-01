@@ -195,6 +195,61 @@ public sealed class Gen5ImageTests
     }
 
     [Fact]
+    public void ImageDescriptorDecodesMaximumSixteenBitExtents()
+    {
+        var descriptor = CreateDescriptor(
+            unifiedFormat: 44,
+            width: 65536,
+            height: 65536,
+            address: 0x0000_1234_5678_0000);
+
+        Assert.True(
+            Gen5ImageDescriptor.TryDecode(
+                descriptor,
+                out var decoded,
+                out var error),
+            error);
+        Assert.Equal(65536u, decoded.Width);
+        Assert.Equal(65536u, decoded.Height);
+    }
+
+    [Fact]
+    public void ArrayDescriptorDecodesRangesSwizzleAndMetadataAddress()
+    {
+        var descriptor = CreateDescriptor(
+            unifiedFormat: 44,
+            width: 512,
+            height: 384,
+            address: 0x0000_1234_5678_0000,
+            resourceType: 13);
+        descriptor[3] =
+            0xF2Eu |
+            (2u << 12) |
+            (5u << 16) |
+            (24u << 20) |
+            (13u << 28);
+        descriptor[4] = 7u | (3u << 16);
+        descriptor[6] = 0x00A5_5AA5u | (0xABu << 24);
+        descriptor[7] = 0x0012_3456u;
+
+        Assert.True(
+            Gen5ImageDescriptor.TryDecode(
+                descriptor,
+                out var decoded,
+                out var error),
+            error);
+        Assert.Equal(2u, decoded.BaseLevel);
+        Assert.Equal(5u, decoded.LastLevel);
+        Assert.Equal(3u, decoded.BaseArray);
+        Assert.Equal(7u, decoded.LastArray);
+        Assert.Equal(8u, decoded.Depth);
+        Assert.Equal(0xF2Eu, decoded.DstSelect);
+        Assert.Equal(24u, decoded.SwizzleMode);
+        Assert.Equal(0x00A5_5AA5u, decoded.DescriptorFlags);
+        Assert.Equal(0x0000_0012_3456_AB00ul, decoded.MetadataAddress);
+    }
+
+    [Fact]
     public void DiagnosticArtifactCorrelatesGuestBindingWithSpirvFetch()
     {
         var compilation = CompileImageOperationWithContext(

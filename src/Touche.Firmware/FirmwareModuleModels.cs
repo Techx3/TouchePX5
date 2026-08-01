@@ -27,6 +27,18 @@ public enum FirmwareModuleState
     RuntimeIncompatible,
 }
 
+public sealed record FirmwareSelfMetadata(
+    uint ProgramType,
+    ushort HeaderSize,
+    ushort MetadataSize,
+    ulong DeclaredFileSize,
+    ushort SegmentCount,
+    bool HasOrderedSegments,
+    bool HasEncryptedSegments,
+    bool HasSignedSegments,
+    bool HasCompressedSegments,
+    bool HasBlockedSegments);
+
 public sealed record FirmwareModule(
     string VirtualPath,
     string Sha256,
@@ -44,6 +56,12 @@ public sealed record FirmwareModule(
     /// decrypted ELF sidecar whose name is the protected SELF path plus ".elf".
     /// </summary>
     public string? ProvidesVirtualPath { get; init; }
+
+    /// <summary>
+    /// Passive container metadata. Segment payloads are never decrypted or executed
+    /// while building the firmware catalog.
+    /// </summary>
+    public FirmwareSelfMetadata? SelfMetadata { get; init; }
 }
 
 public sealed record FirmwareModuleCatalog

@@ -26,6 +26,9 @@ public sealed class FirmwareModuleCatalogBuilder
     private const int MaximumDynamicEntries = 65_536;
     private const int MaximumDependencyNameBytes = 4096;
     private const int MaximumSelfMetadataScanBytes = 1024 * 1024;
+    private const int SelfContainerHeaderSize = 0x20;
+    private const int SelfSegmentEntrySize = 0x20;
+    private const int MaximumSelfSegments = 4096;
     private const long MaximumModuleBytes = 256L * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
@@ -185,6 +188,10 @@ public sealed class FirmwareModuleCatalogBuilder
 
     private static FirmwareModule InspectSonySelf(FirmwareArtifact artifact, ReadOnlySpan<byte> bytes)
     {
+        var hasContainerMetadata = TryReadSonySelfMetadata(bytes, out var selfMetadata);
+        var state = hasContainerMetadata && !selfMetadata.HasEncryptedSegments
+            ? FirmwareModuleState.Parseable
+            : FirmwareModuleState.UnsupportedEncryption;
         var search = bytes[..Math.Min(bytes.Length, MaximumSelfMetadataScanBytes)];
         var searchOffset = 0;
         while (searchOffset <= search.Length - ElfHeaderSize64)
@@ -225,14 +232,20 @@ public sealed class FirmwareModuleCatalogBuilder
                         artifact.VirtualPath,
                         artifact.Sha256,
                         FirmwareModuleFormat.SonySelf,
-                        FirmwareModuleState.UnsupportedEncryption,
+                        state,
                         "x86-64",
                         BinaryPrimitives.ReadUInt64LittleEndian(elf[24..]),
                         programHeaderCount,
                         hasDynamicTable,
                         [],
-                        $"Protected Sony SELF contains bounded ELF64 metadata at 0x{elfOffset:x}; " +
-                        "payload segments still require a legally extracted, decrypted ELF sidecar.");
+                        state == FirmwareModuleState.UnsupportedEncryption
+                            ? $"Protected Sony SELF contains bounded ELF64 metadata at 0x{elfOffset:x}; " +
+                              "payload segments still require a legally extracted, decrypted ELF sidecar."
+                            : $"Plaintext Sony SELF contains bounded ELF64 metadata at 0x{elfOffset:x}; " +
+                              "LLE selection remains restricted to verified ELF64 modules.")
+                    {
+                        SelfMetadata = hasContainerMetadata ? selfMetadata : null,
+                    };
                 }
             }
 
@@ -243,13 +256,69 @@ public sealed class FirmwareModuleCatalogBuilder
             artifact.VirtualPath,
             artifact.Sha256,
             FirmwareModuleFormat.SonySelf,
-            FirmwareModuleState.UnsupportedEncryption,
-            "x86-64",
+            state,
+            null,
             null,
             0,
             false,
             [],
-            "Sony SELF content requires a legally extracted, decrypted ELF payload.");
+            state == FirmwareModuleState.UnsupportedEncryption
+                ? "Sony SELF content requires a legally extracted, decrypted ELF payload."
+                : "Plaintext Sony SELF container is parseable, but no bounded ELF64 metadata was found.")
+        {
+            SelfMetadata = hasContainerMetadata ? selfMetadata : null,
+        };
+    }
+
+    private static bool TryReadSonySelfMetadata(
+        ReadOnlySpan<byte> bytes,
+        out FirmwareSelfMetadata metadata)
+    {
+        metadata = default!;
+        if (bytes.Length < SelfContainerHeaderSize)
+        {
+            return false;
+        }
+
+        var segmentCount = BinaryPrimitives.ReadUInt16LittleEndian(bytes[0x18..]);
+        if (segmentCount == 0 ||
+            segmentCount > MaximumSelfSegments ||
+            !IsRangeInside(
+                bytes.Length,
+                SelfContainerHeaderSize,
+                (ulong)segmentCount * SelfSegmentEntrySize))
+        {
+            return false;
+        }
+
+        var hasOrderedSegments = false;
+        var hasEncryptedSegments = false;
+        var hasSignedSegments = false;
+        var hasCompressedSegments = false;
+        var hasBlockedSegments = false;
+        for (var index = 0; index < segmentCount; index++)
+        {
+            var offset = SelfContainerHeaderSize + index * SelfSegmentEntrySize;
+            var flags = BinaryPrimitives.ReadUInt64LittleEndian(bytes[offset..]);
+            hasOrderedSegments |= (flags & 0x1) != 0;
+            hasEncryptedSegments |= (flags & 0x2) != 0;
+            hasSignedSegments |= (flags & 0x4) != 0;
+            hasCompressedSegments |= (flags & 0x8) != 0;
+            hasBlockedSegments |= (flags & 0x800) != 0;
+        }
+
+        metadata = new FirmwareSelfMetadata(
+            BinaryPrimitives.ReadUInt32LittleEndian(bytes[0x08..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(bytes[0x0c..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(bytes[0x0e..]),
+            BinaryPrimitives.ReadUInt64LittleEndian(bytes[0x10..]),
+            segmentCount,
+            hasOrderedSegments,
+            hasEncryptedSegments,
+            hasSignedSegments,
+            hasCompressedSegments,
+            hasBlockedSegments);
+        return true;
     }
 
     private static FirmwareModule InspectElf64(FirmwareArtifact artifact, ReadOnlySpan<byte> bytes)
