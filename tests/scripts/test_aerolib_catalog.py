@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
@@ -15,6 +16,7 @@ SCRIPT_PATH = (
 SPEC = importlib.util.spec_from_file_location("aerolib_catalog", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 AEROLIB = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = AEROLIB
 SPEC.loader.exec_module(AEROLIB)
 
 
@@ -65,6 +67,56 @@ class RuntimeAuditTests(unittest.TestCase):
         self.assertIn("sceSysmoduleGetModuleInfoForUnwind", report)
         self.assertIn("| 3 | `4fU5yvOkVG4`", report)
         self.assertIn("Missing", report)
+
+    def test_global_coverage_classifies_all_statuses(self) -> None:
+        implementations = {
+            "AAAAAAAAAAA": [
+                AEROLIB.ExportImplementation(
+                    "AAAAAAAAAAA", "implemented", "libKernel", "Exports.cs", 10
+                )
+            ],
+            "BBBBBBBBBBB": [
+                AEROLIB.ExportImplementation(
+                    "BBBBBBBBBBB", "wrong_name", "libSceTest", "Test.cs", 20
+                )
+            ],
+            "DDDDDDDDDDD": [
+                AEROLIB.ExportImplementation(
+                    "DDDDDDDDDDD", "local_only", "libKernel", "Local.cs", 30
+                )
+            ],
+        }
+        rows = AEROLIB.build_coverage_rows(
+            {
+                "AAAAAAAAAAA": "implemented",
+                "BBBBBBBBBBB": "expected_name",
+                "CCCCCCCCCCC": "missing",
+            },
+            implementations,
+        )
+
+        statuses = {row.nid: row.status for row in rows}
+        self.assertEqual("implemented", statuses["AAAAAAAAAAA"])
+        self.assertEqual("name-mismatch", statuses["BBBBBBBBBBB"])
+        self.assertEqual("missing", statuses["CCCCCCCCCCC"])
+        self.assertEqual("local-only", statuses["DDDDDDDDDDD"])
+
+    def test_coverage_tsv_contains_traceable_source(self) -> None:
+        rows = [
+            AEROLIB.CoverageRow(
+                "AAAAAAAAAAA",
+                "implemented",
+                "sceTest",
+                "sceTest",
+                "libSceTest",
+                "TestExports.cs:42",
+            )
+        ]
+
+        report = AEROLIB.render_coverage_tsv(rows)
+
+        self.assertIn("NID\tStatus\tCatalogName\tLocalName\tLibrary\tSource", report)
+        self.assertIn("TestExports.cs:42", report)
 
 
 if __name__ == "__main__":
