@@ -90,10 +90,27 @@ public static class VideoOutExports
             ? Math.Max(1, holdFlip)
             : 1;
     private static long _presentedFrameCount;
+    private static int _frameLimit = 60;
 
     static VideoOutExports()
     {
         RunPixelFormatSelfChecks();
+    }
+
+    /// <summary>Configures host-side flip pacing; 0 leaves submissions unlimited.</summary>
+    public static void ConfigureFrameLimit(int fpsLimit)
+    {
+        if (fpsLimit is < 0 or > 240)
+        {
+            throw new ArgumentOutOfRangeException(nameof(fpsLimit));
+        }
+
+        Volatile.Write(ref _frameLimit, fpsLimit);
+        Interlocked.Exchange(ref _lastFlipPacingTimestamp, 0);
+        Console.Error.WriteLine(
+            fpsLimit == 0
+                ? "[LOADER][INFO] Frame limiter disabled"
+                : $"[LOADER][INFO] Frame limiter: {fpsLimit} FPS");
     }
 
     public static void ConfigureApplicationInfo(string? title, string? titleId, string? version)
@@ -1434,17 +1451,14 @@ public static class VideoOutExports
     /// </summary>
     private static void PaceFlip(int flipRate)
     {
-        if (_flipPacingDisabled)
+        var refreshRate = ResolveFramePacingRate(
+            flipRate,
+            Volatile.Read(ref _frameLimit));
+        if (_flipPacingDisabled || refreshRate == 0)
         {
             return;
         }
 
-        var refreshRate = flipRate switch
-        {
-            1 => 30,
-            2 => 20,
-            _ => 60,
-        };
         var intervalTicks = Stopwatch.Frequency / refreshRate;
         var now = Stopwatch.GetTimestamp();
         var last = Interlocked.Read(ref _lastFlipPacingTimestamp);
@@ -1464,6 +1478,22 @@ public static class VideoOutExports
         }
 
         Interlocked.CompareExchange(ref _lastFlipPacingTimestamp, target, last);
+    }
+
+    internal static int ResolveFramePacingRate(int flipRate, int configuredLimit)
+    {
+        if (configuredLimit <= 0)
+        {
+            return 0;
+        }
+
+        var guestRate = flipRate switch
+        {
+            1 => 30,
+            2 => 20,
+            _ => 60,
+        };
+        return Math.Min(guestRate, configuredLimit);
     }
 
     private static int RegisterBufferRange(VideoOutPortState port, int startIndex, ReadOnlySpan<ulong> addresses, BufferAttribute attribute, int requestedGroupIndex = -1)

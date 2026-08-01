@@ -10,6 +10,9 @@ public readonly struct SharpEmuRuntimeOptions
 {
     public CpuExecutionEngine CpuEngine { get; init; }
 
+    /// <summary>Maximum submitted video frames per second; 0 disables pacing.</summary>
+    public int FpsLimit { get; init; }
+
     public bool StrictDynlibResolution { get; init; }
 
     public int ImportTraceLimit { get; init; }

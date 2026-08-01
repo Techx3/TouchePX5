@@ -336,6 +336,7 @@ internal static partial class Program
                 return 3;
             }
 
+            VideoOutExports.ConfigureFrameLimit(runtimeOptions.FpsLimit);
             using var runtime = SharpEmuRuntime.CreateDefault(runtimeOptions);
 
             OrbisGen2Result result;
@@ -1063,8 +1064,8 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: TouchePx5 [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--debug-server[=host:port]] <path-to-eboot.bin>");
-        Log.Info(@"Example: TouchePx5 --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
+        Log.Info("Usage: TouchePx5 [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--fps-limit=<0-240>] [--log-level=<level>] [--log-file[=<path>]] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info(@"Example: TouchePx5 --cpu-engine=native --fps-limit=60 --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
 
@@ -1122,6 +1123,7 @@ internal static partial class Program
 
         var strictDynlibResolution = false;
         var importTraceLimit = 0;
+        var fpsLimit = 60;
         var cpuEngine = CpuExecutionEngine.NativeOnly;
         logFilePath = null;
         logLevel = SharpEmuLog.MinimumLevel;
@@ -1184,6 +1186,20 @@ internal static partial class Program
                 continue;
             }
 
+            if (string.Equals(argument, "--fps-limit", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= args.Length || !TryParseFpsLimit(args[i + 1], out fpsLimit))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    logFilePath = null;
+                    return false;
+                }
+
+                i++;
+                continue;
+            }
+
             if (string.Equals(argument, "--log-file", StringComparison.OrdinalIgnoreCase))
             {
                 if (i + 1 < args.Length &&
@@ -1220,6 +1236,21 @@ internal static partial class Program
             {
                 var valueText = argument[cpuEnginePrefix.Length..];
                 if (!TryParseCpuEngine(valueText, out cpuEngine))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    logLevel = SharpEmuLog.MinimumLevel;
+                    logFilePath = null;
+                    return false;
+                }
+
+                continue;
+            }
+
+            const string fpsLimitPrefix = "--fps-limit=";
+            if (argument.StartsWith(fpsLimitPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryParseFpsLimit(argument[fpsLimitPrefix.Length..], out fpsLimit))
                 {
                     ebootPath = string.Empty;
                     runtimeOptions = default;
@@ -1287,11 +1318,15 @@ internal static partial class Program
         runtimeOptions = new SharpEmuRuntimeOptions
         {
             CpuEngine = cpuEngine,
+            FpsLimit = fpsLimit,
             StrictDynlibResolution = strictDynlibResolution,
             ImportTraceLimit = importTraceLimit,
         };
         return true;
     }
+
+    private static bool TryParseFpsLimit(string valueText, out int fpsLimit) =>
+        int.TryParse(valueText, out fpsLimit) && fpsLimit is >= 0 and <= 240;
 
     private static bool TryParseCpuEngine(string valueText, out CpuExecutionEngine engine)
     {
