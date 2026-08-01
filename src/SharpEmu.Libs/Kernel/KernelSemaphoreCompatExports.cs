@@ -245,6 +245,18 @@ public static class KernelSemaphoreCompatExports
             }
             while (semaphore.Count < needCount)
             {
+				if (GuestThreadExecution.Scheduler is { } scheduler &&
+					scheduler.TryDeliverPendingGuestExceptionAtCurrentSafePoint(ctx, out var deliveryError))
+				{
+					if (_traceSema)
+					{
+						TraceSemaphore(
+							$"wait-host-exception handle=0x{handle:X8} name='{semaphore.Name}' " +
+							$"result={deliveryError ?? "delivered"} {FormatCallSite(ctx)}");
+					}
+					continue;
+				}
+
                 var remaining = deadlineMs - Environment.TickCount64;
                 if (timeoutAddress != 0 && remaining <= 0)
                 {

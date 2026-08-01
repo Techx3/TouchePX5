@@ -116,6 +116,15 @@ public interface IGuestThreadScheduler
         ulong handler,
         int exceptionType,
         out string? error);
+
+    /// <summary>
+    /// Delivers an exception queued for the current primary guest executor
+    /// while it is blocked inside an HLE wait. This preserves the target host
+    /// thread identity required by stop-the-world collectors.
+    /// </summary>
+    bool TryDeliverPendingGuestExceptionAtCurrentSafePoint(
+        CpuContext currentContext,
+        out string? error);
 }
 
 public readonly record struct GuestImportCallFrame(

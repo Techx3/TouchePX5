@@ -94,8 +94,8 @@ public static class PadExports
         return ctx.SetReturn(PrimaryPadHandle);
     }
 
-    // scePadOpen rejects a non-null 4th arg and non-standard ports; scePadOpenExt accepts a
-    // ScePadOpenExtParam* plus ports 1/2 (racing titles retry scePadOpenExt(type=2) forever if rejected).
+    // Gen5 titles use the regular scePadOpen entry point with port types 1/2 as well.
+    // Keep Gen4 scePadOpen strict while scePadOpenExt accepts all known port types.
     private static int PadOpenCore(CpuContext ctx, bool extended)
     {
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
@@ -112,7 +112,7 @@ public static class PadExports
             return ctx.SetReturn(OrbisPadErrorDeviceNoHandle);
         }
 
-        var typeAccepted = extended ? type is 0 or 1 or 2 : type == StandardPortType;
+        var typeAccepted = IsPortTypeAccepted(ctx.TargetGeneration, extended, type);
         if (userId != PrimaryUserId || !typeAccepted || index != 0 || (!extended && parameterAddress != 0))
         {
             return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
@@ -129,6 +129,10 @@ public static class PadExports
 
         return ctx.SetReturn(PrimaryPadHandle);
     }
+
+    internal static bool IsPortTypeAccepted(Generation generation, bool extended, int type) =>
+        type is 0 or 1 or 2 &&
+        (extended || generation == Generation.Gen5 || type == StandardPortType);
 
     [SysAbiExport(
         Nid = "6ncge5+l5Qs",

@@ -30,4 +30,22 @@ public sealed class PadExportsTests
         _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
         Assert.Equal(expected, PadExports.PadSetTiltCorrectionState(_ctx));
     }
+
+    [Theory]
+    [InlineData(Generation.Gen5, false, 0, true)]
+    [InlineData(Generation.Gen5, false, 1, true)]
+    [InlineData(Generation.Gen5, false, 2, true)]
+    [InlineData(Generation.Gen4, false, 0, true)]
+    [InlineData(Generation.Gen4, false, 1, false)]
+    [InlineData(Generation.Gen4, false, 2, false)]
+    [InlineData(Generation.Gen4, true, 2, true)]
+    [InlineData(Generation.Gen5, true, 3, false)]
+    public void PortTypeAcceptance_MatchesGeneration(
+        Generation generation,
+        bool extended,
+        int type,
+        bool expected)
+    {
+        Assert.Equal(expected, PadExports.IsPortTypeAccepted(generation, extended, type));
+    }
 }

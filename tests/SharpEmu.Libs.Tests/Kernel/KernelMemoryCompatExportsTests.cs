@@ -24,6 +24,48 @@ public sealed class KernelMemoryCompatExportsTests
     private const ulong SpanSizeOutAddress = GuestMemoryBase + 0x110;
 
     [Fact]
+    public void Mkdir_GuestRootReturnsAlreadyExists()
+    {
+        const ulong pathAddress = GuestMemoryBase + 0x100;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(pathAddress, "/");
+        context[CpuRegister.Rdi] = pathAddress;
+
+        var result = KernelMemoryCompatExports.KernelMkdir(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_ALREADY_EXISTS, result);
+    }
+
+    [Theory]
+    [InlineData("/dev/random")]
+    [InlineData("/dev/urandom")]
+    public void RandomDevice_CanOpenReadAndClose(string guestPath)
+    {
+        const ulong pathAddress = GuestMemoryBase + 0x100;
+        const ulong bufferAddress = GuestMemoryBase + 0x200;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(pathAddress, guestPath);
+        context[CpuRegister.Rdi] = pathAddress;
+        context[CpuRegister.Rsi] = 0;
+
+        Assert.Equal(0, KernelMemoryCompatExports.KernelOpenUnderscore(context));
+        var fd = unchecked((int)context[CpuRegister.Rax]);
+        context[CpuRegister.Rdi] = unchecked((ulong)fd);
+        context[CpuRegister.Rsi] = bufferAddress;
+        context[CpuRegister.Rdx] = 32;
+
+        Assert.Equal(0, KernelMemoryCompatExports.KernelReadUnderscore(context));
+        Assert.Equal(32UL, context[CpuRegister.Rax]);
+        var randomBytes = new byte[32];
+        Assert.True(memory.TryRead(bufferAddress, randomBytes));
+
+        context[CpuRegister.Rdi] = unchecked((ulong)fd);
+        Assert.Equal(0, KernelMemoryCompatExports.KernelCloseUnderscore(context));
+    }
+
+    [Fact]
     public void PosixStat_MissingFileReturnsMinusOne()
     {
         const ulong memoryBase = 0x1_0000_0000;
