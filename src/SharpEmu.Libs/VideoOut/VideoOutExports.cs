@@ -38,6 +38,7 @@ public static class VideoOutExports
     private const int VideoOutBuffersEntrySize = 0x20;
     private const int VideoOutOutputOptionsSize = 0x40;
     private const int VideoOutOutputStatusSize = 0x30;
+    private const int VideoOutFlipStatusSize = 0x80;
     private const int VideoOutVblankStatusSize = 0x28;
     private const ulong SceVideoOutOutputModeDefault = 1;
     private const ulong SceVideoOutOutputMode119_88Hz = 0xF;
@@ -216,6 +217,10 @@ public static class VideoOutExports
         public ulong VblankCount { get; set; }
         public ulong FlipCount { get; set; }
         public int CurrentBuffer { get; set; } = -1;
+        public ulong LastFlipProcessTime { get; set; }
+        public ulong LastFlipProcessTimeCounter { get; set; }
+        public ulong LastFlipSubmitProcessTimeCounter { get; set; }
+        public long LastFlipArg { get; set; } = -1;
         public uint OutputWidth { get; set; } = 1920;
         public uint OutputHeight { get; set; } = 1080;
         public uint RefreshRate { get; set; } = 60;
@@ -727,19 +732,72 @@ public static class VideoOutExports
         }
 
         ulong count;
-        uint currentBuffer;
+        ulong processTime;
+        ulong processTimeCounter;
+        ulong submitProcessTimeCounter;
+        long flipArg;
+        int currentBuffer;
         lock (_stateGate)
         {
             count = port.FlipCount;
-            currentBuffer = unchecked((uint)port.CurrentBuffer);
+            processTime = port.LastFlipProcessTime;
+            processTimeCounter = port.LastFlipProcessTimeCounter;
+            submitProcessTimeCounter = port.LastFlipSubmitProcessTimeCounter;
+            flipArg = port.LastFlipArg;
+            currentBuffer = port.CurrentBuffer;
         }
 
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x00, count);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x08, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x10, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, 0);
-        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, currentBuffer);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        Span<byte> status = stackalloc byte[VideoOutFlipStatusSize];
+        EncodeFlipStatus(
+            status,
+            count,
+            processTime,
+            processTimeCounter,
+            flipArg,
+            submitProcessTimeCounter,
+            gcQueueNum: 0,
+            flipPendingNum: 0,
+            currentBuffer);
+        TraceVideoOut(
+            $"videoout.get_flip_status handle={handle} count={count} current={currentBuffer} " +
+            $"arg={flipArg} process={processTime} counter={processTimeCounter} submit={submitProcessTimeCounter}");
+        return ctx.Memory.TryWrite(statusAddress, status)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+    }
+
+    /// <summary>
+    /// Encodes the Prospero/PS5 SceVideoOutFlipStatus layout. In particular,
+    /// currentBuffer is a signed 32-bit field at 0x38; 0x20 is reserved and
+    /// must not be used for it.
+    /// </summary>
+    internal static void EncodeFlipStatus(
+        Span<byte> status,
+        ulong count,
+        ulong processTime,
+        ulong processTimeCounter,
+        long flipArg,
+        ulong submitProcessTimeCounter,
+        int gcQueueNum,
+        int flipPendingNum,
+        int currentBuffer)
+    {
+        if (status.Length < VideoOutFlipStatusSize)
+        {
+            throw new ArgumentException(
+                $"Flip status buffer must be at least {VideoOutFlipStatusSize} bytes.",
+                nameof(status));
+        }
+
+        status[..VideoOutFlipStatusSize].Clear();
+        BinaryPrimitives.WriteUInt64LittleEndian(status[0x00..], count);
+        BinaryPrimitives.WriteUInt64LittleEndian(status[0x08..], processTime);
+        BinaryPrimitives.WriteInt64LittleEndian(status[0x18..], flipArg);
+        BinaryPrimitives.WriteUInt64LittleEndian(status[0x28..], processTimeCounter);
+        BinaryPrimitives.WriteInt32LittleEndian(status[0x30..], gcQueueNum);
+        BinaryPrimitives.WriteInt32LittleEndian(status[0x34..], flipPendingNum);
+        BinaryPrimitives.WriteInt32LittleEndian(status[0x38..], currentBuffer);
+        BinaryPrimitives.WriteUInt64LittleEndian(status[0x40..], submitProcessTimeCounter);
     }
 
     [SysAbiExport(
@@ -755,6 +813,7 @@ public static class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
+        TraceVideoOut($"videoout.is_flip_pending handle={handle} pending=0");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1222,6 +1281,12 @@ public static class VideoOutExports
 
             port.CurrentBuffer = bufferIndex;
             port.FlipCount++;
+            var now = Stopwatch.GetTimestamp();
+            port.LastFlipProcessTime = unchecked((ulong)(Math.Max(now - port.OpenTimestamp, 0) *
+                1_000_000L / Stopwatch.Frequency));
+            port.LastFlipProcessTimeCounter = unchecked((ulong)now);
+            port.LastFlipSubmitProcessTimeCounter = unchecked((ulong)now);
+            port.LastFlipArg = flipArg;
             eventHint = SceVideoOutInternalEventFlip |
                 ((unchecked((ulong)flipArg) & 0x0000_FFFF_FFFF_FFFFUL) << 16);
             flipEventCount = port.FlipEvents.Count;

@@ -84,6 +84,21 @@ public sealed class KernelMemoryCompatExportsTests
     }
 
     [Fact]
+    public void PosixUnlink_MissingFileReturnsMinusOne()
+    {
+        const ulong pathAddress = GuestMemoryBase + 0x100;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(pathAddress, "/temp0/__touchepx5_missing_file__.tmp");
+        context[CpuRegister.Rdi] = pathAddress;
+
+        var result = KernelMemoryCompatExports.PosixUnlink(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+    }
+
+    [Fact]
     public void PosixOpen_MissingFileReturnsMinusOne()
     {
         const ulong memoryBase = 0x1_0000_0000;

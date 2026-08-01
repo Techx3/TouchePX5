@@ -1016,6 +1016,30 @@ public static class KernelRuntimeCompatExports
     }
 
     [SysAbiExport(
+        Nid = "4fU5yvOkVG4",
+        ExportName = "sceSysmoduleGetModuleInfoForUnwind",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSysmodule")]
+    public static int SysmoduleGetModuleInfoForUnwind(CpuContext ctx)
+    {
+        return KernelGetModuleInfoForUnwind(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "crb5j7mkk1c",
+        ExportName = "_is_signal_return",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int IsSignalReturn(CpuContext ctx)
+    {
+        // Guest signal trampolines are not currently installed by the HLE kernel. Returning
+        // false lets the unwinder follow the ordinary module/frame path without fabricating
+        // signal-context output from a host or JIT return address.
+        ctx[CpuRegister.Rax] = 0;
+        return 0;
+    }
+
+    [SysAbiExport(
         Nid = "kUpgrXIrz7Q",
         ExportName = "sceKernelGetModuleInfo",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -1345,18 +1369,20 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var utc = DateTimeOffset.FromUnixTimeSeconds(utcSeconds);
-        var local = TimeZoneInfo.ConvertTime(utc, TimeZoneInfo.Local);
-        var offset = local.Offset;
-        var localSeconds = utcSeconds + (long)offset.TotalSeconds;
-        var dstSeconds = TimeZoneInfo.Local.IsDaylightSavingTime(local.DateTime)
-            ? (uint)Math.Max(0, TimeZoneInfo.Local.GetAdjustmentRules()
-                .Where(rule => rule.DateStart <= local.Date && rule.DateEnd >= local.Date)
-                .Select(rule => rule.DaylightDelta.TotalSeconds)
-                .DefaultIfEmpty(0)
-                .Max())
-            : 0u;
-        var westSeconds = unchecked((uint)(int)offset.TotalSeconds);
+        GetCurrentTimezone(out var minutesWest, out _, out var signedDstSeconds);
+        var westSeconds = (long)minutesWest * 60;
+        long localSeconds;
+        try
+        {
+            localSeconds = checked(utcSeconds - westSeconds + signedDstSeconds);
+        }
+        catch (OverflowException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var dstSeconds = unchecked((uint)signedDstSeconds);
+        var eastSeconds = unchecked((uint)-westSeconds);
 
         if (!ctx.TryWriteUInt64(localTimeAddress, unchecked((ulong)localSeconds)))
         {
@@ -1367,7 +1393,7 @@ public static class KernelRuntimeCompatExports
         {
             Span<byte> timesec = stackalloc byte[OrbisTimesecSize];
             BinaryPrimitives.WriteInt64LittleEndian(timesec, utcSeconds);
-            BinaryPrimitives.WriteUInt32LittleEndian(timesec.Slice(sizeof(long), sizeof(uint)), westSeconds);
+            BinaryPrimitives.WriteUInt32LittleEndian(timesec.Slice(sizeof(long), sizeof(uint)), eastSeconds);
             BinaryPrimitives.WriteUInt32LittleEndian(timesec.Slice(sizeof(long) + sizeof(uint), sizeof(uint)), dstSeconds);
             if (!ctx.Memory.TryWrite(timesecAddress, timesec))
             {
@@ -1401,20 +1427,19 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var localDate = DateTimeOffset.FromUnixTimeSeconds(localSeconds).DateTime;
-        var offset = TimeZoneInfo.Local.GetUtcOffset(localDate);
-        var utcSeconds = localSeconds - (long)offset.TotalSeconds;
-        var dstSeconds = TimeZoneInfo.Local.IsDaylightSavingTime(localDate)
-            ? (int)Math.Max(0, TimeZoneInfo.Local.GetAdjustmentRules()
-                .Where(rule => rule.DateStart <= localDate.Date && rule.DateEnd >= localDate.Date)
-                .Select(rule => rule.DaylightDelta.TotalSeconds)
-                .DefaultIfEmpty(0)
-                .Max())
-            : 0;
-        var minutesWest = unchecked((int)-offset.TotalMinutes);
+        GetCurrentTimezone(out var minutesWest, out var dstType, out var dstSeconds);
+        long utcSeconds;
+        try
+        {
+            utcSeconds = checked(localSeconds + checked((long)minutesWest * 60) - dstSeconds);
+        }
+        catch (OverflowException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
 
         if (!TryWriteInt32(ctx, timezoneAddress, minutesWest) ||
-            !TryWriteInt32(ctx, timezoneAddress + sizeof(int), dstSeconds / 60))
+            !TryWriteInt32(ctx, timezoneAddress + sizeof(int), dstType))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1431,6 +1456,22 @@ public static class KernelRuntimeCompatExports
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static void GetCurrentTimezone(out int minutesWest, out int dstType, out int dstSeconds)
+    {
+        const int dstNone = 0;
+        const int dstMet = 4;
+
+        var timezone = TimeZoneInfo.Local;
+        var now = DateTimeOffset.Now;
+        var baseOffset = timezone.BaseUtcOffset;
+        var currentOffset = timezone.GetUtcOffset(now);
+        var daylightDelta = currentOffset - baseOffset;
+
+        minutesWest = checked((int)-baseOffset.TotalMinutes);
+        dstSeconds = checked((int)daylightDelta.TotalSeconds);
+        dstType = dstSeconds == 0 ? dstNone : dstMet;
     }
 
     [SysAbiExport(
