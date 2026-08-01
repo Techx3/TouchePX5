@@ -1946,6 +1946,57 @@ internal static unsafe class VulkanVideoPresenter
         uint depth) =>
         checked(GetGuestImageByteCount(format, width, height) * Math.Max(depth, 1u));
 
+    /// <summary>
+    /// Upper bound on the backing extent that guest CPU-write tracking is
+    /// armed over. Deliberately equal to the presenter-side re-upload budget
+    /// used by the AGC flip/acquire sync path: arming a range larger than the
+    /// sync path is willing to read back would fault and dirty forever without
+    /// ever producing a re-upload, so it is pure cost.
+    /// </summary>
+    internal const ulong MaxTrackedGuestImageBytes = 128UL * 1024UL * 1024UL;
+
+    /// <summary>
+    /// Decides whether a guest surface is eligible for CPU-write tracking.
+    /// The predicate is byte-based on purpose: the cost that actually scales
+    /// with surface size is the dirty re-upload (one allocation plus a guest
+    /// memory read of the whole extent per dirty flip), not the arming itself
+    /// (one mprotect and, per write burst, one fault for the whole range).
+    /// A resolution cap was the wrong proxy — it ignored bytes-per-texel and
+    /// volume depth while excluding the 4K UI sheets that most need
+    /// invalidation.
+    /// </summary>
+    internal static bool ShouldTrackGuestImageWrites(ulong byteCount) =>
+        byteCount != 0 && byteCount <= MaxTrackedGuestImageBytes;
+
+    /// <summary>
+    /// Decides whether a sampled guest image whose backing memory the parse
+    /// thread just re-read should be re-uploaded from those bytes.
+    /// <para>
+    /// <paramref name="isCpuBacked"/> is a latch that flips false the first
+    /// time an address is used as a render target and never flips back, so it
+    /// cannot be the sole gate: a font atlas or UI sheet that was also
+    /// rendered into is permanently frozen at its first upload afterwards.
+    /// The write tracker answers the real question. A parse-time generation
+    /// above zero means a guest CPU store was observed on the backing range,
+    /// and a generation the last upload does not already cover means those
+    /// bytes are newer than the host image.
+    /// </para>
+    /// <para>
+    /// Requiring a positive generation keeps the pure GPU-feedback case
+    /// (render into an image, then sample it) safe: such a surface is tracked
+    /// but never CPU-written, so its generation stays zero and the live image
+    /// is preserved instead of being overwritten with guest memory.
+    /// </para>
+    /// </summary>
+    internal static bool ShouldRefreshGuestImageFromCpu(
+        bool isCpuBacked,
+        long textureWriteGeneration,
+        bool hasUploadedGeneration,
+        long uploadedGeneration) =>
+        isCpuBacked ||
+        (textureWriteGeneration > 0 &&
+            (!hasUploadedGeneration || uploadedGeneration != textureWriteGeneration));
+
     // Maps a UNORM swapchain format to the sRGB view of the same bit layout,
     // or Undefined when no counterpart exists. Used to encode linear-float
     // guest flips on their way into a UNORM swapchain.
@@ -1960,6 +2011,28 @@ internal static unsafe class VulkanVideoPresenter
     // requires a linear->sRGB encode that a plain blit does not perform.
     internal static bool IsLinearFloatPresentSource(Format format) =>
         format is Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat;
+
+    // A guest image accepts a request in a different Vulkan format without
+    // being recreated when the two formats are the same texel layout read
+    // through different transfer functions (sRGB vs UNORM counterparts).
+    // Both must also be legal alias views of each other so the shared
+    // mutable-format image can serve either identity. Same-class numeric
+    // reinterpretation (R32Uint over R8G8B8A8Unorm, packed 10:10:10:2 over
+    // 8:8:8:8) is excluded: the attachment keeps the existing image's
+    // format, and a fragment shader translated for the other numeric type
+    // would no longer match it.
+    internal static bool IsAliasableGuestImageFormat(
+        Format existingFormat,
+        Format requestedFormat) =>
+        existingFormat != requestedFormat &&
+        Presenter.IsCompatibleViewFormat(existingFormat, requestedFormat) &&
+        Presenter.GetStorageImageFormat(existingFormat) ==
+            Presenter.GetStorageImageFormat(requestedFormat);
+
+    internal static bool IsCompatibleGuestImageViewFormat(
+        Format imageFormat,
+        Format viewFormat) =>
+        Presenter.IsCompatibleViewFormat(imageFormat, viewFormat);
 
     private static byte[]? TakeGuestImageInitialData(ulong address)
     {
@@ -3785,6 +3858,11 @@ internal static unsafe class VulkanVideoPresenter
         private readonly VulkanHostBufferPool _hostBufferPool;
         private readonly List<GuestBufferAllocation> _guestBufferAllocations = [];
         private readonly Queue<PendingGuestSubmission> _pendingGuestSubmissions = new();
+        // Submissions whose fence timed out. Keep GPU objects alive until the
+        // fence signals (or the device is lost) so a single hung compute
+        // dispatch cannot re-block every subsequent capacity wait for the full
+        // fence timeout (~3s → ~0.3 FPS).
+        private readonly Queue<PendingGuestSubmission> _abandonedGuestSubmissions = new();
         private readonly Dictionary<string, ulong> _lastSubmittedTimelineByGuestQueue =
             new(StringComparer.Ordinal);
         private readonly Stack<DescriptorPool> _recycledDescriptorPools = new();
@@ -4878,6 +4956,7 @@ internal static unsafe class VulkanVideoPresenter
                 ShaderStorageImageExtendedFormats = supportedFeatures.ShaderStorageImageExtendedFormats,
                 ShaderStorageImageReadWithoutFormat = supportedFeatures.ShaderStorageImageReadWithoutFormat,
                 ShaderStorageImageWriteWithoutFormat = supportedFeatures.ShaderStorageImageWriteWithoutFormat,
+                TextureCompressionBC = supportedFeatures.TextureCompressionBC,
                 RobustBufferAccess = supportedFeatures.RobustBufferAccess,
             };
 
@@ -4915,6 +4994,13 @@ internal static unsafe class VulkanVideoPresenter
                 Console.Error.WriteLine(
                     "[LOADER][WARN] GPU does not support shaderStorageImage(Read|Write)WithoutFormat " +
                     "translated shaders using unformatted storage image load/store will fail.");
+            }
+
+            if (!supportedFeatures.TextureCompressionBC)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support textureCompressionBC " +
+                    "guest BC1-BC7 textures cannot be sampled directly.");
             }
 
             var maintenance8Features = new PhysicalDeviceMaintenance8FeaturesKHR
@@ -5902,6 +5988,45 @@ internal static unsafe class VulkanVideoPresenter
             {
                 CollectCompletedGuestSubmissions(waitForOldest: true);
             }
+
+            while (_abandonedGuestSubmissions.Count != 0)
+            {
+                CollectAbandonedGuestSubmissions();
+                if (_abandonedGuestSubmissions.Count == 0)
+                {
+                    break;
+                }
+
+                if (!_abandonedGuestSubmissions.TryPeek(out var oldest))
+                {
+                    break;
+                }
+
+                var fence = oldest.Fence;
+                var result = _vk.WaitForFences(
+                    _device,
+                    1,
+                    &fence,
+                    true,
+                    _guestFenceWaitTimeoutNs);
+                if (result == Result.Timeout || result == Result.ErrorDeviceLost)
+                {
+                    if (result == Result.ErrorDeviceLost)
+                    {
+                        _deviceLost = true;
+                    }
+
+                    while (_abandonedGuestSubmissions.TryDequeue(out var abandoned))
+                    {
+                        RetireGuestSubmission(abandoned);
+                    }
+
+                    break;
+                }
+
+                Check(result, $"vkWaitForFences(abandoned: {oldest.DebugName})");
+                CollectAbandonedGuestSubmissions();
+            }
         }
 
         private void CollectCompletedGuestSubmissions(bool waitForOldest, ulong maxWaitNs = 0)
@@ -5929,18 +6054,26 @@ internal static unsafe class VulkanVideoPresenter
                     // would otherwise block the render thread forever, starving
                     // the swapchain present (black screen). Log the culprit and
                     // continue so at least the last good frame can be shown.
-                    if (!isProbeWait && _tracedFenceTimeouts.Add(oldest.DebugName))
+                    if (isProbeWait)
+                    {
+                        return;
+                    }
+
+                    if (_tracedFenceTimeouts.Add(oldest.DebugName))
                     {
                         Console.Error.WriteLine(
                             $"[LOADER][WARN] vk.fence_wait_timeout submission='{oldest.DebugName}' " +
                             $"— GPU work not completing after {_guestFenceWaitTimeoutNs / 1_000_000}ms; " +
-                            "render thread continuing (present not blocked).");
+                            "abandoning in-flight tracking so later frames are not re-blocked.");
                     }
 
-                    return;
+                    // Move out of the blocking queue without destroying GPU
+                    // objects yet — the work may still be running. Poll and
+                    // retire from the abandoned list once the fence signals.
+                    _pendingGuestSubmissions.Dequeue();
+                    _abandonedGuestSubmissions.Enqueue(oldest);
                 }
-
-                if (result == Result.ErrorDeviceLost)
+                else if (result == Result.ErrorDeviceLost)
                 {
                     _deviceLost = true;
                     if (!_deviceLostLogged)
@@ -5981,42 +6114,77 @@ internal static unsafe class VulkanVideoPresenter
                 }
 
                 _pendingGuestSubmissions.Dequeue();
+                RetireGuestSubmission(submission);
+            }
 
-                if (!_deviceLost)
+            CollectAbandonedGuestSubmissions();
+            ProcessDeferredTextureDestroys();
+        }
+
+        private void CollectAbandonedGuestSubmissions()
+        {
+            var pending = _abandonedGuestSubmissions.Count;
+            for (var i = 0; i < pending; i++)
+            {
+                if (!_abandonedGuestSubmissions.TryDequeue(out var submission))
                 {
-                    foreach (var image in submission.TraceImages)
-                    {
-                        TraceGuestImageContents(image);
-                    }
+                    break;
                 }
 
-                foreach (var resources in submission.Resources)
+                var status = _vk.GetFenceStatus(_device, submission.Fence);
+                if (status == Result.NotReady && !_deviceLost)
                 {
-                    DestroyTranslatedDrawResources(resources);
+                    _abandonedGuestSubmissions.Enqueue(submission);
+                    continue;
                 }
 
-                foreach (var (buffer, memory) in submission.RetireBuffers)
+                if (status == Result.ErrorDeviceLost)
                 {
-                    _vk.DestroyBuffer(_device, buffer, null);
-                    _vk.FreeMemory(_device, memory, null);
+                    _deviceLost = true;
+                }
+                else if (status != Result.NotReady && status != Result.Success)
+                {
+                    Check(status, $"vkGetFenceStatus(abandoned: {submission.DebugName})");
                 }
 
-                // The fence has signalled, so the detile dispatch that used these
-                // is done reading them; hand them back for the next texture.
-                foreach (var transients in submission.RetireDetile)
-                {
-                    _detilePass?.Retire(transients);
-                }
+                RetireGuestSubmission(submission);
+            }
+        }
 
-                ReleaseGuestCommandBuffer(submission.CommandBuffer);
-                ReleaseGuestFence(submission.Fence, needsReset: true);
-                if (submission.Timeline > _completedTimeline)
+        private void RetireGuestSubmission(PendingGuestSubmission submission)
+        {
+            if (!_deviceLost)
+            {
+                foreach (var image in submission.TraceImages)
                 {
-                    _completedTimeline = submission.Timeline;
+                    TraceGuestImageContents(image);
                 }
             }
 
-            ProcessDeferredTextureDestroys();
+            // The fence has signalled, so the detile dispatch that used these
+            // is done reading them; hand them back for the next texture.
+            foreach (var transients in submission.RetireDetile)
+            {
+                _detilePass?.Retire(transients);
+            }
+
+            foreach (var resources in submission.Resources)
+            {
+                DestroyTranslatedDrawResources(resources);
+            }
+
+            foreach (var (buffer, memory) in submission.RetireBuffers)
+            {
+                _vk.DestroyBuffer(_device, buffer, null);
+                _vk.FreeMemory(_device, memory, null);
+            }
+
+            ReleaseGuestCommandBuffer(submission.CommandBuffer);
+            ReleaseGuestFence(submission.Fence, needsReset: true);
+            if (submission.Timeline > _completedTimeline)
+            {
+                _completedTimeline = submission.Timeline;
+            }
         }
 
         private void WaitForAllGuestSubmissionsForCpuVisibility()
@@ -8565,13 +8733,38 @@ internal static unsafe class VulkanVideoPresenter
             out TextureResource resource)
         {
             resource = default!;
-            if (!guestImage.IsCpuBacked ||
-                guestImage.Width != texture.Width ||
+            if (guestImage.Width != texture.Width ||
                 guestImage.Height != texture.Height ||
                 guestImage.Depth != GetGuestTextureDepth(texture.Type, texture.Depth) ||
                 IsGuestTexture3D(guestImage.Type) != IsGuestTexture3D(texture.Type) ||
                 guestImage.MipLevels != 1 ||
                 texture.RgbaPixels.Length == 0)
+            {
+                return false;
+            }
+
+            // IsCpuBacked alone used to gate this path, but it is a latch that
+            // flips false the first time the address is used as a render target
+            // and never flips back. On PS5 that address is unified memory: a
+            // surface that was rendered into once and is later rewritten by the
+            // guest CPU (glyph atlas rasterization, a 4K UI sheet redrawn on the
+            // brightness screen) must still be re-read. Fall back on the write
+            // tracker, which reports genuine CPU stores and leaves pure
+            // render-into-then-sample feedback untouched.
+            bool hasUploadedGeneration;
+            long uploadedGeneration;
+            lock (_gate)
+            {
+                hasUploadedGeneration = _cpuBackedUploadGenerations.TryGetValue(
+                    texture.Address,
+                    out uploadedGeneration);
+            }
+
+            if (!ShouldRefreshGuestImageFromCpu(
+                    guestImage.IsCpuBacked,
+                    texture.WriteGeneration,
+                    hasUploadedGeneration,
+                    uploadedGeneration))
             {
                 return false;
             }
@@ -12847,6 +13040,14 @@ internal static unsafe class VulkanVideoPresenter
                     requiredMipLevels: GetRequiredMipLevels(
                         work.Targets,
                         targetDescriptor.Address));
+                // A view-compatible alias accept can return an image whose
+                // identity differs from the request (sRGB vs UNORM
+                // counterpart). The render pass, framebuffer views, and
+                // pipeline cache key must all follow the format that actually
+                // backs the attachment; a pipeline keyed on the requested
+                // format could later be replayed inside a render pass of the
+                // other identity.
+                formats[index] = targets[index].Format;
                 if (work.Targets[index].Address != 0 &&
                     TakeGuestImageInitialData(work.Targets[index].Address) is { } initialData &&
                     !targets[index].Initialized &&
@@ -14031,6 +14232,20 @@ internal static unsafe class VulkanVideoPresenter
                     $"address 0x{target.Address:X16}.");
             }
 
+            if (!supportsStorageUsage)
+            {
+                // sRGB targets must stay shareable with later UNORM
+                // ImageLoad/Store aliases of the same surface. The image is
+                // created with MUTABLE_FORMAT | EXTENDED_USAGE, so carrying
+                // storage usage is legal as long as the view-compatible UNORM
+                // counterpart supports storage; stores then go through the
+                // UNORM alias view instead of recreating the image.
+                var storageCounterpart = GetStorageImageFormat(format);
+                supportsStorageUsage = storageCounterpart != format &&
+                    IsCompatibleViewFormat(format, storageCounterpart) &&
+                    SupportsStorageImage(storageCounterpart);
+            }
+
             // Storage/UAV images keep native guest dimensions (compute shaders index them directly).
             var physicalWidth = requiresStorage
                 ? target.Width
@@ -14057,14 +14272,30 @@ internal static unsafe class VulkanVideoPresenter
                 format);
             if (_guestImages.TryGetValue(target.Address, out var existing))
             {
+                // View-compatible formats (sRGB vs UNORM of the same texel
+                // layout) are the same guest surface accessed through
+                // different number formats — render as sRGB, ImageLoad/Store
+                // as UNORM is a standard PS5 pattern (AvPlayer movie copies,
+                // post-process chains). Recreating the image for that case
+                // ping-pongs content between two VkImages and every transition
+                // loses the rendered pixels; the mutable-format image accepts
+                // an alternate-format view instead. Aliasing is limited to
+                // sRGB/UNORM counterparts: broader same-class reinterpretation
+                // (e.g. R32Uint over R8G8B8A8Unorm) would attach pipelines
+                // whose fragment output type no longer matches the attachment,
+                // so those keep the recreate path.
+                var exactFormatMatch =
+                    existing.GuestFormat == guestFormat &&
+                    existing.Format == format;
                 if (existing.LogicalWidth == target.Width &&
                     existing.LogicalHeight == target.Height &&
                     existing.LogicalDepth == depth &&
                     existing.Type == type &&
                     existing.MipLevels == mipLevels &&
                     existing.ArrayLayers >= arrayLayers &&
-                    existing.GuestFormat == guestFormat &&
-                    existing.Format == format)
+                    (exactFormatMatch ||
+                     (IsAliasableGuestImageFormat(existing.Format, format) &&
+                      (!requiresStorage || existing.SupportsStorageUsage))))
                 {
                     if (requiresStorage && !existing.SupportsStorageUsage)
                     {
@@ -14149,20 +14380,33 @@ internal static unsafe class VulkanVideoPresenter
                 retained.IsCpuBacked = false;
                 retained.CpuContentFingerprint = 0;
                 _guestImages.Add(target.Address, retained);
+                var retainedByteCount = GetTextureByteCount(
+                    target.Format,
+                    target.Width,
+                    target.Height,
+                    depth);
                 lock (_gate)
                 {
                     _cpuBackedUploadGenerations.Remove(target.Address);
                     _guestImageExtents[target.Address] = (
                         target.Width,
                         target.Height,
-                        GetTextureByteCount(
-                            target.Format,
-                            target.Width,
-                            target.Height,
-                            depth));
+                        retainedByteCount);
                 }
 
-                TrackCpuBackedGuestImage(retained);
+                // Arm the exact extent the flip/acquire sync path would read
+                // back, budgeted by bytes rather than by resolution: the old
+                // 1920x1080 cap left every 4K surface permanently
+                // un-invalidated, so a guest CPU rewrite of one was never
+                // reflected and the sample served stale bytes.
+                if (ShouldTrackGuestImageWrites(retainedByteCount))
+                {
+                    SharpEmu.HLE.GuestImageWriteTracker.Track(
+                        target.Address,
+                        retainedByteCount,
+                        CurrentGuestWorkSequenceForDiagnostics,
+                        "vulkan.render-target");
+                }
 
                 if (_traceGuestImageEvents)
                 {
@@ -14302,19 +14546,31 @@ internal static unsafe class VulkanVideoPresenter
                 SetDebugName(ObjectType.Framebuffer, framebuffer.Handle, $"{debugName} framebuffer");
             }
             _guestImages.Add(target.Address, resource);
+            var createdByteCount = GetTextureByteCount(
+                target.Format,
+                target.Width,
+                target.Height,
+                depth);
             lock (_gate)
             {
                 _guestImageExtents[target.Address] = (
                     target.Width,
                     target.Height,
-                    GetTextureByteCount(
-                        target.Format,
-                        target.Width,
-                        target.Height,
-                        depth));
+                    createdByteCount);
             }
 
-            TrackCpuBackedGuestImage(resource);
+            // See the retained-variant path above: track the full backing
+            // extent under a byte budget instead of a resolution cap so
+            // oversized render targets the guest later rewrites with the CPU
+            // are re-uploaded on the next sample.
+            if (ShouldTrackGuestImageWrites(createdByteCount))
+            {
+                SharpEmu.HLE.GuestImageWriteTracker.Track(
+                    target.Address,
+                    createdByteCount,
+                    CurrentGuestWorkSequenceForDiagnostics,
+                    "vulkan.render-target");
+            }
 
             if (_traceGuestImageEvents)
             {
@@ -14328,24 +14584,25 @@ internal static unsafe class VulkanVideoPresenter
 
         private void TrackCpuBackedGuestImage(GuestImageResource image)
         {
-            // Arm ≤1080p guest images so native CPU stores fault. Drain skips
-            // false overlap dirties with a 4 KiB zero probe unless IsCpuBacked.
-            if (image.Width == 0 ||
-                image.Height == 0 ||
-                image.Width > 1920 ||
-                image.Height > 1080)
+            if (image.Width == 0 || image.Height == 0)
             {
                 return;
             }
 
             var depth = Math.Max(image.Depth, 1u);
+            var byteCount = GetVulkanImageByteCount(
+                image.Format,
+                image.Width,
+                image.Height,
+                depth);
+            if (!ShouldTrackGuestImageWrites(byteCount))
+            {
+                return;
+            }
+
             SharpEmu.HLE.GuestImageWriteTracker.Track(
                 image.Address,
-                GetVulkanImageByteCount(
-                    image.Format,
-                    image.Width,
-                    image.Height,
-                    depth),
+                byteCount,
                 CurrentGuestWorkSequenceForDiagnostics,
                 "vulkan.render-target");
         }
@@ -15113,8 +15370,23 @@ internal static unsafe class VulkanVideoPresenter
             {
                 Format.R8Unorm or
                 Format.R8Uint or
-                Format.R8Sint => 8,
-                Format.R16Sfloat => 16,
+                Format.R8Sint or
+                Format.R8SNorm => 8,
+                // Every single-channel 16-bit format shares this class, not just
+                // the float one. Omitting the rest made GetVulkanImageByteCount
+                // return zero for them, and a zero expected size rejects the
+                // guest's upload outright — the texture then samples as blank
+                // for the life of the run. Silent Hill uploads R16Unorm at
+                // 144x81 through 1024x1024 and every one was dropped.
+                Format.R16Sfloat or
+                Format.R16Unorm or
+                Format.R16SNorm or
+                Format.R16Uint or
+                Format.R16Sint or
+                Format.R8G8Unorm or
+                Format.R8G8SNorm or
+                Format.R8G8Uint or
+                Format.R8G8Sint => 16,
                 Format.R32Uint or
                 Format.R32Sint or
                 Format.R32Sfloat or
@@ -16177,6 +16449,7 @@ internal static unsafe class VulkanVideoPresenter
                 Format.R8G8B8A8Uint or
                 Format.R8G8B8A8Sint or
                 Format.R8G8B8A8Unorm or
+                Format.R8G8B8A8Srgb or
                 // COMP_SWAP=ALT render targets are created as BGRA; readback
                 // diagnostics must still be able to size their texels.
                 Format.B8G8R8A8Unorm or
