@@ -189,7 +189,8 @@ public static class KernelSemaphoreCompatExports
                 GetSemaphoreWakeKey(handle),
                 ResumeWait,
                 WakePredicate,
-                deadline))
+                deadline,
+                requireContinuation: true))
         {
             // A signal may have arrived between releasing the semaphore gate
             // (after incrementing WaitingThreads) and the scheduler registering

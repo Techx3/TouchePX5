@@ -100,6 +100,29 @@ public sealed class GuestThreadBlockWaiterRepresentationTests
         }
     }
 
+    [Fact]
+    public void ContextBlockWithoutImportContinuationFallsBackInsteadOfOrphaningThread()
+    {
+        var previousThread = GuestThreadExecution.EnterGuestThread(0x1234);
+        try
+        {
+            var context = new CpuContext(
+                new FakeCpuMemory(0x1_0000_0000, 0x1000),
+                Generation.Gen5);
+
+            Assert.False(GuestThreadExecution.RequestCurrentThreadBlock(
+                context,
+                reason: "test_wait",
+                wakeKey: "test_waiter:missing-continuation",
+                requireContinuation: true));
+            Assert.False(GuestThreadExecution.TryConsumeCurrentThreadBlock(out _));
+        }
+        finally
+        {
+            GuestThreadExecution.RestoreGuestThread(previousThread);
+        }
+    }
+
     private static bool IsFuncParameter(Type parameterType)
     {
         var type = parameterType.IsByRef
