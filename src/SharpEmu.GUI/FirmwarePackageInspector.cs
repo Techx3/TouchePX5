@@ -31,7 +31,7 @@ public sealed record FirmwarePackageEntry(
     bool IsBlocked,
     bool IsSpecial)
 {
-    public bool CanExtractDirectly => !IsCompressed && !IsBlocked && !IsSpecial && StoredSize > 0;
+    public bool CanExtract => !IsSpecial && StoredSize > 0 && UnpackedSize > 0;
 
     public string FileName => $"entry-{Index:D4}-id-{Id:x3}.bin";
 }
@@ -47,6 +47,8 @@ public static class FirmwarePackageInspector
     private const int DecryptedHeaderSize = 32;
     private const int DecryptedEntrySize = 32;
     private const int MaximumEntryCount = 4096;
+    private const ulong MaximumEntryExtractionSize = 4UL * 1024 * 1024 * 1024;
+    private const ulong MaximumTotalExtractionSize = 16UL * 1024 * 1024 * 1024;
     private const uint VersionMetadataEntryId = 0x0C;
     private const int SiecafHeaderSize = 0x58;
     private const int SiecafSegmentMetadataSize = 0x40;
@@ -149,15 +151,15 @@ public static class FirmwarePackageInspector
                 isSpecial);
             entries.Add(packageEntry);
 
-            if (packageEntry.CanExtractDirectly)
+            if (packageEntry.CanExtract)
             {
-                var maximumExtractionSize = (ulong)fileInfo.Length;
-                if (storedSize > maximumExtractionSize - directExtractionSize)
+                if (unpackedSize > MaximumEntryExtractionSize ||
+                    unpackedSize > MaximumTotalExtractionSize - directExtractionSize)
                 {
-                    throw new InvalidDataException("The decrypted PUP requests an excessive direct extraction size.");
+                    throw new InvalidDataException("The decrypted PUP requests an excessive extraction size.");
                 }
 
-                directExtractionSize += storedSize;
+                directExtractionSize += unpackedSize;
             }
 
             if (id == VersionMetadataEntryId)

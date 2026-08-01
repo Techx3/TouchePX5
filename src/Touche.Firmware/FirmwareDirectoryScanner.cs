@@ -212,6 +212,14 @@ public sealed class FirmwareDirectoryScanner
         {
             return (FirmwareArtifactKind.FileSystemImage, FirmwareArtifactState.Recognized);
         }
+        if (header.Length >= 11 && header[3..11].SequenceEqual("EXFAT   "u8))
+        {
+            return (FirmwareArtifactKind.FileSystemImage, FirmwareArtifactState.Recognized);
+        }
+        if (header.StartsWith("SLB2"u8))
+        {
+            return (FirmwareArtifactKind.Archive, FirmwareArtifactState.Recognized);
+        }
         if (header.Length >= 4 &&
             header[0] == (byte)'P' &&
             header[1] == (byte)'K' &&

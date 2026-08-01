@@ -78,6 +78,29 @@ public sealed class FirmwareDirectoryImporterTests : IDisposable
     }
 
     [Fact]
+    public async Task ScanRecognizesExtractedPupContainersAndFileSystems()
+    {
+        var root = Path.Combine(_temporaryDirectory, "container-signatures");
+        Directory.CreateDirectory(root);
+        File.WriteAllBytes(Path.Combine(root, "outer.bin"), "SLB2payload"u8.ToArray());
+        var exfat = new byte[512];
+        "EXFAT   "u8.CopyTo(exfat.AsSpan(3));
+        File.WriteAllBytes(Path.Combine(root, "system-image.bin"), exfat);
+        var scanner = new FirmwareDirectoryScanner();
+
+        var result = await scanner.ScanAsync(root);
+
+        Assert.Contains(result.Manifest.Artifacts, artifact =>
+            artifact.VirtualPath == "/outer.bin" &&
+            artifact.Kind == FirmwareArtifactKind.Archive &&
+            artifact.State == FirmwareArtifactState.Recognized);
+        Assert.Contains(result.Manifest.Artifacts, artifact =>
+            artifact.VirtualPath == "/system-image.bin" &&
+            artifact.Kind == FirmwareArtifactKind.FileSystemImage &&
+            artifact.State == FirmwareArtifactState.Recognized);
+    }
+
+    [Fact]
     public async Task ReimportRejectsTamperedCasObject()
     {
         var source = CreateExtractedTree("tamper-source", reverseCreationOrder: false);

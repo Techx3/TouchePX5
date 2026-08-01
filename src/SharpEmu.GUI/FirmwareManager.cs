@@ -3,6 +3,8 @@
 
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Buffers.Binary;
+using System.IO.Compression;
 
 namespace SharpEmu.GUI;
 
@@ -37,8 +39,8 @@ public readonly record struct FirmwareInstallProgress(long BytesCopied, long Tot
 public sealed record FirmwareInstallResult(InstalledFirmware Firmware, bool AlreadyInstalled);
 
 /// <summary>
-/// Validates and stores user-supplied firmware packages. Direct entries from
-/// an already-decrypted PUP can be extracted locally; protected content is
+/// Validates and stores user-supplied firmware packages. Entries from an
+/// already-decrypted PUP can be extracted locally; protected content is
 /// never decrypted or redistributed.
 /// </summary>
 public sealed class FirmwareManager
@@ -49,6 +51,7 @@ public sealed class FirmwareManager
     private const string ManifestFileName = "manifest.json";
     private const string InventoryFileName = "inventory.json";
     private const string EntriesDirectoryName = "entries";
+    private const long MaximumBlockTableBytes = 64L * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
     private readonly string _rootDirectory;
@@ -192,7 +195,7 @@ public sealed class FirmwareManager
             }
 
             var extractedEntries = inspection.Kind == FirmwareContainerKind.DecryptedPup
-                ? await ExtractDirectEntriesAsync(
+                ? await ExtractEntriesAsync(
                         stagingPath,
                         stagingDirectory,
                         inspection.Entries,
@@ -267,7 +270,7 @@ public sealed class FirmwareManager
         manifest.HasVersionMetadataEntry,
         manifest.Entries?.Count(entry => entry.ExtractedRelativePath is not null) ?? 0);
 
-    private static async Task<ExtractedFirmwareEntries> ExtractDirectEntriesAsync(
+    private static async Task<ExtractedFirmwareEntries> ExtractEntriesAsync(
         string packagePath,
         string stagingRoot,
         IReadOnlyList<FirmwarePackageEntry> entries,
@@ -292,24 +295,32 @@ public sealed class FirmwareManager
                 cancellationToken.ThrowIfCancellationRequested();
                 string? relativePath = null;
                 string? extractedSha256 = null;
-                if (entry.CanExtractDirectly)
+                if (entry.CanExtract)
                 {
-                    relativePath = Path.Combine(EntriesDirectoryName, entry.FileName).Replace('\\', '/');
                     var outputPath = Path.Combine(directoryPath, entry.FileName);
-                    source.Position = checked((long)entry.Offset);
-                    await using var destination = new FileStream(
-                        outputPath,
-                        FileMode.CreateNew,
-                        FileAccess.Write,
-                        FileShare.None,
-                        1024 * 1024,
-                        FileOptions.Asynchronous | FileOptions.SequentialScan);
-                    extractedSha256 = await CopyExactlyAsync(
+                    var tableEntry = entry.IsBlocked
+                        ? FindBlockTable(entries, entry)
+                        : null;
+                    await ExtractEntryAsync(
                         source,
-                        destination,
-                        checked((long)entry.StoredSize),
+                        entry,
+                        tableEntry,
+                        outputPath,
                         buffer,
                         cancellationToken).ConfigureAwait(false);
+                    var detectedFileName = await DetectExtractedFileNameAsync(
+                        outputPath,
+                        entry.FileName,
+                        cancellationToken).ConfigureAwait(false);
+                    if (!string.Equals(detectedFileName, entry.FileName, StringComparison.Ordinal))
+                    {
+                        var detectedPath = Path.Combine(directoryPath, detectedFileName);
+                        File.Move(outputPath, detectedPath);
+                        outputPath = detectedPath;
+                    }
+                    relativePath = Path.Combine(EntriesDirectoryName, detectedFileName).Replace('\\', '/');
+                    extractedSha256 = await ComputeFileHashAsync(outputPath, cancellationToken)
+                        .ConfigureAwait(false);
                 }
 
                 inventory.Add(new FirmwareEntryManifest(
@@ -335,7 +346,294 @@ public sealed class FirmwareManager
         }
     }
 
-    private static async Task<string> CopyExactlyAsync(
+    private static FirmwarePackageEntry? FindBlockTable(
+        IReadOnlyList<FirmwarePackageEntry> entries,
+        FirmwarePackageEntry blockedEntry)
+    {
+        var matches = entries
+            .Where(candidate => (candidate.Flags & 1) != 0 && candidate.Id == blockedEntry.Index)
+            .ToArray();
+        return matches.Length switch
+        {
+            0 when !blockedEntry.IsCompressed => null,
+            0 => throw new InvalidDataException($"PUP entry {blockedEntry.Index} has no block table."),
+            1 => matches[0],
+            _ => throw new InvalidDataException($"PUP entry {blockedEntry.Index} has multiple block tables."),
+        };
+    }
+
+    private static async Task ExtractEntryAsync(
+        FileStream source,
+        FirmwarePackageEntry entry,
+        FirmwarePackageEntry? tableEntry,
+        string outputPath,
+        byte[] buffer,
+        CancellationToken cancellationToken)
+    {
+        await using var destination = new FileStream(
+            outputPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+        if (!entry.IsBlocked)
+        {
+            if (entry.IsCompressed)
+            {
+                await DecompressRangeExactlyAsync(
+                    source,
+                    entry.Offset,
+                    entry.StoredSize,
+                    destination,
+                    entry.UnpackedSize,
+                    buffer,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                source.Position = checked((long)entry.Offset);
+                await CopyExactlyAsync(
+                    source,
+                    destination,
+                    checked((long)entry.StoredSize),
+                    buffer,
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            await ExtractBlockedEntryAsync(
+                source,
+                destination,
+                entry,
+                tableEntry,
+                buffer,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+        if ((ulong)destination.Length != entry.UnpackedSize)
+        {
+            throw new InvalidDataException(
+                $"PUP entry {entry.Index} extracted {destination.Length} bytes; expected {entry.UnpackedSize}.");
+        }
+    }
+
+    private static async Task ExtractBlockedEntryAsync(
+        FileStream source,
+        FileStream destination,
+        FirmwarePackageEntry entry,
+        FirmwarePackageEntry? tableEntry,
+        byte[] buffer,
+        CancellationToken cancellationToken)
+    {
+        var blockShift = checked((int)((entry.Flags & 0xF000) >> 12) + 12);
+        if (blockShift is < 12 or > 30)
+        {
+            throw new InvalidDataException($"PUP entry {entry.Index} has an invalid block size.");
+        }
+
+        var blockSize = 1UL << blockShift;
+        var blockCount = checked((int)((entry.UnpackedSize + blockSize - 1) / blockSize));
+        BlockInfo[]? blockInfos = null;
+        if (entry.IsCompressed)
+        {
+            if (tableEntry is null)
+            {
+                throw new InvalidDataException($"PUP entry {entry.Index} has no block table.");
+            }
+
+            var tableBytes = await ReadEntryBytesAsync(source, tableEntry, buffer, cancellationToken)
+                .ConfigureAwait(false);
+            var infoOffset = checked(blockCount * 32);
+            var infoBytes = checked(blockCount * 8);
+            if (infoOffset > tableBytes.Length || infoBytes > tableBytes.Length - infoOffset)
+            {
+                throw new InvalidDataException($"PUP block table for entry {entry.Index} is truncated.");
+            }
+
+            blockInfos = new BlockInfo[blockCount];
+            for (var index = 0; index < blockCount; index++)
+            {
+                var record = tableBytes.AsSpan(infoOffset + index * 8, 8);
+                blockInfos[index] = new BlockInfo(
+                    BinaryPrimitives.ReadUInt32LittleEndian(record),
+                    BinaryPrimitives.ReadUInt32LittleEndian(record[4..]));
+            }
+        }
+
+        ulong sequentialOffset = 0;
+        for (var index = 0; index < blockCount; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var outputSize = Math.Min(blockSize, entry.UnpackedSize - (ulong)index * blockSize);
+            var inputOffset = sequentialOffset;
+            var inputSize = outputSize;
+            var compressed = false;
+
+            if (blockInfos is not null)
+            {
+                var info = blockInfos[index];
+                if (info.Offset != 0)
+                {
+                    inputOffset = info.Offset;
+                }
+
+                var padding = info.Size & 0xF;
+                var alignedSize = info.Size & ~0xFU;
+                if (alignedSize < padding)
+                {
+                    throw new InvalidDataException($"PUP block {index} for entry {entry.Index} has invalid padding.");
+                }
+
+                var compressedBytes = alignedSize - padding;
+                if (compressedBytes != blockSize &&
+                    (index != blockCount - 1 || outputSize != info.Size))
+                {
+                    compressed = true;
+                }
+                else
+                {
+                    inputSize = info.Size;
+                }
+
+                var physicalEnd = entry.StoredSize;
+                if (index + 1 < blockInfos.Length &&
+                    blockInfos[index + 1].Offset > inputOffset)
+                {
+                    physicalEnd = Math.Min(physicalEnd, blockInfos[index + 1].Offset);
+                }
+                if (physicalEnd < inputOffset)
+                {
+                    throw new InvalidDataException(
+                        $"PUP block {index} for entry {entry.Index} has a decreasing offset.");
+                }
+
+                var physicalSize = physicalEnd - inputOffset;
+                if (compressed)
+                {
+                    // Some PUPs round the final table size beyond the declared
+                    // entry boundary. The offsets are the authoritative physical
+                    // layout; zlib terminates before any alignment padding.
+                    inputSize = Math.Min(compressedBytes, physicalSize);
+                    if (inputSize == 0)
+                    {
+                        throw new InvalidDataException(
+                            $"Compressed PUP block {index} for entry {entry.Index} is empty.");
+                    }
+                }
+                else if (inputSize > physicalSize)
+                {
+                    throw new InvalidDataException(
+                        $"Raw PUP block {index} for entry {entry.Index} exceeds its physical range.");
+                }
+            }
+
+            if (inputOffset > entry.StoredSize || inputSize > entry.StoredSize - inputOffset)
+            {
+                throw new InvalidDataException($"PUP block {index} for entry {entry.Index} is outside its payload.");
+            }
+
+            if (compressed)
+            {
+                await DecompressRangeExactlyAsync(
+                    source,
+                    entry.Offset + inputOffset,
+                    inputSize,
+                    destination,
+                    outputSize,
+                    buffer,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                if (inputSize != outputSize)
+                {
+                    throw new InvalidDataException($"Raw PUP block {index} for entry {entry.Index} has an invalid size.");
+                }
+                source.Position = checked((long)(entry.Offset + inputOffset));
+                await CopyExactlyAsync(
+                    source,
+                    destination,
+                    checked((long)inputSize),
+                    buffer,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            sequentialOffset = checked(inputOffset + inputSize);
+        }
+    }
+
+    private static async Task<byte[]> ReadEntryBytesAsync(
+        FileStream source,
+        FirmwarePackageEntry entry,
+        byte[] buffer,
+        CancellationToken cancellationToken)
+    {
+        if (entry.UnpackedSize > MaximumBlockTableBytes)
+        {
+            throw new InvalidDataException($"PUP block table {entry.Index} is too large.");
+        }
+
+        await using var memory = new MemoryStream(checked((int)entry.UnpackedSize));
+        if (entry.IsCompressed)
+        {
+            await DecompressRangeExactlyAsync(
+                source,
+                entry.Offset,
+                entry.StoredSize,
+                memory,
+                entry.UnpackedSize,
+                buffer,
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            source.Position = checked((long)entry.Offset);
+            await CopyExactlyAsync(
+                source,
+                memory,
+                checked((long)entry.StoredSize),
+                buffer,
+                cancellationToken).ConfigureAwait(false);
+        }
+        return memory.ToArray();
+    }
+
+    private static async Task DecompressRangeExactlyAsync(
+        FileStream source,
+        ulong offset,
+        ulong storedSize,
+        Stream destination,
+        ulong expectedSize,
+        byte[] buffer,
+        CancellationToken cancellationToken)
+    {
+        source.Position = checked((long)offset);
+        await using var bounded = new BoundedReadStream(source, checked((long)storedSize));
+        await using var zlib = new ZLibStream(bounded, CompressionMode.Decompress, leaveOpen: false);
+        ulong written = 0;
+        while (written < expectedSize)
+        {
+            var requested = (int)Math.Min((ulong)buffer.Length, expectedSize - written);
+            var read = await zlib.ReadAsync(buffer.AsMemory(0, requested), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                throw new InvalidDataException("A compressed PUP entry ended before its declared size.");
+            }
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+            written += checked((uint)read);
+        }
+
+        if (await zlib.ReadAsync(buffer.AsMemory(0, 1), cancellationToken).ConfigureAwait(false) != 0)
+        {
+            throw new InvalidDataException("A compressed PUP entry exceeds its declared size.");
+        }
+    }
+
+    private static async Task CopyExactlyAsync(
         Stream source,
         Stream destination,
         long byteCount,
@@ -343,7 +641,6 @@ public sealed class FirmwareManager
         CancellationToken cancellationToken)
     {
         var remaining = byteCount;
-        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         while (remaining > 0)
         {
             var read = await source.ReadAsync(
@@ -354,12 +651,51 @@ public sealed class FirmwareManager
                 throw new EndOfStreamException("The firmware entry ended before its declared size.");
             }
 
-            hasher.AppendData(buffer, 0, read);
             await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
             remaining -= read;
         }
+    }
 
-        return Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
+    private static async Task<string> ComputeFileHashAsync(string path, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static async Task<string> DetectExtractedFileNameAsync(
+        string path,
+        string fallbackFileName,
+        CancellationToken cancellationToken)
+    {
+        var header = new byte[16];
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            header.Length,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var read = await stream.ReadAsync(header, cancellationToken).ConfigureAwait(false);
+        var bytes = header.AsSpan(0, read);
+        var extension = bytes.Length switch
+        {
+            >= 11 when bytes[3..11].SequenceEqual("EXFAT   "u8) => ".exfat",
+            >= 4 when bytes.StartsWith("SLB2"u8) => ".slb2",
+            >= 4 when bytes.StartsWith(new byte[] { 0x50, 0x4B, 0x03, 0x04 }) => ".zip",
+            >= 4 when bytes.StartsWith(new byte[] { 0x7F, (byte)'E', (byte)'L', (byte)'F' }) => ".elf",
+            >= 4 when BinaryPrimitives.ReadUInt32LittleEndian(bytes) == 0xEEF51454 => ".self",
+            >= 4 when bytes.StartsWith("hsqs"u8) => ".squashfs",
+            >= 5 when bytes.StartsWith("<?xml"u8) => ".xml",
+            _ => Path.GetExtension(fallbackFileName),
+        };
+        return Path.ChangeExtension(fallbackFileName, extension);
     }
 
     private static void ReplaceDirectory(string sourcePath, string destinationPath)
@@ -415,6 +751,46 @@ public sealed class FirmwareManager
         bool IsSpecial,
         string? ExtractedRelativePath,
         string? ExtractedSha256);
+
+    private readonly record struct BlockInfo(uint Offset, uint Size);
+
+    private sealed class BoundedReadStream(Stream inner, long length) : Stream
+    {
+        private long _remaining = length >= 0 ? length : throw new ArgumentOutOfRangeException(nameof(length));
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => length;
+        public override long Position { get => length - _remaining; set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var requested = (int)Math.Min(count, _remaining);
+            if (requested == 0) return 0;
+            var read = inner.Read(buffer, offset, requested);
+            _remaining -= read;
+            return read;
+        }
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            var requested = (int)Math.Min(buffer.Length, _remaining);
+            if (requested == 0) return 0;
+            var read = await inner.ReadAsync(buffer[..requested], cancellationToken).ConfigureAwait(false);
+            _remaining -= read;
+            return read;
+        }
+
+        protected override void Dispose(bool disposing) { }
+        public override ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 
     private sealed record FirmwareManifest(
         int SchemaVersion,
