@@ -2315,8 +2315,11 @@ internal static unsafe class VulkanVideoPresenter
     /// </summary>
     private const uint CompSwapAlt = 1;
 
+    // On by default: ignoring COMP_SWAP leaves every SWAP_ALT title with red
+    // and blue exchanged. Kept switchable for compatibility in case a title
+    // relies on the previous behaviour.
     private static readonly bool _honorRenderTargetCompSwap =
-        Environment.GetEnvironmentVariable("SHARPEMU_HONOR_RT_COMP_SWAP") == "1";
+        Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RT_COMP_SWAP") != "1";
 
     private static readonly HashSet<(ulong Address, uint CompSwap, Format Write, Format Read)>
         _tracedCompSwapTargets = new();
@@ -2327,7 +2330,9 @@ internal static unsafe class VulkanVideoPresenter
         Format readFormat,
         bool applied)
     {
-        if (!_honorRenderTargetCompSwap)
+        // Now that honoring COMP_SWAP is the default, only record the targets
+        // whose format actually changed; unaffected ones would be pure noise.
+        if (!applied)
         {
             return;
         }
@@ -11400,6 +11405,7 @@ internal static unsafe class VulkanVideoPresenter
                 Format.R8Srgb => Format.R8Unorm,
                 Format.R8G8Srgb => Format.R8G8Unorm,
                 Format.R8G8B8A8Srgb => Format.R8G8B8A8Unorm,
+                Format.B8G8R8A8Srgb => Format.B8G8R8A8Unorm,
                 Format.BC1RgbaSrgbBlock => Format.BC1RgbaUnormBlock,
                 Format.BC2SrgbBlock => Format.BC2UnormBlock,
                 Format.BC3SrgbBlock => Format.BC3UnormBlock,
@@ -13292,7 +13298,9 @@ internal static unsafe class VulkanVideoPresenter
                         var shouldTraceWrite = tracePixelSpirv || traceTitleDraw
                             ? true
                             : traceAddressWrite && _traceGuestWriteOrdinal > 0
-                                ? writeCount == _traceGuestWriteOrdinal
+                                ? writeCount >= _traceGuestWriteOrdinalRange.Start &&
+                                  writeCount < _traceGuestWriteOrdinalRange.Start +
+                                      _traceGuestWriteOrdinalRange.Count
                             : _traceLargeGuestWriteOrdinal != 0
                                 ? writeCount == _traceLargeGuestWriteOrdinal
                             : writeCount <=
@@ -16169,6 +16177,11 @@ internal static unsafe class VulkanVideoPresenter
                 Format.R8G8B8A8Uint or
                 Format.R8G8B8A8Sint or
                 Format.R8G8B8A8Unorm or
+                // COMP_SWAP=ALT render targets are created as BGRA; readback
+                // diagnostics must still be able to size their texels.
+                Format.B8G8R8A8Unorm or
+                Format.B8G8R8A8Srgb or
+                Format.B8G8R8A8SNorm or
                 Format.A2R10G10B10UnormPack32 or
                 Format.A2B10G10R10UnormPack32 => 4,
                 Format.R16G16B16A16Uint or
@@ -16199,7 +16212,12 @@ internal static unsafe class VulkanVideoPresenter
                         (BitConverter.ToUInt32(pixel) & 0x3FFFFFFFu) != 0,
                     Format.R8G8B8A8Uint or
                     Format.R8G8B8A8Sint or
-                    Format.R8G8B8A8Unorm =>
+                    Format.R8G8B8A8Unorm or
+                    // BGRA only reorders the three color bytes, so the same
+                    // "any color byte set" test holds.
+                    Format.B8G8R8A8Unorm or
+                    Format.B8G8R8A8Srgb or
+                    Format.B8G8R8A8SNorm =>
                         pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0,
                     Format.R16G16B16A16Uint or
                     Format.R16G16B16A16Sint or
@@ -17291,12 +17309,38 @@ internal static unsafe class VulkanVideoPresenter
             Environment.GetEnvironmentVariable("SHARPEMU_ENABLE_CHUNKED_DRAWS") == "1";
         private static readonly string? _traceGuestWritesMode =
             Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_WRITES");
+        // "N" dumps that one write; "N:C" dumps C consecutive writes from N,
+        // which is what shows a surface being built up draw by draw.
+        private static readonly (long Start, long Count) _traceGuestWriteOrdinalRange =
+            ParseGuestWriteOrdinalRange(
+                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_WRITE_ORDINAL"));
+
+        private static (long Start, long Count) ParseGuestWriteOrdinalRange(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return (0, 0);
+            }
+
+            var separator = value.IndexOf(':');
+            var startText = separator < 0 ? value : value[..separator];
+            if (!long.TryParse(startText, out var start) || start <= 0)
+            {
+                return (0, 0);
+            }
+
+            var count = 1L;
+            if (separator >= 0 &&
+                (!long.TryParse(value[(separator + 1)..], out count) || count < 1))
+            {
+                count = 1;
+            }
+
+            return (start, count);
+        }
+
         private static readonly long _traceGuestWriteOrdinal =
-            long.TryParse(
-                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_WRITE_ORDINAL"),
-                out var traceGuestWriteOrdinal)
-                    ? traceGuestWriteOrdinal
-                    : 0;
+            _traceGuestWriteOrdinalRange.Start;
         private static readonly long _traceLargeGuestWriteOrdinal =
             ParseTraceLargeGuestWriteOrdinal(_traceGuestWritesMode);
         private static readonly int _tracePixelSpirvBytes =

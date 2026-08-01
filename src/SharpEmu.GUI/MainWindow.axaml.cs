@@ -273,10 +273,10 @@ public partial class MainWindow : Window
             SetEnvironmentToggle(
                 "TOUCHEPX5_DROP_STALE_ALIASED_DEPTH",
                 EnvDropStaleAliasedDepthToggle.IsChecked == true);
-        EnvHonorRtCompSwapToggle.IsCheckedChanged += (_, _) =>
+        EnvDisableRtCompSwapToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle(
-                "TOUCHEPX5_HONOR_RT_COMP_SWAP",
-                EnvHonorRtCompSwapToggle.IsChecked == true);
+                "TOUCHEPX5_DISABLE_RT_COMP_SWAP",
+                EnvDisableRtCompSwapToggle.IsChecked == true);
         EnvLogDirectMemoryToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("TOUCHEPX5_LOG_DIRECT_MEMORY", EnvLogDirectMemoryToggle.IsChecked == true);
         EnvLogIoToggle.IsCheckedChanged += (_, _) =>
@@ -694,7 +694,7 @@ public partial class MainWindow : Window
         EnvVkValidationRow.Description = loc.Get("Options.Env.VkValidation.Desc");
         EnvDumpSpirvRow.Description = loc.Get("Options.Env.DumpSpirv.Desc");
         EnvDropStaleAliasedDepthRow.Description = loc.Get("Options.Env.DropStaleAliasedDepth.Desc");
-        EnvHonorRtCompSwapRow.Description = loc.Get("Options.Env.HonorRtCompSwap.Desc");
+        EnvDisableRtCompSwapRow.Description = loc.Get("Options.Env.DisableRtCompSwap.Desc");
         EnvLogDirectMemoryRow.Description = loc.Get("Options.Env.LogDirectMemory.Desc");
         EnvLogIoRow.Description = loc.Get("Options.Env.LogIo.Desc");
         EnvLogNpRow.Description = loc.Get("Options.Env.LogNp.Desc");
@@ -974,8 +974,8 @@ public partial class MainWindow : Window
         EnvDumpSpirvToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_DUMP_SPIRV");
         EnvDropStaleAliasedDepthToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("TOUCHEPX5_DROP_STALE_ALIASED_DEPTH");
-        EnvHonorRtCompSwapToggle.IsChecked =
-            _settings.EnvironmentToggles.Contains("TOUCHEPX5_HONOR_RT_COMP_SWAP");
+        EnvDisableRtCompSwapToggle.IsChecked =
+            _settings.EnvironmentToggles.Contains("TOUCHEPX5_DISABLE_RT_COMP_SWAP");
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_DIRECT_MEMORY");
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_NP");
