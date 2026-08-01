@@ -226,7 +226,10 @@ internal sealed record GuestRenderTarget(
     uint MipLevel = 0,
     // CB_COLOR*_INFO.COMP_SWAP[12:11] — the channel order the guest expects to
     // find in memory: 0=STD(RGBA), 1=ALT(BGRA), 2=STD_REV, 3=ALT_REV.
-    uint CompSwap = 0);
+    uint CompSwap = 0,
+    // CB_COLOR*_ATTRIB.TILE_MODE. Surfaces at the same guest address are not
+    // interchangeable when their memory layouts differ.
+    uint TileMode = 0);
 
 /// <summary>Guest DB surface bound alongside a color render target.</summary>
 internal sealed record GuestDepthTarget(

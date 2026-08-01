@@ -2034,6 +2034,14 @@ internal static unsafe class VulkanVideoPresenter
         Format viewFormat) =>
         Presenter.IsCompatibleViewFormat(imageFormat, viewFormat);
 
+    // A tile mode is part of a guest image's storage identity. Reusing the
+    // same VkImage after the guest rebinds an address with another layout can
+    // expose stale or incorrectly detiled texels.
+    internal static bool HasMatchingGuestImageTileMode(
+        uint existingTileMode,
+        uint requestedTileMode) =>
+        existingTileMode == requestedTileMode;
+
     private static byte[]? TakeGuestImageInitialData(ulong address)
     {
         lock (_gate)
@@ -3802,7 +3810,8 @@ internal static unsafe class VulkanVideoPresenter
             uint MipLevels,
             uint ArrayLayers,
             uint GuestFormat,
-            Format Format);
+            Format Format,
+            uint TileMode);
 
         // A single guest allocation may be rebound through several RT descriptors.
         // Keep the inactive Vulkan images instead of destroying their contents each
@@ -4093,6 +4102,7 @@ internal static unsafe class VulkanVideoPresenter
             public uint ArrayLayers = 1;
             public uint GuestFormat;
             public Format Format;
+            public uint TileMode;
             public Image Image;
             public DeviceMemory Memory;
             public ImageView View;
@@ -14269,7 +14279,8 @@ internal static unsafe class VulkanVideoPresenter
                 mipLevels,
                 arrayLayers,
                 guestFormat,
-                format);
+                format,
+                target.TileMode);
             if (_guestImages.TryGetValue(target.Address, out var existing))
             {
                 // View-compatible formats (sRGB vs UNORM of the same texel
@@ -14293,6 +14304,7 @@ internal static unsafe class VulkanVideoPresenter
                     existing.Type == type &&
                     existing.MipLevels == mipLevels &&
                     existing.ArrayLayers >= arrayLayers &&
+                    HasMatchingGuestImageTileMode(existing.TileMode, target.TileMode) &&
                     (exactFormatMatch ||
                      (IsAliasableGuestImageFormat(existing.Format, format) &&
                       (!requiresStorage || existing.SupportsStorageUsage))))
@@ -14351,7 +14363,8 @@ internal static unsafe class VulkanVideoPresenter
                         existing.MipLevels,
                         existing.ArrayLayers,
                         existing.GuestFormat,
-                        existing.Format),
+                        existing.Format,
+                        existing.TileMode),
                     existing);
                 _guestImages.Remove(target.Address);
                 lock (_gate)
@@ -14520,6 +14533,7 @@ internal static unsafe class VulkanVideoPresenter
                 ArrayLayers = arrayLayers,
                 GuestFormat = guestFormat,
                 Format = format,
+                TileMode = target.TileMode,
                 Image = image,
                 Memory = memory,
                 View = view,

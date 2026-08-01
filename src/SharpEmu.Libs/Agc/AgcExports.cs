@@ -4142,7 +4142,8 @@ public static partial class AgcExports
                             BaseArrayLayer: pendingDisplayTarget.BaseArrayLayer,
                             LayerCount: pendingDisplayTarget.LayerCount,
                             MipLevel: pendingDisplayTarget.MipLevel,
-                            CompSwap: pendingDisplayTarget.CompSwap)],
+                            CompSwap: pendingDisplayTarget.CompSwap,
+                            TileMode: pendingDisplayTarget.TileMode)],
                         pendingComposite.VertexShader,
                         pendingComposite.VertexCount,
                         pendingComposite.InstanceCount,
@@ -7921,7 +7922,8 @@ public static partial class AgcExports
                 BaseArrayLayer: renderTargets[index].BaseArrayLayer,
                 LayerCount: renderTargets[index].LayerCount,
                 MipLevel: renderTargets[index].MipLevel,
-                CompSwap: renderTargets[index].CompSwap);
+                CompSwap: renderTargets[index].CompSwap,
+                TileMode: renderTargets[index].TileMode);
         }
 
         var pixelUserDataCount = Math.Min(pixelEvaluation.InitialScalarRegisters.Count, 8);
