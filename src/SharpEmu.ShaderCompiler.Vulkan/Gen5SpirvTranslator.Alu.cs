@@ -2313,7 +2313,9 @@ public static partial class Gen5SpirvTranslator
             var left = GetRawSource64(instruction, 0);
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
-                var oldExec = BooleanToWaveMask(Load(_boolType, _exec));
+                var oldExec = BooleanToWaveMask(
+                    Load(_boolType, _exec),
+                    forceFullWave64: _fullWaveMaskPairs.Contains(destination));
                 var notLeft = _module.AddInstruction(SpirvOp.Not, _ulongType, left);
                 var newExec = instruction.Opcode switch
                 {

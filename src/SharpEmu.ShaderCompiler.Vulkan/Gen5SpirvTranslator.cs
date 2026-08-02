@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.CompilerServices;
 using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.ShaderCompiler.Vulkan;
@@ -187,6 +188,20 @@ public static partial class Gen5SpirvTranslator
         private readonly IReadOnlyList<Gen5PixelOutputBinding> _pixelOutputBindings;
         private readonly uint _waveLaneCount;
         private readonly bool _emulateWave64;
+        private readonly bool _splitWave64Control;
+        private readonly bool _globalizeSplitWave64Branches;
+        private readonly IReadOnlySet<uint> _fullWaveMaskPairs;
+        private sealed record Wave64SplitAnalysis(
+            bool CanSplit,
+            IReadOnlySet<uint> FullMaskPairs,
+            string Reason);
+        private static readonly ConditionalWeakTable<
+            Gen5ShaderProgram,
+            Wave64SplitAnalysis> Wave64SplitAnalysisCache = new();
+        private static readonly Wave64SplitAnalysis NonWave64Analysis = new(
+            false,
+            new HashSet<uint>(),
+            "not-wave64-compute");
 
         // Safety valve for the PC-dispatcher loop. Each iteration executes one
         // GCN basic block; a correctly-translated shader always reaches its
@@ -369,11 +384,52 @@ public static partial class Gen5SpirvTranslator
             _evaluation = evaluation;
             _pixelOutputBindings = pixelOutputBindings;
             _waveLaneCount = waveLaneCount == 64 ? 64u : 32u;
-            _emulateWave64 =
+            var isWave64Compute =
                 stage == Gen5SpirvStage.Compute &&
                 _waveLaneCount == 64 &&
-                (ulong)localSizeX * localSizeY * localSizeZ == 64 &&
-                !CanSplitWave64Control(state.Program.Instructions);
+                (ulong)localSizeX * localSizeY * localSizeZ == 64;
+            var wave64Analysis = isWave64Compute
+                ? Wave64SplitAnalysisCache.GetValue(
+                    state.Program,
+                    static program =>
+                    {
+                        var canSplit = CanSplitWave64Control(
+                            program.Instructions,
+                            out var fullMaskPairs,
+                            out var reason);
+                        return new Wave64SplitAnalysis(
+                            canSplit,
+                            fullMaskPairs,
+                            reason);
+                    })
+                : NonWave64Analysis;
+            var disableAutomaticWave64Split =
+                Environment.GetEnvironmentVariable(
+                    "TOUCHEPX5_DISABLE_AUTO_WAVE64_SPLIT") == "1";
+            _fullWaveMaskPairs = wave64Analysis.FullMaskPairs;
+            _splitWave64Control =
+                isWave64Compute &&
+                !disableAutomaticWave64Split &&
+                wave64Analysis.CanSplit;
+            _globalizeSplitWave64Branches =
+                _splitWave64Control &&
+                state.Program.Instructions.Any(static instruction =>
+                    instruction.Opcode.StartsWith(
+                        "SCbranchVcc",
+                        StringComparison.Ordinal));
+            _emulateWave64 =
+                isWave64Compute &&
+                !_splitWave64Control;
+            if (isWave64Compute &&
+                Environment.GetEnvironmentVariable(
+                    "SHARPEMU_TRACE_WAVE64_SPLIT") == "1")
+            {
+                Console.Error.WriteLine(
+                    $"[SHADER][TRACE] wave64.strategy shader=0x{state.Program.Address:X16} " +
+                    $"strategy={(_splitWave64Control ? "split-wave32" : "exact-wave64")} " +
+                    $"reason={(disableAutomaticWave64Split ? "disabled-by-environment" : wave64Analysis.Reason)} " +
+                    $"full_mask_pairs={wave64Analysis.FullMaskPairs.Count}");
+            }
             _localSizeX = localSizeX;
             _localSizeY = localSizeY;
             _localSizeZ = localSizeZ;
@@ -875,7 +931,10 @@ public static partial class Gen5SpirvTranslator
 
         private void DeclareWave64Scratch()
         {
-            if (!_emulateWave64 || !UsesSubgroupOperations())
+            if ((!_emulateWave64 &&
+                 !_globalizeSplitWave64Branches &&
+                 _fullWaveMaskPairs.Count == 0) ||
+                !UsesSubgroupOperations())
             {
                 return;
             }
@@ -5497,11 +5556,51 @@ public static partial class Gen5SpirvTranslator
                 ? condition
                 : _emulateWave64
                     ? IsNotZero64(BooleanToWaveMask(condition))
+                : _globalizeSplitWave64Branches
+                    ? SplitWave64Any(condition)
                 : _module.AddInstruction(
                     SpirvOp.GroupNonUniformAny,
                     _boolType,
                     UInt(3),
                     condition);
+
+        // Split wave64 shaders keep lane masks local to each native wave32.
+        // Only scalar VCC/EXEC branches need a decision shared by both halves.
+        // Rendezvous here instead of materializing every comparison as a full
+        // 64-bit mask, reducing a compare-heavy kernel from two workgroup
+        // barriers per VCMP to two barriers per scalar mask branch.
+        private uint SplitWave64Any(uint condition)
+        {
+            var localAny = _module.AddInstruction(
+                SpirvOp.GroupNonUniformAny,
+                _boolType,
+                UInt(3),
+                condition);
+            var firstLane = _module.AddInstruction(
+                SpirvOp.IEqual,
+                _boolType,
+                Load(_uintType, _subgroupInvocationIdInput),
+                UInt(0));
+            var half = ShiftRightLogical(GuestWaveLane(), UInt(5));
+            EmitConditional(firstLane, () =>
+            {
+                Store(
+                    WaveMaskScratchPointer(half),
+                    _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        localAny,
+                        UInt(1),
+                        UInt(0)));
+            });
+            EmitWave64Barrier();
+            var any = IsNotZero(
+                BitwiseOr(
+                    Load(_uintType, WaveMaskScratchPointer(UInt(0))),
+                    Load(_uintType, WaveMaskScratchPointer(UInt(1)))));
+            EmitWave64Barrier();
+            return any;
+        }
 
         private uint GuestWaveLane()
         {
@@ -5563,7 +5662,9 @@ public static partial class Gen5SpirvTranslator
                 CurrentLaneBit(),
                 _module.Constant64(_ulongType, 0));
 
-        private uint BooleanToWaveMask(uint condition)
+        private uint BooleanToWaveMask(
+            uint condition,
+            bool forceFullWave64 = false)
         {
             if (_subgroupInvocationIdInput == 0)
             {
@@ -5580,7 +5681,7 @@ public static partial class Gen5SpirvTranslator
                 _uintType,
                 ballot,
                 0);
-            if (_emulateWave64)
+            if (_emulateWave64 || forceFullWave64)
             {
                 var high = _module.AddInstruction(
                     SpirvOp.CompositeExtract,
@@ -5761,13 +5862,24 @@ public static partial class Gen5SpirvTranslator
         // exact wave64 bridge as soon as the shader observes masks in any other
         // way or performs a genuine cross-lane operation.
         private static bool CanSplitWave64Control(
-            IReadOnlyList<Gen5ShaderInstruction> instructions)
+            IReadOnlyList<Gen5ShaderInstruction> instructions,
+            out HashSet<uint> fullWaveMaskPairs,
+            out string reason)
         {
+            fullWaveMaskPairs = [];
+            var materializedWaveMaskPairs = fullWaveMaskPairs;
+            reason = "lane-local-control";
             var sawStructuredControl = false;
             var savedExecPairs = new HashSet<uint>();
+            var laneMaskPairsByPc = ComputeLaneMaskPairsByPc(instructions);
             var ordinaryVccRegisters = new HashSet<uint>();
             foreach (var instruction in instructions)
             {
+                var laneMaskPairs = laneMaskPairsByPc.TryGetValue(
+                    instruction.Pc,
+                    out var masksAtInstruction)
+                        ? masksAtInstruction
+                        : EmptyWaveMaskPairs;
                 if (instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
                     instruction.Opcode is
                         "VReadlaneB32" or
@@ -5780,6 +5892,7 @@ public static partial class Gen5SpirvTranslator
                         operand.Kind == Gen5OperandKind.EncodedConstant &&
                         operand.Value is 251 or 252))
                 {
+                    reason = $"cross-lane-op@0x{instruction.Pc:X4}:{instruction.Opcode}";
                     return false;
                 }
 
@@ -5820,18 +5933,47 @@ public static partial class Gen5SpirvTranslator
                     continue;
                 }
 
-                if (savedExecPairs.Any(pair => TouchesScalarPair(instruction, pair)))
+                var overwritesSavedExec = false;
+                foreach (var pair in savedExecPairs)
                 {
+                    if (instruction.Destinations.Any(
+                            operand => IsScalarPairOperand(operand, pair)))
+                    {
+                        overwritesSavedExec = true;
+                        break;
+                    }
+
+                    if (instruction.Sources.Any(
+                            operand => IsScalarPairOperand(operand, pair)))
+                    {
+                        // The saved EXEC pair is observed as ordinary scalar
+                        // data. Materialize this one value as a complete guest
+                        // wave64 mask; all other comparisons can stay local.
+                        fullWaveMaskPairs.Add(pair);
+                    }
+                }
+
+                if (overwritesSavedExec)
+                {
+                    reason = $"saved-exec-overwrite@0x{instruction.Pc:X4}:{instruction.Opcode}";
                     return false;
                 }
 
                 if (instruction.Opcode == "SAndSaveexecB64" &&
-                    IsScalarRegister(
+                    TryGetScalarRegister(
                         instruction.Destinations,
                         0,
-                        106) &&
-                    IsScalarRegister(instruction.Sources, 0, 106))
+                        out var saveExecPair) &&
+                    TryGetScalarRegister(
+                        instruction.Sources,
+                        0,
+                        out _))
                 {
+                    if (saveExecPair is not (106 or 126))
+                    {
+                        savedExecPairs.Add(saveExecPair);
+                    }
+
                     sawStructuredControl = true;
                     continue;
                 }
@@ -5843,14 +5985,87 @@ public static partial class Gen5SpirvTranslator
                         126) &&
                     IsScalarRegister(instruction.Sources, 0, 106))
                 {
+                    if (!laneMaskPairs.Contains(106))
+                    {
+                        reason = $"unsupported-mask-use@0x{instruction.Pc:X4}:{instruction.Opcode}";
+                        return false;
+                    }
+
                     sawStructuredControl = true;
                     continue;
                 }
 
-                if (instruction.Opcode is "SCbranchExecz" or "SCbranchExecnz")
+                if (instruction.Opcode is
+                    "SCbranchExecz" or
+                    "SCbranchExecnz")
                 {
                     sawStructuredControl = true;
                     continue;
+                }
+
+                if (instruction.Opcode is
+                    "SCbranchVccz" or
+                    "SCbranchVccnz")
+                {
+                    if (!laneMaskPairs.Contains(106))
+                    {
+                        reason = $"unsupported-mask-use@0x{instruction.Pc:X4}:{instruction.Opcode}";
+                        return false;
+                    }
+
+                    sawStructuredControl = true;
+                    continue;
+                }
+
+                if (instruction.Opcode == "VCndmaskB32")
+                {
+                    var conditionPair = 106u;
+                    if (instruction.Sources.Count > 2 &&
+                        !TryGetScalarPair(
+                            instruction.Sources[2],
+                            out conditionPair))
+                    {
+                        reason = $"unsupported-mask-use@0x{instruction.Pc:X4}:{instruction.Opcode}";
+                        return false;
+                    }
+
+                    if (!laneMaskPairs.Contains(conditionPair))
+                    {
+                        reason = $"unsupported-mask-use@0x{instruction.Pc:X4}:{instruction.Opcode}";
+                        return false;
+                    }
+
+                    sawStructuredControl = true;
+                    continue;
+                }
+
+                // Bitwise B64 mask algebra is lane-wise: each native wave32
+                // half can carry its own 32 bits and obtain the same per-lane
+                // predicate. A shared scalar branch decision is reconstructed
+                // only where SCBRANCH_VCC consumes the resulting mask.
+                if (IsLaneWiseWaveMaskOperation(
+                        instruction,
+                        laneMaskPairs))
+                {
+                    if (instruction.Destinations.Any(IsVccOperand))
+                    {
+                        ordinaryVccRegisters.Clear();
+                    }
+
+                    sawStructuredControl = true;
+                    continue;
+                }
+
+                if (instruction.Sources.Any(
+                        operand =>
+                            IsTrackedWaveMaskOperand(
+                                operand,
+                                laneMaskPairs) &&
+                            (!TryGetScalarPair(operand, out var pair) ||
+                             !materializedWaveMaskPairs.Contains(pair))))
+                {
+                    reason = $"unsupported-mask-use@0x{instruction.Pc:X4}:{instruction.Opcode}";
+                    return false;
                 }
 
                 if (instruction.Opcode.Contains(
@@ -5862,15 +6077,13 @@ public static partial class Gen5SpirvTranslator
                     instruction.Opcode.StartsWith(
                         "SCbranchVcc",
                         StringComparison.Ordinal) ||
-                    instruction.Opcode.StartsWith(
-                        "VCndmask",
-                        StringComparison.Ordinal) ||
                     instruction.Sources.Any(IsExecMaskOperand) ||
                     instruction.Destinations.Any(IsExecMaskOperand) ||
                     UsesUnsupportedVccScalarOperation(
                         instruction,
                         ordinaryVccRegisters))
                 {
+                    reason = $"unsupported-mask-use@0x{instruction.Pc:X4}:{instruction.Opcode}";
                     return false;
                 }
 
@@ -5879,7 +6092,201 @@ public static partial class Gen5SpirvTranslator
                     ordinaryVccRegisters);
             }
 
-            return sawStructuredControl && savedExecPairs.Count == 0;
+            if (!sawStructuredControl)
+            {
+                reason = "no-wave-control";
+                return false;
+            }
+
+            if (savedExecPairs.Count != 0)
+            {
+                reason = "unrestored-exec-mask";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static readonly IReadOnlySet<uint> EmptyWaveMaskPairs =
+            new HashSet<uint>();
+
+        // Track wave-mask SGPR pairs along the shader's actual control-flow
+        // graph. A linear scan is too conservative for real compiler output:
+        // the same pair is commonly a VCMP result in one branch and ordinary
+        // scalar data in another. At joins, union is intentional — if any
+        // predecessor can carry a mask, consumers retain the exact-wave64
+        // safety checks.
+        private static IReadOnlyDictionary<uint, IReadOnlySet<uint>>
+            ComputeLaneMaskPairsByPc(
+                IReadOnlyList<Gen5ShaderInstruction> instructions)
+        {
+            if (instructions.Count == 0)
+            {
+                return new Dictionary<uint, IReadOnlySet<uint>>();
+            }
+
+            var indexByPc = instructions
+                .Select(static (instruction, index) =>
+                    (instruction.Pc, Index: index))
+                .ToDictionary(static item => item.Pc, static item => item.Index);
+            var inputMasks = new Dictionary<int, HashSet<uint>>
+            {
+                [0] = [126],
+            };
+            var pending = new Queue<int>();
+            pending.Enqueue(0);
+
+            while (pending.Count != 0)
+            {
+                var index = pending.Dequeue();
+                var instruction = instructions[index];
+                var output = TransferLaneMaskPairs(
+                    instruction,
+                    inputMasks[index]);
+                foreach (var successor in EnumerateShaderSuccessors(
+                             instructions,
+                             indexByPc,
+                             index))
+                {
+                    if (!inputMasks.TryGetValue(successor, out var successorMasks))
+                    {
+                        inputMasks[successor] = new HashSet<uint>(output);
+                        pending.Enqueue(successor);
+                        continue;
+                    }
+
+                    var changed = false;
+                    foreach (var pair in output)
+                    {
+                        changed |= successorMasks.Add(pair);
+                    }
+
+                    if (changed)
+                    {
+                        pending.Enqueue(successor);
+                    }
+                }
+            }
+
+            return inputMasks.ToDictionary(
+                item => instructions[item.Key].Pc,
+                static item => (IReadOnlySet<uint>)item.Value);
+        }
+
+        private static HashSet<uint> TransferLaneMaskPairs(
+            Gen5ShaderInstruction instruction,
+            IReadOnlySet<uint> input)
+        {
+            var output = new HashSet<uint>(input);
+            foreach (var destination in instruction.Destinations)
+            {
+                if (TryGetScalarPair(destination, out var destinationPair))
+                {
+                    output.Remove(destinationPair);
+                }
+            }
+
+            if (instruction.Opcode.StartsWith("VCmp", StringComparison.Ordinal))
+            {
+                var hasExplicitDestination = false;
+                foreach (var destination in instruction.Destinations)
+                {
+                    if (TryGetScalarPair(destination, out var destinationPair))
+                    {
+                        output.Add(destinationPair);
+                        hasExplicitDestination = true;
+                    }
+                }
+
+                if (!hasExplicitDestination)
+                {
+                    output.Add(106);
+                }
+
+                if (instruction.Opcode.StartsWith(
+                        "VCmpx",
+                        StringComparison.Ordinal))
+                {
+                    output.Add(126);
+                }
+
+                return output;
+            }
+
+            if (instruction.Opcode.Contains(
+                    "Saveexec",
+                    StringComparison.Ordinal))
+            {
+                foreach (var destination in instruction.Destinations)
+                {
+                    if (TryGetScalarPair(destination, out var destinationPair))
+                    {
+                        output.Add(destinationPair);
+                    }
+                }
+
+                output.Add(126);
+                return output;
+            }
+
+            if (instruction.Opcode == "SMovB64" &&
+                TryGetScalarRegister(
+                    instruction.Destinations,
+                    0,
+                    out var moveDestination) &&
+                TryGetScalarRegister(
+                    instruction.Sources,
+                    0,
+                    out var moveSource) &&
+                input.Contains(moveSource & ~1u))
+            {
+                output.Add(moveDestination & ~1u);
+                return output;
+            }
+
+            if (IsLaneWiseWaveMaskOperation(instruction, input))
+            {
+                foreach (var destination in instruction.Destinations)
+                {
+                    if (TryGetScalarPair(destination, out var destinationPair))
+                    {
+                        output.Add(destinationPair);
+                    }
+                }
+            }
+
+            return output;
+        }
+
+        private static IEnumerable<int> EnumerateShaderSuccessors(
+            IReadOnlyList<Gen5ShaderInstruction> instructions,
+            IReadOnlyDictionary<uint, int> indexByPc,
+            int index)
+        {
+            var instruction = instructions[index];
+            var isConditionalBranch = instruction.Opcode.StartsWith(
+                "SCbranch",
+                StringComparison.Ordinal);
+            var isDirectBranch = instruction.Opcode == "SBranch";
+            if ((isConditionalBranch || isDirectBranch) &&
+                instruction.Words.Count != 0)
+            {
+                var displacement = unchecked(
+                    (short)(instruction.Words[0] & 0xFFFF));
+                var targetPc = unchecked(
+                    (uint)((long)instruction.Pc + 4L + displacement * 4L));
+                if (indexByPc.TryGetValue(targetPc, out var targetIndex))
+                {
+                    yield return targetIndex;
+                }
+            }
+
+            if (!isDirectBranch &&
+                instruction.Opcode != "SEndpgm" &&
+                index + 1 < instructions.Count)
+            {
+                yield return index + 1;
+            }
         }
 
         private static bool TryGetScalarRegister(
@@ -5898,16 +6305,30 @@ public static partial class Gen5SpirvTranslator
             return false;
         }
 
-        private static bool TouchesScalarPair(
-            Gen5ShaderInstruction instruction,
-            uint pair) =>
-            instruction.Sources.Any(operand => IsScalarPairOperand(operand, pair)) ||
-            instruction.Destinations.Any(operand => IsScalarPairOperand(operand, pair));
-
         private static bool IsScalarPairOperand(Gen5Operand operand, uint pair) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&
             operand.Value >= pair &&
             operand.Value <= pair + 1;
+
+        private static bool TryGetScalarPair(
+            Gen5Operand operand,
+            out uint pair)
+        {
+            if (operand.Kind == Gen5OperandKind.ScalarRegister)
+            {
+                pair = operand.Value & ~1u;
+                return true;
+            }
+
+            pair = 0;
+            return false;
+        }
+
+        private static bool IsTrackedWaveMaskOperand(
+            Gen5Operand operand,
+            IReadOnlySet<uint> laneMaskPairs) =>
+            TryGetScalarPair(operand, out var pair) &&
+            laneMaskPairs.Contains(pair);
 
         private static bool IsScalarRegister(
             IReadOnlyList<Gen5Operand> operands,
@@ -5920,6 +6341,35 @@ public static partial class Gen5SpirvTranslator
         private static bool IsExecMaskOperand(Gen5Operand operand) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&
             operand.Value is 126 or 127;
+
+        private static bool IsLaneWiseWaveMaskOperation(
+            Gen5ShaderInstruction instruction,
+            IReadOnlySet<uint> laneMaskPairs)
+        {
+            if (instruction.Opcode is not (
+                    "SAndB64" or
+                    "SOrB64" or
+                    "SXorB64" or
+                    "SAndn2B64" or
+                    "SOrn2B64" or
+                    "SNandB64" or
+                    "SNorB64" or
+                    "SXnorB64" or
+                    "SNotB64" or
+                    "SCselectB64"))
+            {
+                return false;
+            }
+
+            return instruction.Sources.Any(
+                    operand => IsTrackedWaveMaskOperand(
+                        operand,
+                        laneMaskPairs)) ||
+                instruction.Destinations.Any(
+                    operand => IsTrackedWaveMaskOperand(
+                        operand,
+                        laneMaskPairs));
+        }
 
         private static bool UsesUnsupportedVccScalarOperation(
             Gen5ShaderInstruction instruction,
@@ -5943,9 +6393,10 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var independentOverwrite =
-                instruction.Opcode is "SMovB32" or "SMovkI32" ||
-                instruction.Opcode.StartsWith("SLoad", StringComparison.Ordinal);
+            var independentOverwrite = IsIndependentVccOverwrite(
+                instruction,
+                vccSources,
+                vccDestinations);
             if (independentOverwrite &&
                 vccDestinations.Length != 0 &&
                 vccSources.Length == 0)
@@ -5953,8 +6404,9 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            if (vccDestinations.Length == 0 &&
-                vccSources.All(operand => ordinaryVccRegisters.Contains(operand.Value)))
+            if (vccSources.Length != 0 &&
+                vccSources.All(operand => ordinaryVccRegisters.Contains(operand.Value)) &&
+                !instruction.Sources.Any(IsExecMaskOperand))
             {
                 return false;
             }
@@ -5966,17 +6418,39 @@ public static partial class Gen5SpirvTranslator
             Gen5ShaderInstruction instruction,
             ISet<uint> ordinaryVccRegisters)
         {
-            if (instruction.Opcode is not ("SMovB32" or "SMovkI32") &&
-                !instruction.Opcode.StartsWith("SLoad", StringComparison.Ordinal))
+            var vccSources = instruction.Sources.Where(IsVccOperand).ToArray();
+            var vccDestinations =
+                instruction.Destinations.Where(IsVccOperand).ToArray();
+            var propagatesOrdinaryValue =
+                vccSources.Length != 0 &&
+                vccSources.All(
+                    operand => ordinaryVccRegisters.Contains(operand.Value)) &&
+                !instruction.Sources.Any(IsExecMaskOperand);
+            if (!IsIndependentVccOverwrite(
+                    instruction,
+                    vccSources,
+                    vccDestinations) &&
+                !propagatesOrdinaryValue)
             {
                 return;
             }
 
-            foreach (var destination in instruction.Destinations.Where(IsVccOperand))
+            foreach (var destination in vccDestinations)
             {
                 ordinaryVccRegisters.Add(destination.Value);
             }
         }
+
+        private static bool IsIndependentVccOverwrite(
+            Gen5ShaderInstruction instruction,
+            IReadOnlyList<Gen5Operand> vccSources,
+            IReadOnlyList<Gen5Operand> vccDestinations) =>
+            vccDestinations.Count != 0 &&
+            vccSources.Count == 0 &&
+            !instruction.Opcode.StartsWith("VCmp", StringComparison.Ordinal) &&
+            !instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) &&
+            !instruction.Sources.Any(IsExecMaskOperand) &&
+            instruction.Opcode.StartsWith("S", StringComparison.Ordinal);
 
         private static bool IsVccOperand(Gen5Operand operand) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&

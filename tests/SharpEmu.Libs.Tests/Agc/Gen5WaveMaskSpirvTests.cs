@@ -48,6 +48,7 @@ public sealed class Gen5WaveMaskSpirvTests
         // s_and_saveexec_b64 vcc, vcc
         // s_mov_b64 exec, vcc
         // s_mov_b32 vcc_lo, literal
+        // s_add_i32 vcc_lo, vcc_lo, 1 (ordinary SGPR reuse)
         // v_add_f32 v2, vcc_lo, v2 (SDWA)
         var spirv = Compile(
             [
@@ -56,6 +57,7 @@ public sealed class Gen5WaveMaskSpirvTests
                 0xBEFE_046Au,
                 0xBEEA_03FFu,
                 0xBCFA_00FAu,
+                0x816A_816Au,
                 0x0604_04F9u,
                 0x2686_066Au,
             ],
@@ -87,6 +89,56 @@ public sealed class Gen5WaveMaskSpirvTests
                 0xBEFE_0402u,
                 0xB06A_0048u,
                 0x7DA8_1C6Au,
+            ],
+            waveLaneCount: 64,
+            localSizeX: 8,
+            localSizeY: 8);
+
+        Assert.DoesNotContain(
+            (ushort)SpirvOp.ControlBarrier,
+            EnumerateInstructions(spirv).Select(static item => item.Op));
+    }
+
+    [Fact]
+    public void SplitWave64VccBranch_SynchronizesOnlyAtBranch()
+    {
+        // v_cmp_gt_u32 vcc, s3, v3
+        // s_and_b64 vcc, vcc, s[8:9]
+        // s_cbranch_vccz +1
+        // s_nop 0
+        // s_endpgm
+        var spirv = Compile(
+            [
+                0x7D88_0603u,
+                0x87EA_086Au,
+                0xBF86_0001u,
+                0xBF80_0000u,
+                0xBF81_0000u,
+            ],
+            waveLaneCount: 64,
+            localSizeX: 8,
+            localSizeY: 8);
+
+        Assert.Equal(
+            2,
+            EnumerateInstructions(spirv).Count(static item =>
+                item.Op == (ushort)SpirvOp.ControlBarrier));
+    }
+
+    [Fact]
+    public void SplitWave64Vcndmask_AllowsTrackedCompareMask()
+    {
+        // v_cmp_ge_f32 s[26:27], ...
+        // v_cndmask_b32 ..., s[26:27]
+        // The explicit condition is a lane mask produced by the immediately
+        // preceding compare, so each native wave32 half can test its own bits.
+        var spirv = Compile(
+            [
+                0x7C0C_66F9u,
+                0x1606_9A35u,
+                0xD501_003Eu,
+                0x0069_0280u,
+                0xBF81_0000u,
             ],
             waveLaneCount: 64,
             localSizeX: 8,
