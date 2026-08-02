@@ -2225,6 +2225,17 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "r98I08t+LOg",
+        ExportName = "sceAgcDcbDrawIndexIndirectMultiGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDrawIndexIndirectMultiGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 8u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
         Nid = "rUuVjyR+Rd4",
         ExportName = "sceAgcDcbGetLodStatsGetSize",
         Target = Generation.Gen5,
