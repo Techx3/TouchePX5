@@ -105,7 +105,15 @@ foreach ($toggle in @($settings.EnvironmentToggles)) {
 
 foreach ($toggle in $DiagnosticToggle) {
     if (-not [string]::IsNullOrWhiteSpace($toggle)) {
-        Set-ToucheEnvironmentVariable -Name $toggle -Value '1'
+        $separator = $toggle.IndexOf('=')
+        if ($separator -gt 0) {
+            $name = $toggle.Substring(0, $separator).Trim()
+            $value = $toggle.Substring($separator + 1)
+            Set-ToucheEnvironmentVariable -Name $name -Value $value
+        }
+        else {
+            Set-ToucheEnvironmentVariable -Name $toggle -Value '1'
+        }
     }
 }
 

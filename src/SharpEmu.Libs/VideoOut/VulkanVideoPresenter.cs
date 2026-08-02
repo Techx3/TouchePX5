@@ -485,6 +485,23 @@ internal static unsafe class VulkanVideoPresenter
             : 100_000_000UL;
     private static readonly HashSet<string> _tracedFenceTimeouts = new();
     private static readonly HashSet<string> _tracedSlowGuestSubmissions = new();
+    // Compact, opt-in diagnostics for sustained slowdowns. Unlike draw tracing,
+    // this emits one aggregate line per interval and is safe for longer gameplay
+    // captures. Set SHARPEMU_SLOWDOWN_DIAGNOSTICS_SECONDS to the interval.
+    private static readonly int _slowdownDiagnosticsSeconds =
+        int.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_SLOWDOWN_DIAGNOSTICS_SECONDS"),
+            out var slowdownDiagnosticsSeconds) && slowdownDiagnosticsSeconds > 0
+            ? slowdownDiagnosticsSeconds
+            : 0;
+    private static readonly double _slowGpuSubmissionThresholdMs =
+        double.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_SLOW_GPU_SUBMISSION_MS"),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var slowGpuSubmissionMs) && slowGpuSubmissionMs > 0
+            ? slowGpuSubmissionMs
+            : 25.0;
     private static long _guestQueueBackpressureTraceCount;
     private static long _guestQueueRecoveryTraceCount;
     private static long _orderedActionFenceWaitTraceCount;
@@ -3884,6 +3901,11 @@ internal static unsafe class VulkanVideoPresenter
         // dispatch cannot re-block every subsequent capacity wait for the full
         // fence timeout (~3s → ~0.3 FPS).
         private readonly Queue<PendingGuestSubmission> _abandonedGuestSubmissions = new();
+        private long _lastSlowdownDiagnosticsTicks;
+        private long _diagnosticCompletedSubmissions;
+        private long _diagnosticSlowSubmissions;
+        private double _diagnosticLongestSubmissionMs;
+        private string _diagnosticLongestSubmission = "none";
         private readonly Dictionary<string, ulong> _lastSubmittedTimelineByGuestQueue =
             new(StringComparer.Ordinal);
         private readonly Stack<DescriptorPool> _recycledDescriptorPools = new();
@@ -6215,6 +6237,8 @@ internal static unsafe class VulkanVideoPresenter
 
         private void RetireGuestSubmission(PendingGuestSubmission submission)
         {
+            RecordGuestSubmissionCompletion(submission);
+
             if (!_deviceLost)
             {
                 foreach (var image in submission.TraceImages)
@@ -6247,6 +6271,90 @@ internal static unsafe class VulkanVideoPresenter
             {
                 _completedTimeline = submission.Timeline;
             }
+        }
+
+        private void RecordGuestSubmissionCompletion(PendingGuestSubmission submission)
+        {
+            if (_slowdownDiagnosticsSeconds == 0)
+            {
+                return;
+            }
+
+            var elapsedMs = (Stopwatch.GetTimestamp() - submission.SubmittedTicks) *
+                1000.0 / Stopwatch.Frequency;
+            _diagnosticCompletedSubmissions++;
+            if (elapsedMs >= _slowGpuSubmissionThresholdMs)
+            {
+                _diagnosticSlowSubmissions++;
+            }
+
+            if (elapsedMs > _diagnosticLongestSubmissionMs)
+            {
+                _diagnosticLongestSubmissionMs = elapsedMs;
+                _diagnosticLongestSubmission = submission.DebugName;
+            }
+        }
+
+        private void LogSlowdownDiagnosticsIfDue()
+        {
+            if (_slowdownDiagnosticsSeconds == 0)
+            {
+                return;
+            }
+
+            var now = Stopwatch.GetTimestamp();
+            var intervalTicks = (long)_slowdownDiagnosticsSeconds * Stopwatch.Frequency;
+            if (_lastSlowdownDiagnosticsTicks != 0 &&
+                now - _lastSlowdownDiagnosticsTicks < intervalTicks)
+            {
+                return;
+            }
+
+            _lastSlowdownDiagnosticsTicks = now;
+            var oldestAgeMs = 0.0;
+            var oldestName = "none";
+            if (_pendingGuestSubmissions.TryPeek(out var oldest))
+            {
+                oldestAgeMs = (now - oldest.SubmittedTicks) * 1000.0 / Stopwatch.Frequency;
+                oldestName = oldest.DebugName;
+            }
+
+            ulong guestBufferBytes = 0;
+            var dirtyGuestBufferRanges = 0;
+            foreach (var allocation in _guestBufferAllocations)
+            {
+                guestBufferBytes += allocation.Size;
+                dirtyGuestBufferRanges += allocation.DirtyRanges.Count;
+            }
+
+            using var process = System.Diagnostics.Process.GetCurrentProcess();
+            process.Refresh();
+            var privateMb = process.PrivateMemorySize64 / (1024.0 * 1024.0);
+            var workingMb = process.WorkingSet64 / (1024.0 * 1024.0);
+            var managedMb = GC.GetTotalMemory(forceFullCollection: false) / (1024.0 * 1024.0);
+            var guestBufferMb = guestBufferBytes / (1024.0 * 1024.0);
+            var hostPoolMb = _hostBufferPool.CachedBytes / (1024.0 * 1024.0);
+
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] vk.slowdown_snapshot " +
+                $"private_mb={privateMb:F0} working_mb={workingMb:F0} managed_mb={managedMb:F0} " +
+                $"queued={_pendingGuestWorkCount} payload={_pendingPayloadGuestWorkCount} " +
+                $"sync={_pendingSyncGuestWorkCount} inflight={_pendingGuestSubmissions.Count} " +
+                $"abandoned={_abandonedGuestSubmissions.Count} oldest_ms={oldestAgeMs:F1} " +
+                $"completed={_diagnosticCompletedSubmissions} slow={_diagnosticSlowSubmissions} " +
+                $"longest_ms={_diagnosticLongestSubmissionMs:F1} " +
+                $"compute_pipelines={_computePipelines.Count} graphics_pipelines={_graphicsPipelines.Count} " +
+                $"layouts={_descriptorLayouts.Count} textures={_textureCache.Count} " +
+                $"images={_guestImages.Count} variants={_guestImageVariants.Count} " +
+                $"depth={_guestDepthImages.Count} guest_buffers={_guestBufferAllocations.Count} " +
+                $"guest_buffer_mb={guestBufferMb:F0} dirty_ranges={dirtyGuestBufferRanges} " +
+                $"host_pool_mb={hostPoolMb:F0} oldest='{oldestName}' " +
+                $"longest='{_diagnosticLongestSubmission}'");
+
+            _diagnosticCompletedSubmissions = 0;
+            _diagnosticSlowSubmissions = 0;
+            _diagnosticLongestSubmissionMs = 0;
+            _diagnosticLongestSubmission = "none";
         }
 
         private void WaitForAllGuestSubmissionsForCpuVisibility()
@@ -15619,6 +15727,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 CollectCompletedGuestSubmissions(waitForOldest: false);
             }
+            LogSlowdownDiagnosticsIfDue();
 
             bool hostVideoOverlayActive;
             bool hostVideoFramePending;
