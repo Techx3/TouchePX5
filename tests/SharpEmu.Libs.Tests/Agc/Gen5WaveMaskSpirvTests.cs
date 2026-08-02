@@ -41,6 +41,62 @@ public sealed class Gen5WaveMaskSpirvTests
                 + "(mask & lane_bit), not as a whole-word non-zero test");
     }
 
+    [Fact]
+    public void StructuredWave64ExecControl_AvoidsWorkgroupBarriers()
+    {
+        // v_cmp_eq_f32 vcc, v0, v1
+        // s_and_saveexec_b64 vcc, vcc
+        // s_mov_b64 exec, vcc
+        // s_mov_b32 vcc_lo, literal
+        // v_add_f32 v2, vcc_lo, v2 (SDWA)
+        var spirv = Compile(
+            [
+                0x7C04_0300u,
+                0xBEEA_246Au,
+                0xBEFE_046Au,
+                0xBEEA_03FFu,
+                0xBCFA_00FAu,
+                0x0604_04F9u,
+                0x2686_066Au,
+            ],
+            waveLaneCount: 64,
+            localSizeX: 8,
+            localSizeY: 8);
+
+        Assert.DoesNotContain(
+            (ushort)SpirvOp.ControlBarrier,
+            EnumerateInstructions(spirv).Select(static item => item.Op));
+    }
+
+    [Fact]
+    public void StructuredWave64VcmpxLoop_AvoidsWorkgroupBarriers()
+    {
+        // s_mov_b64 s[2:3], exec
+        // v_cmpx_le_u32 exec, s4, v18
+        // s_mov_b64 exec, s[2:3]
+        // This is the divergent loop shape used by the hot Demon's Souls
+        // post-processing kernel. Its lanes do not exchange data, so both
+        // native wave32 halves can execute independently.
+        var spirv = Compile(
+            [
+                0xBE82_047Eu,
+                0xBEEB_03FFu,
+                0x0000_0000u,
+                0xBF0D_886Bu,
+                0x7DA6_2404u,
+                0xBEFE_0402u,
+                0xB06A_0048u,
+                0x7DA8_1C6Au,
+            ],
+            waveLaneCount: 64,
+            localSizeX: 8,
+            localSizeY: 8);
+
+        Assert.DoesNotContain(
+            (ushort)SpirvOp.ControlBarrier,
+            EnumerateInstructions(spirv).Select(static item => item.Op));
+    }
+
     // True when the module contains an OpBitwiseAnd whose operand is a 64-bit
     // constant of value 1 — the current-lane bit that IsCurrentLaneSet masks the
     // wave mask with before the non-zero test.
@@ -108,7 +164,11 @@ public sealed class Gen5WaveMaskSpirvTests
     private static uint ReadWord(byte[] spirv, int offset) =>
         BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset, sizeof(uint)));
 
-    private static byte[] Compile(uint[] programWords)
+    private static byte[] Compile(
+        uint[] programWords,
+        uint waveLaneCount = 32,
+        uint localSizeX = 1,
+        uint localSizeY = 1)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
         var ctx = new CpuContext(memory, Generation.Gen5);
@@ -133,7 +193,14 @@ public sealed class Gen5WaveMaskSpirvTests
             error);
         Assert.True(
             Gen5SpirvTranslator.TryCompileComputeShader(
-                state, evaluation, 1, 1, 1, out var shader, out error),
+                state,
+                evaluation,
+                localSizeX,
+                localSizeY,
+                1,
+                out var shader,
+                out error,
+                waveLaneCount: waveLaneCount),
             error);
         return shader.Spirv;
     }

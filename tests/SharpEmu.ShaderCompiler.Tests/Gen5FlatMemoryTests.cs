@@ -100,6 +100,9 @@ public sealed class Gen5FlatMemoryTests
         Assert.Contains(
             (ushort)SpirvOp.ISub,
             ReadSpirvOpcodes(compiled.Spirv));
+        Assert.DoesNotContain(
+            512u,
+            ReadSpirvArrayLengths(compiled.Spirv));
     }
 
     private static IReadOnlyList<ushort> ReadSpirvOpcodes(byte[] spirv)
@@ -125,6 +128,44 @@ public sealed class Gen5FlatMemoryTests
         }
 
         return opcodes;
+    }
+
+    private static IReadOnlyList<uint> ReadSpirvArrayLengths(byte[] spirv)
+    {
+        var constants = new Dictionary<uint, uint>();
+        var arrayLengthIds = new List<uint>();
+        for (var offset = 5 * sizeof(uint); offset < spirv.Length;)
+        {
+            var instruction =
+                BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset));
+            var wordCount = checked((int)(instruction >> 16));
+            Assert.InRange(
+                wordCount,
+                1,
+                (spirv.Length - offset) / sizeof(uint));
+            var opcode = (SpirvOp)(ushort)instruction;
+            if (opcode == SpirvOp.Constant && wordCount == 4)
+            {
+                constants[
+                    BinaryPrimitives.ReadUInt32LittleEndian(
+                        spirv.AsSpan(offset + 2 * sizeof(uint)))] =
+                    BinaryPrimitives.ReadUInt32LittleEndian(
+                        spirv.AsSpan(offset + 3 * sizeof(uint)));
+            }
+            else if (opcode == SpirvOp.TypeArray && wordCount == 4)
+            {
+                arrayLengthIds.Add(
+                    BinaryPrimitives.ReadUInt32LittleEndian(
+                        spirv.AsSpan(offset + 3 * sizeof(uint))));
+            }
+
+            offset += wordCount * sizeof(uint);
+        }
+
+        return arrayLengthIds
+            .Where(constants.ContainsKey)
+            .Select(id => constants[id])
+            .ToArray();
     }
 
     private sealed class TestCpuMemory(ulong baseAddress, int size) : ICpuMemory
