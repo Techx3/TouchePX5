@@ -70,11 +70,25 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
         var repository = new FirmwareProfileRepository(_storeRoot);
         var catalog = repository.GetModuleCatalog(_profileId);
         var fileSystem = FirmwareVirtualFileSystem.Mount(_storeRoot, _profileId);
-        var candidates = await DiscoverCandidatesAsync(
+        var discovery = await DiscoverCandidatesAsync(
             catalog,
             fileSystem,
             targets.Keys,
             cancellationToken).ConfigureAwait(false);
+        var candidates = discovery.Candidates;
+        Console.Error.WriteLine(
+            $"[FIRMWARE-LLE][INFO] export audit: catalog={catalog.Modules.Count}, " +
+            $"eligible={discovery.EligibleModules}, scanned={discovery.ScannedModules}, " +
+            $"planned={discovery.PlannedModules}, linked={discovery.LinkedModules}, " +
+            $"export_modules={discovery.ModulesWithExports}, exports={discovery.ExportedSymbols}, " +
+            $"matches={discovery.MatchedSymbols}, rejected={discovery.RejectedModules}");
+        if (IsExportAuditEnabled())
+        {
+            foreach (var sample in discovery.Samples)
+            {
+                Console.Error.WriteLine($"[FIRMWARE-LLE][AUDIT] {sample}");
+            }
+        }
         var uniqueProviders = SelectUniqueProviders(candidates, targets.Keys, out var ambiguousTargets);
         if (uniqueProviders.Count == 0)
         {
@@ -91,8 +105,10 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
             defaultQuality: HleImplementationQuality.Partial,
             target: Generation.Gen5);
         var availableLleExports = new List<LleExportDescriptor>();
-        var pending = uniqueProviders.Values
-            .DistinctBy(candidate => candidate.Module.VirtualPath, StringComparer.Ordinal)
+        var pending = BuildDependencyClosure(
+                uniqueProviders.Values.Select(provider => provider.Candidate),
+                discovery.AllCandidates,
+                hleSymbols)
             .OrderBy(candidate => candidate.Module.Dependencies.Count)
             .ThenBy(candidate => candidate.Module.VirtualPath, StringComparer.Ordinal)
             .ToList();
@@ -171,6 +187,25 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
                 }
             }
         }
+        if (IsExportAuditEnabled() && pending.Count != 0)
+        {
+            foreach (var candidate in pending.Take(12))
+            {
+                var resolution = new HybridImportResolver(hleSymbols, availableLleExports)
+                    .Resolve(candidate.LinkPlan, ModuleResolutionMode.Auto);
+                var unresolved = resolution.Bindings
+                    .Where(binding => binding.Source == ImportBindingSource.Unresolved)
+                    .Select(binding => binding.SymbolName)
+                    .Take(8)
+                    .ToArray();
+                Console.Error.WriteLine(
+                    $"[FIRMWARE-LLE][AUDIT] deferred={candidate.Module.VirtualPath} " +
+                    $"imports={candidate.LinkPlan.ImportedSymbols.Count} " +
+                    $"unresolved={resolution.Bindings.Count(binding => binding.Source == ImportBindingSource.Unresolved)} " +
+                    $"unsupported={string.Join(',', candidate.LinkPlan.UnsupportedRelocationTypes)} " +
+                    $"sample={string.Join(',', unresolved)}");
+            }
+        }
 
         return new FirmwareLleLoadSummary(
             targets.Values.SelectMany(value => value).Distinct(StringComparer.Ordinal).Count(),
@@ -223,7 +258,7 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
         aliases.Add(nid);
     }
 
-    private static async Task<IReadOnlyList<Candidate>> DiscoverCandidatesAsync(
+    private static async Task<CandidateDiscovery> DiscoverCandidatesAsync(
         FirmwareModuleCatalog catalog,
         IFirmwareVirtualFileSystem fileSystem,
         IEnumerable<string> targets,
@@ -231,32 +266,69 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
     {
         var targetSet = targets.ToHashSet(StringComparer.Ordinal);
         var result = new List<Candidate>();
-        var eligible = catalog.Modules
+        var allCandidates = new List<Candidate>();
+        var samples = new List<string>();
+        var eligibleModules = catalog.Modules
             .Where(module =>
                 module.Format == FirmwareModuleFormat.Elf64 &&
-                module.State is FirmwareModuleState.Parseable or FirmwareModuleState.LleCompatible &&
+                module.State is (FirmwareModuleState.Parseable or
+                    FirmwareModuleState.LleCompatible or
+                    FirmwareModuleState.MissingDependencies) &&
                 module.HasDynamicTable)
-            .OrderBy(module => module.VirtualPath, StringComparer.Ordinal)
+            .OrderBy(module => module.State == FirmwareModuleState.MissingDependencies ? 0 : 1)
+            .ThenBy(module => module.VirtualPath, StringComparer.Ordinal)
+            .ToArray();
+        var eligible = eligibleModules
             .Take(MaximumScannedModules)
             .ToArray();
+        var plannedModules = 0;
+        var linkedModules = 0;
+        var modulesWithExports = 0;
+        var exportedSymbols = 0;
+        var matchedSymbols = 0;
+        var rejectedModules = 0;
         foreach (var module in eligible)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 var decision = CreateExplicitDecision(module);
-                var loadPlan = await new LleModuleLoadPlanner().BuildAsync(
+                var loadPlan = await new LleModuleLoadPlanner().BuildHybridAsync(
                     decision,
                     catalog,
                     fileSystem,
                     cancellationToken).ConfigureAwait(false);
+                plannedModules++;
                 var linkPlan = await new LleModuleLinkPlanner().BuildAsync(
                     loadPlan,
                     fileSystem,
                     cancellationToken).ConfigureAwait(false);
-                if (linkPlan.CanApply && linkPlan.ExportedSymbols.Any(symbol => targetSet.Contains(symbol.Name)))
+                linkedModules++;
+                AddSample(
+                    samples,
+                    $"module={module.VirtualPath} exports={linkPlan.ExportedSymbols.Count} " +
+                    $"str=0x{linkPlan.Metadata.StringTableLocation:x}/0x{linkPlan.Metadata.StringTableSize:x} " +
+                    $"sym=0x{linkPlan.Metadata.SymbolTableLocation:x}/0x{linkPlan.Metadata.SymbolTableSize:x} " +
+                    $"rela=0x{linkPlan.Metadata.RelaLocation:x}/0x{linkPlan.Metadata.RelaSize:x} " +
+                    $"jmp=0x{linkPlan.Metadata.ProcedureLinkageLocation:x}/0x{linkPlan.Metadata.ProcedureLinkageSize:x}");
+                if (linkPlan.ExportedSymbols.Count != 0)
                 {
-                    result.Add(new Candidate(module, loadPlan, linkPlan));
+                    modulesWithExports++;
+                    exportedSymbols += linkPlan.ExportedSymbols.Count;
+                    AddSample(samples, $"export sample={string.Join(',', linkPlan.ExportedSymbols.Take(4).Select(symbol => symbol.Name))}");
+                }
+                var moduleMatches = linkPlan.ExportedSymbols.Count(symbol =>
+                    targetSet.Contains(symbol.Name) ||
+                    targetSet.Contains(GetSonyNid(symbol.Name)));
+                matchedSymbols += moduleMatches;
+                if (linkPlan.CanApply)
+                {
+                    var candidate = new Candidate(module, loadPlan, linkPlan);
+                    allCandidates.Add(candidate);
+                    if (moduleMatches != 0)
+                    {
+                        result.Add(candidate);
+                    }
                 }
             }
             catch (Exception exception) when (exception is
@@ -266,25 +338,112 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
                 NotSupportedException or
                 OverflowException)
             {
-                // A malformed or unsupported module is simply ineligible as a provider.
+                rejectedModules++;
+                AddSample(
+                    samples,
+                    $"rejected={module.VirtualPath} reason={exception.GetType().Name}: {exception.Message}");
             }
         }
-        return result;
+        if (samples.Count == 0)
+        {
+            AddSample(samples, "No module produced an export sample or rejection detail.");
+        }
+        return new CandidateDiscovery(
+            result,
+            allCandidates,
+            eligibleModules.Length,
+            eligible.Length,
+            plannedModules,
+            linkedModules,
+            modulesWithExports,
+            exportedSymbols,
+            matchedSymbols,
+            rejectedModules,
+            samples);
     }
 
-    private static Dictionary<string, Candidate> SelectUniqueProviders(
+    private static IReadOnlyList<Candidate> BuildDependencyClosure(
+        IEnumerable<Candidate> roots,
+        IReadOnlyList<Candidate> allCandidates,
+        IReadOnlyList<HleSymbolDescriptor> hleSymbols)
+    {
+        var hleNames = hleSymbols
+            .Select(symbol => symbol.SymbolName)
+            .ToHashSet(StringComparer.Ordinal);
+        var selected = roots
+            .DistinctBy(candidate => candidate.Module.VirtualPath, StringComparer.Ordinal)
+            .ToDictionary(candidate => candidate.Module.VirtualPath, StringComparer.Ordinal);
+        var queue = new Queue<Candidate>(selected.Values);
+        while (queue.TryDequeue(out var candidate))
+        {
+            foreach (var import in candidate.LinkPlan.ImportedSymbols)
+            {
+                if (hleNames.Contains(import.Name) ||
+                    hleNames.Contains(GetSonyNid(import.Name)) ||
+                    HasUniqueNidProvider(import.Name, selected.Values))
+                {
+                    continue;
+                }
+                var importNid = GetSonyNid(import.Name);
+                var providers = allCandidates
+                    .Where(provider => provider.LinkPlan.ExportedSymbols.Any(export =>
+                        string.Equals(GetSonyNid(export.Name), importNid, StringComparison.Ordinal)))
+                    .DistinctBy(provider => provider.Module.VirtualPath, StringComparer.Ordinal)
+                    .Take(2)
+                    .ToArray();
+                if (providers.Length != 1 ||
+                    !selected.TryAdd(providers[0].Module.VirtualPath, providers[0]))
+                {
+                    continue;
+                }
+                queue.Enqueue(providers[0]);
+            }
+        }
+        return selected.Values.ToArray();
+    }
+
+    private static bool HasUniqueNidProvider(string symbolName, IEnumerable<Candidate> candidates)
+    {
+        var nid = GetSonyNid(symbolName);
+        return candidates
+            .Where(candidate => candidate.LinkPlan.ExportedSymbols.Any(export =>
+                string.Equals(GetSonyNid(export.Name), nid, StringComparison.Ordinal)))
+            .Select(candidate => candidate.Module.VirtualPath)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .Count() == 1;
+    }
+
+    private static bool IsExportAuditEnabled() =>
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_FIRMWARE_LLE_EXPORT_AUDIT"),
+            "1",
+            StringComparison.Ordinal);
+
+    private static void AddSample(ICollection<string> samples, string sample)
+    {
+        const int maximumSamples = 24;
+        if (samples.Count < maximumSamples)
+        {
+            samples.Add(sample);
+        }
+    }
+
+    private static Dictionary<string, ProviderSelection> SelectUniqueProviders(
         IReadOnlyList<Candidate> candidates,
         IEnumerable<string> targets,
         out int ambiguousTargets)
     {
-        var result = new Dictionary<string, Candidate>(StringComparer.Ordinal);
+        var result = new Dictionary<string, ProviderSelection>(StringComparer.Ordinal);
         ambiguousTargets = 0;
         foreach (var target in targets)
         {
             var providers = candidates
-                .Where(candidate => candidate.LinkPlan.ExportedSymbols.Any(symbol =>
-                    string.Equals(symbol.Name, target, StringComparison.Ordinal)))
-                .DistinctBy(candidate => candidate.Module.VirtualPath, StringComparer.Ordinal)
+                .SelectMany(candidate => candidate.LinkPlan.ExportedSymbols
+                    .Where(symbol => MatchesTarget(symbol.Name, target))
+                    .Select(symbol => new ProviderSelection(candidate, symbol.Name)))
+                .DistinctBy(
+                    provider => (provider.Candidate.Module.VirtualPath, provider.ExportSymbolName))
                 .Take(2)
                 .ToArray();
             if (providers.Length == 1)
@@ -302,24 +461,36 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
     private static void PublishProviderExports(
         Candidate candidate,
         IReadOnlyList<LleExportDescriptor> exports,
-        IReadOnlyDictionary<string, Candidate> uniqueProviders,
+        IReadOnlyDictionary<string, ProviderSelection> uniqueProviders,
         IReadOnlyDictionary<string, HashSet<string>> targets,
         IDictionary<string, ulong> runtimeSymbols)
     {
-        foreach (var export in exports)
+        foreach (var target in targets)
         {
-            if (!uniqueProviders.TryGetValue(export.SymbolName, out var provider) ||
-                provider.Module.VirtualPath != candidate.Module.VirtualPath ||
-                !targets.TryGetValue(export.SymbolName, out var aliases))
+            if (!uniqueProviders.TryGetValue(target.Key, out var provider) ||
+                provider.Candidate.Module.VirtualPath != candidate.Module.VirtualPath)
             {
                 continue;
             }
+            var export = exports.Single(item =>
+                string.Equals(item.SymbolName, provider.ExportSymbolName, StringComparison.Ordinal));
             runtimeSymbols.TryAdd(export.SymbolName, export.RuntimeAddress);
-            foreach (var alias in aliases)
+            runtimeSymbols.TryAdd(target.Key, export.RuntimeAddress);
+            foreach (var alias in target.Value)
             {
                 runtimeSymbols.TryAdd(alias, export.RuntimeAddress);
             }
         }
+    }
+
+    private static bool MatchesTarget(string symbolName, string target) =>
+        string.Equals(symbolName, target, StringComparison.Ordinal) ||
+        string.Equals(GetSonyNid(symbolName), target, StringComparison.Ordinal);
+
+    private static string GetSonyNid(string symbolName)
+    {
+        var separator = symbolName.IndexOf('#');
+        return separator <= 0 ? symbolName : symbolName[..separator];
     }
 
     private static ModuleResolutionDecision CreateExplicitDecision(FirmwareModule module) => new()
@@ -343,6 +514,21 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
         FirmwareModule Module,
         LleModuleLoadPlan LoadPlan,
         LleModuleLinkPlan LinkPlan);
+
+    private sealed record ProviderSelection(Candidate Candidate, string ExportSymbolName);
+
+    private sealed record CandidateDiscovery(
+        IReadOnlyList<Candidate> Candidates,
+        IReadOnlyList<Candidate> AllCandidates,
+        int EligibleModules,
+        int ScannedModules,
+        int PlannedModules,
+        int LinkedModules,
+        int ModulesWithExports,
+        int ExportedSymbols,
+        int MatchedSymbols,
+        int RejectedModules,
+        IReadOnlyList<string> Samples);
 }
 
 internal sealed record FirmwareLleLoadSummary(

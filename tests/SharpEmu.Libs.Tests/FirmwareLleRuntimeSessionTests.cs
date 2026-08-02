@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Text;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.Core.Runtime;
@@ -17,14 +18,16 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
         Path.GetTempPath(),
         $"touche-runtime-lle-{Guid.NewGuid():N}");
 
-    [Fact]
-    public async Task LoadsUniqueFirmwareProviderForMissingHleImport()
+    [Theory]
+    [InlineData("missingNid")]
+    [InlineData("missingNid#A#B")]
+    public async Task LoadsUniqueFirmwareProviderForMissingHleImport(string exportSymbolName)
     {
         var source = Path.Combine(_temporaryDirectory, "source");
         var store = Path.Combine(_temporaryDirectory, "store");
         var modulePath = Path.Combine(source, "system", "common", "lib", "libProvider.sprx");
         Directory.CreateDirectory(Path.GetDirectoryName(modulePath)!);
-        await File.WriteAllBytesAsync(modulePath, CreateProviderElf());
+        await File.WriteAllBytesAsync(modulePath, CreateProviderElf(exportSymbolName));
         var imported = await new FirmwareDirectoryImporter(store).ImportAsync(source);
         var memory = new InMemoryVirtualMemory();
         var modules = new ModuleManager();
@@ -53,7 +56,7 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
         Assert.Equal(0x0000_6800_0000_0180UL, runtimeSymbols["missingNid"]);
     }
 
-    private static byte[] CreateProviderElf()
+    private static byte[] CreateProviderElf(string exportSymbolName)
     {
         var bytes = new byte[0x600];
         bytes[0] = 0x7f;
@@ -90,12 +93,13 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
         BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[48..], 8);
 
         WriteDynamic(bytes, 0x200, 5, 0x1400);
-        WriteDynamic(bytes, 0x210, 10, 12);
+        var stringBytes = Encoding.ASCII.GetBytes($"\0{exportSymbolName}\0");
+        WriteDynamic(bytes, 0x210, 10, (ulong)stringBytes.Length);
         WriteDynamic(bytes, 0x220, 6, 0x1480);
         WriteDynamic(bytes, 0x230, 11, 24);
         WriteDynamic(bytes, 0x240, 0x6100003F, 48);
         WriteDynamic(bytes, 0x250, 0, 0);
-        "\0missingNid\0"u8.CopyTo(bytes.AsSpan(0x400));
+        stringBytes.CopyTo(bytes.AsSpan(0x400));
         var symbol = bytes.AsSpan(0x480 + 24, 24);
         BinaryPrimitives.WriteUInt32LittleEndian(symbol, 1);
         symbol[4] = 0x12;

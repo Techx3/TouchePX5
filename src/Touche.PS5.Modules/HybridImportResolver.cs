@@ -11,13 +11,16 @@ public sealed class HybridImportResolver
 {
     private readonly IReadOnlyDictionary<string, HleSymbolDescriptor> _hleSymbols;
     private readonly IReadOnlyDictionary<LleKey, LleExportDescriptor> _lleSymbols;
+    private readonly IReadOnlyDictionary<LleKey, LleExportDescriptor> _uniqueLleNids;
 
     public HybridImportResolver(
         IEnumerable<HleSymbolDescriptor>? hleSymbols = null,
         IEnumerable<LleExportDescriptor>? lleSymbols = null)
     {
         _hleSymbols = BuildHleIndex(hleSymbols ?? []);
-        _lleSymbols = BuildLleIndex(lleSymbols ?? []);
+        var exports = (lleSymbols ?? []).ToArray();
+        _lleSymbols = BuildLleIndex(exports);
+        _uniqueLleNids = BuildUniqueLleNidIndex(exports);
     }
 
     public ModuleImportResolutionPlan Resolve(
@@ -52,7 +55,15 @@ public sealed class HybridImportResolver
         ModuleResolutionMode mode)
     {
         _hleSymbols.TryGetValue(symbol.Name, out var hle);
+        if (hle is null)
+        {
+            _hleSymbols.TryGetValue(GetSonyNid(symbol.Name), out hle);
+        }
         _lleSymbols.TryGetValue(new LleKey(profileId, symbol.Name), out var lle);
+        if (lle is null)
+        {
+            _uniqueLleNids.TryGetValue(new LleKey(profileId, GetSonyNid(symbol.Name)), out lle);
+        }
         return mode switch
         {
             ModuleResolutionMode.Auto => ResolveAuto(symbol, hle, lle),
@@ -64,6 +75,12 @@ public sealed class HybridImportResolver
                 : SelectLle(symbol, lle, usedFallback: false),
             _ => throw new ArgumentOutOfRangeException(nameof(mode)),
         };
+    }
+
+    private static string GetSonyNid(string symbolName)
+    {
+        var separator = symbolName.IndexOf('#');
+        return separator <= 0 ? symbolName : symbolName[..separator];
     }
 
     private static ImportBindingDecision ResolveAuto(
@@ -246,6 +263,15 @@ public sealed class HybridImportResolver
         }
         return result;
     }
+
+    private static IReadOnlyDictionary<LleKey, LleExportDescriptor> BuildUniqueLleNidIndex(
+        IEnumerable<LleExportDescriptor> descriptors) =>
+        descriptors
+            .GroupBy(descriptor => new LleKey(
+                descriptor.FirmwareProfileId,
+                GetSonyNid(descriptor.SymbolName)))
+            .Where(group => group.Count() == 1)
+            .ToDictionary(group => group.Key, group => group.Single());
 
     private static void ValidateLinkPlan(LleModuleLinkPlan plan)
     {

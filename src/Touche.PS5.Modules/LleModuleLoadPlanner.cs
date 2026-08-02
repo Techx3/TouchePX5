@@ -21,16 +21,38 @@ public sealed class LleModuleLoadPlanner
     private const uint ProgramTypeDynamic = 2;
     private const uint KnownProgramFlags = 7;
 
-    public async Task<LleModuleLoadPlan> BuildAsync(
+    public Task<LleModuleLoadPlan> BuildAsync(
         ModuleResolutionDecision decision,
         FirmwareModuleCatalog catalog,
         IFirmwareVirtualFileSystem fileSystem,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        BuildCoreAsync(decision, catalog, fileSystem, allowMissingDependencies: false, cancellationToken);
+
+    /// <summary>
+    /// Builds a plan for the hybrid runtime. A module whose firmware-only
+    /// dependencies are absent from the imported profile may still be usable
+    /// when every imported symbol can be supplied by HLE or another loaded LLE
+    /// module. The linker remains responsible for proving that condition before
+    /// any guest code is published.
+    /// </summary>
+    public Task<LleModuleLoadPlan> BuildHybridAsync(
+        ModuleResolutionDecision decision,
+        FirmwareModuleCatalog catalog,
+        IFirmwareVirtualFileSystem fileSystem,
+        CancellationToken cancellationToken = default) =>
+        BuildCoreAsync(decision, catalog, fileSystem, allowMissingDependencies: true, cancellationToken);
+
+    private async Task<LleModuleLoadPlan> BuildCoreAsync(
+        ModuleResolutionDecision decision,
+        FirmwareModuleCatalog catalog,
+        IFirmwareVirtualFileSystem fileSystem,
+        bool allowMissingDependencies,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(decision);
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(fileSystem);
-        var module = ValidateSelection(decision, catalog);
+        var module = ValidateSelection(decision, catalog, allowMissingDependencies);
         if (!string.Equals(fileSystem.ProfileId, catalog.ProfileId, StringComparison.Ordinal))
         {
             throw new InvalidDataException("The mounted firmware profile does not match the module catalog.");
@@ -61,7 +83,8 @@ public sealed class LleModuleLoadPlanner
 
     private static FirmwareModule ValidateSelection(
         ModuleResolutionDecision decision,
-        FirmwareModuleCatalog catalog)
+        FirmwareModuleCatalog catalog,
+        bool allowMissingDependencies)
     {
         if (decision.SelectedImplementation != ModuleImplementationKind.Lle ||
             string.IsNullOrWhiteSpace(decision.ModuleVirtualPath) ||
@@ -89,7 +112,9 @@ public sealed class LleModuleLoadPlanner
         if (!string.Equals(module.Sha256, decision.ModuleHash, StringComparison.Ordinal) ||
             module.Format != FirmwareModuleFormat.Elf64 ||
             !string.Equals(module.Architecture, "x86-64", StringComparison.Ordinal) ||
-            module.State is not FirmwareModuleState.Parseable and not FirmwareModuleState.LleCompatible)
+            module.State is not FirmwareModuleState.Parseable and
+                not FirmwareModuleState.LleCompatible &&
+                !(allowMissingDependencies && module.State == FirmwareModuleState.MissingDependencies))
         {
             throw new InvalidDataException("The selected firmware module is not eligible for an LLE load plan.");
         }

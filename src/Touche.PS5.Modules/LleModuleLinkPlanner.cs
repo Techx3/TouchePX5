@@ -46,6 +46,27 @@ public sealed class LleModuleLinkPlanner
     [
         0, 1, 2, 4, 6, 7, 8, 10, 11, 24, 32, 33, 38,
     ];
+    private static readonly HashSet<long> ConsumedSingletonDynamicTags =
+    [
+        DtPltRelSize,
+        DtStrTab,
+        DtSymTab,
+        DtRela,
+        DtRelaSize,
+        DtRelaEntrySize,
+        DtStrSize,
+        DtSymbolEntrySize,
+        DtPltRelKind,
+        DtJmpRel,
+        DtSceJmpRel,
+        DtScePltRelSize,
+        DtSceRela,
+        DtSceRelaSize,
+        DtSceStrTab,
+        DtSceStrSize,
+        DtSceSymTab,
+        DtSceSymTabSize,
+    ];
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     public async Task<LleModuleLinkPlan> BuildAsync(
@@ -188,9 +209,13 @@ public sealed class LleModuleLinkPlanner
                 terminated = true;
                 break;
             }
-            if (entries.TryGetValue(tag, out var existing) && existing != value)
+            if (entries.TryGetValue(tag, out var existing))
             {
-                throw new InvalidDataException($"ELF dynamic tag 0x{tag:X} has conflicting values.");
+                if (existing != value && ConsumedSingletonDynamicTags.Contains(tag))
+                {
+                    throw new InvalidDataException($"ELF dynamic tag 0x{tag:X} has conflicting values.");
+                }
+                continue;
             }
             entries[tag] = value;
         }

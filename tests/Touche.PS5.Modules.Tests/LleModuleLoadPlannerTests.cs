@@ -45,6 +45,30 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
     }
 
     [Fact]
+    public async Task HybridPlanCanInspectModuleWithFirmwareDependenciesMissing()
+    {
+        var imported = await ImportAsync(CreateDynamicElf(relocationType: 8));
+        var originalCatalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(originalCatalog.Modules) with
+        {
+            State = FirmwareModuleState.MissingDependencies,
+            Reason = "A declared firmware dependency is absent.",
+        };
+        var catalog = originalCatalog with { Modules = [module] };
+        var decision = CreateDecision(module);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var planner = new LleModuleLoadPlanner();
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            planner.BuildAsync(decision, catalog, fileSystem));
+
+        var plan = await planner.BuildHybridAsync(decision, catalog, fileSystem);
+
+        Assert.Equal(module.VirtualPath, plan.ModuleVirtualPath);
+        Assert.True(plan.HasDynamicTable);
+    }
+
+    [Fact]
     public async Task CatalogsVerifiedDynamicRelocationsWithoutApplyingThem()
     {
         var imported = await ImportAsync(CreateDynamicElf(relocationType: 8));
@@ -65,6 +89,29 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
         Assert.Equal(0x1100UL, relocation.TargetVirtualAddress);
         Assert.Equal(0U, relocation.SymbolIndex);
         Assert.Equal(8U, relocation.Type);
+        Assert.True(linkPlan.CanApply);
+    }
+
+    [Fact]
+    public async Task LinkPlanAcceptsRepeatedNeededEntries()
+    {
+        var imported = await ImportAsync(CreateDynamicElfWithRepeatedNeededEntries());
+        var originalCatalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(originalCatalog.Modules) with
+        {
+            State = FirmwareModuleState.MissingDependencies,
+            Reason = "The repeated DT_NEEDED fixtures have no providers.",
+        };
+        var catalog = originalCatalog with { Modules = [module] };
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var loadPlan = await new LleModuleLoadPlanner().BuildHybridAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+
+        var linkPlan = await new LleModuleLinkPlanner().BuildAsync(loadPlan, fileSystem);
+
+        Assert.Single(linkPlan.Relocations);
         Assert.True(linkPlan.CanApply);
     }
 
@@ -418,6 +465,21 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
             bytes.AsSpan(0x308),
             relocationType);
         BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(0x310), 4);
+        return bytes;
+    }
+
+    private static byte[] CreateDynamicElfWithRepeatedNeededEntries()
+    {
+        var bytes = CreateDynamicElf(relocationType: 8);
+        var dynamicHeader = bytes.AsSpan(120, 56);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[32..], 96);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[40..], 96);
+        WriteDynamicEntry(bytes, 0x200, 1, 0x20);
+        WriteDynamicEntry(bytes, 0x210, 1, 0x40);
+        WriteDynamicEntry(bytes, 0x220, 7, 0x1300);
+        WriteDynamicEntry(bytes, 0x230, 8, 24);
+        WriteDynamicEntry(bytes, 0x240, 9, 24);
+        WriteDynamicEntry(bytes, 0x250, 0, 0);
         return bytes;
     }
 

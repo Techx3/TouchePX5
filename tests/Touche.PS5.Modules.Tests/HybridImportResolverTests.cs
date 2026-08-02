@@ -61,6 +61,53 @@ public sealed class HybridImportResolverTests
     }
 
     [Fact]
+    public void DecoratedSonyImportUsesBareHleNid()
+    {
+        var resolver = CreateResolver(HleImplementationQuality.CompleteStable, includeLle: false);
+
+        var binding = Assert.Single(resolver.Resolve(CreateLinkPlan($"{SymbolName}#A#B")).Bindings);
+
+        Assert.Equal(ImportBindingSource.Hle, binding.Source);
+        Assert.Equal("dispatch-example", binding.HleDispatchKey);
+    }
+
+    [Fact]
+    public void DecoratedSonyImportUsesUniqueBareLleNid()
+    {
+        var descriptor = CreateLle() with
+        {
+            SymbolName = $"{SymbolName}#B#C",
+            RuntimeAddress = 0x1234,
+        };
+        var resolver = new HybridImportResolver(lleSymbols: [descriptor]);
+
+        var binding = Assert.Single(
+            resolver.Resolve(CreateLinkPlan($"{SymbolName}#A#B")).Bindings);
+
+        Assert.Equal(ImportBindingSource.Lle, binding.Source);
+        Assert.Equal(0x1234UL, binding.LleRuntimeAddress);
+    }
+
+    [Fact]
+    public void DecoratedSonyImportRejectsAmbiguousBareLleNid()
+    {
+        var first = CreateLle() with { SymbolName = $"{SymbolName}#B#C" };
+        var second = CreateLle() with
+        {
+            ModuleVirtualPath = "/system/common/lib/libSecond.sprx",
+            ModuleHash = new string('c', 64),
+            SymbolName = $"{SymbolName}#C#D",
+            RuntimeAddress = 0xa000,
+        };
+        var resolver = new HybridImportResolver(lleSymbols: [first, second]);
+
+        var binding = Assert.Single(
+            resolver.Resolve(CreateLinkPlan($"{SymbolName}#A#B")).Bindings);
+
+        Assert.Equal(ImportBindingSource.Unresolved, binding.Source);
+    }
+
+    [Fact]
     public void LleExportFromDifferentFirmwareProfileIsNotEligible()
     {
         var descriptor = CreateLle() with { FirmwareProfileId = "another-profile" };
@@ -124,7 +171,7 @@ public sealed class HybridImportResolverTests
         0x9000,
         16);
 
-    private static LleModuleLinkPlan CreateLinkPlan() => new()
+    private static LleModuleLinkPlan CreateLinkPlan(string symbolName = SymbolName) => new()
     {
         FirmwareProfileId = ProfileId,
         ModuleVirtualPath = "/system/common/lib/libConsumer.sprx",
@@ -133,11 +180,11 @@ public sealed class HybridImportResolverTests
         Relocations = [],
         ReferencedSymbols =
         [
-            new LleDynamicSymbol(1, SymbolName, 1, 2, 0, 0, 0, 0),
+            new LleDynamicSymbol(1, symbolName, 1, 2, 0, 0, 0, 0),
         ],
         ImportedSymbols =
         [
-            new LleDynamicSymbol(1, SymbolName, 1, 2, 0, 0, 0, 0),
+            new LleDynamicSymbol(1, symbolName, 1, 2, 0, 0, 0, 0),
         ],
         UnsupportedRelocationTypes = [],
     };
