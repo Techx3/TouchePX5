@@ -264,9 +264,17 @@ public static partial class Gen5SpirvTranslator
         private uint _privateVec2Pointer;
         private uint _privateBoolPointer;
         private uint _runtimeBufferBiases;
-        private uint _scalarRegisters;
-        private uint _vectorRegisters;
-        private uint _packedHalfRegisters;
+        // Guest registers are materialized lazily as independent Private
+        // variables. Keeping every register in fixed 128/512-element arrays
+        // made constant register accesses become OpAccessChain operations and
+        // left host drivers to scalarize several kilobytes of private state per
+        // invocation. Large wave/LDS compute shaders are particularly harmed
+        // when that state spills. Individual variables preserve the exact
+        // register model while allowing unused registers to disappear and
+        // direct loads/stores to remain direct in SPIR-V.
+        private readonly uint[] _scalarRegisters = new uint[ScalarRegisterCount];
+        private readonly uint[] _vectorRegisters = new uint[VectorRegisterCount];
+        private readonly uint[] _packedHalfRegisters = new uint[VectorRegisterCount];
         private uint _scc;
         private uint _vcc;
         private uint _exec;
@@ -364,7 +372,8 @@ public static partial class Gen5SpirvTranslator
             _emulateWave64 =
                 stage == Gen5SpirvStage.Compute &&
                 _waveLaneCount == 64 &&
-                (ulong)localSizeX * localSizeY * localSizeZ == 64;
+                (ulong)localSizeX * localSizeY * localSizeZ == 64 &&
+                !CanSplitWave64Control(state.Program.Instructions);
             _localSizeX = localSizeX;
             _localSizeY = localSizeY;
             _localSizeZ = localSizeZ;
@@ -772,27 +781,6 @@ public static partial class Gen5SpirvTranslator
             _privateBoolPointer =
                 _module.TypePointer(SpirvStorageClass.Private, _boolType);
 
-            var scalarArrayType = _module.TypeArray(_uintType, ScalarRegisterCount);
-            var vectorArrayType = _module.TypeArray(_uintType, VectorRegisterCount);
-            var packedHalfArrayType = _module.TypeArray(_vec2Type, VectorRegisterCount);
-            var privateScalarArrayPointer =
-                _module.TypePointer(SpirvStorageClass.Private, scalarArrayType);
-            var privateVectorArrayPointer =
-                _module.TypePointer(SpirvStorageClass.Private, vectorArrayType);
-            var privatePackedHalfArrayPointer =
-                _module.TypePointer(SpirvStorageClass.Private, packedHalfArrayType);
-            _scalarRegisters = _module.AddGlobalVariable(
-                privateScalarArrayPointer,
-                SpirvStorageClass.Private,
-                _module.ConstantNull(scalarArrayType));
-            _vectorRegisters = _module.AddGlobalVariable(
-                privateVectorArrayPointer,
-                SpirvStorageClass.Private,
-                _module.ConstantNull(vectorArrayType));
-            _packedHalfRegisters = _module.AddGlobalVariable(
-                privatePackedHalfArrayPointer,
-                SpirvStorageClass.Private,
-                _module.ConstantNull(packedHalfArrayType));
             _scc = _module.AddGlobalVariable(
                 _privateBoolPointer,
                 SpirvStorageClass.Private,
@@ -827,19 +815,12 @@ public static partial class Gen5SpirvTranslator
                 _module.AddName(_iterationGuard, "pcGuard");
             }
 
-            _interfaces.Add(_scalarRegisters);
-            _interfaces.Add(_vectorRegisters);
-            _interfaces.Add(_packedHalfRegisters);
             _interfaces.Add(_scc);
             _interfaces.Add(_vcc);
             _interfaces.Add(_exec);
             _interfaces.Add(_reachedPixelExport);
             _interfaces.Add(_programCounter);
             _interfaces.Add(_programActive);
-            _module.AddName(_scalarRegisters, "sgpr");
-            _module.AddName(_vectorRegisters, "vgpr");
-            _module.AddName(_packedHalfRegisters, "vgprPackedHalf");
-
             var runtimeBufferBiasCount =
                 _globalBufferBase + _evaluation.GlobalMemoryBindings.Count;
             if (_initialScalarBufferIndex >= 0 && runtimeBufferBiasCount > 0)
@@ -5299,11 +5280,13 @@ public static partial class Gen5SpirvTranslator
                 dwordAddress);
 
         private uint ScalarPointer(uint register) =>
-            _module.AddInstruction(
-                SpirvOp.AccessChain,
-                _privateUintPointer,
+            GetOrCreatePrivateRegister(
                 _scalarRegisters,
-                UInt(register));
+                register,
+                ScalarRegisterCount,
+                _privateUintPointer,
+                _uintType,
+                "sgpr");
 
         private uint RuntimeBufferBiasPointer(int binding) =>
             _module.AddInstruction(
@@ -5313,18 +5296,52 @@ public static partial class Gen5SpirvTranslator
                 UInt(checked((uint)binding)));
 
         private uint VectorPointer(uint register) =>
-            _module.AddInstruction(
-                SpirvOp.AccessChain,
-                _privateUintPointer,
+            GetOrCreatePrivateRegister(
                 _vectorRegisters,
-                UInt(register));
+                register,
+                VectorRegisterCount,
+                _privateUintPointer,
+                _uintType,
+                "vgpr");
 
         private uint PackedHalfPointer(uint register) =>
-            _module.AddInstruction(
-                SpirvOp.AccessChain,
-                _privateVec2Pointer,
+            GetOrCreatePrivateRegister(
                 _packedHalfRegisters,
-                UInt(register));
+                register,
+                VectorRegisterCount,
+                _privateVec2Pointer,
+                _vec2Type,
+                "vgprPackedHalf");
+
+        private uint GetOrCreatePrivateRegister(
+            uint[] registers,
+            uint register,
+            uint registerCount,
+            uint pointerType,
+            uint valueType,
+            string name)
+        {
+            if (register >= registerCount)
+            {
+                throw new InvalidOperationException(
+                    $"SPIR-V generator accessed {name}{register} outside " +
+                    $"the {registerCount}-register file.");
+            }
+
+            ref var variable = ref registers[register];
+            if (variable != 0)
+            {
+                return variable;
+            }
+
+            variable = _module.AddGlobalVariable(
+                pointerType,
+                SpirvStorageClass.Private,
+                _module.ConstantNull(valueType));
+            _module.AddName(variable, $"{name}{register}");
+            _interfaces.Add(variable);
+            return variable;
+        }
 
         private uint LoadS(uint register) => Load(_uintType, ScalarPointer(register));
 
@@ -5729,6 +5746,241 @@ public static partial class Gen5SpirvTranslator
                 instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) ||
                 instruction.Sources.Any(IsWaveMaskOperand) ||
                 instruction.Destinations.Any(IsWaveMaskOperand));
+
+        // A common post-processing kernel uses a 64-lane wave only to bracket
+        // per-pixel work with the structured sequence
+        //
+        //   v_cmp ...; s_and_saveexec_b64 vcc, vcc; s_cbranch_execz ...;
+        //   ...; s_mov_b64 exec, vcc
+        //
+        // There is no lane exchange in that sequence. Running its two native
+        // 32-lane halves independently preserves every lane's EXEC predicate
+        // and output, while avoiding the workgroup scratch rendezvous needed
+        // to assemble a full 64-bit ballot. On hosts with wave32 subgroups that
+        // removes two ControlBarriers per mask materialization. Stay on the
+        // exact wave64 bridge as soon as the shader observes masks in any other
+        // way or performs a genuine cross-lane operation.
+        private static bool CanSplitWave64Control(
+            IReadOnlyList<Gen5ShaderInstruction> instructions)
+        {
+            var sawStructuredControl = false;
+            var savedExecPairs = new HashSet<uint>();
+            var ordinaryVccRegisters = new HashSet<uint>();
+            foreach (var instruction in instructions)
+            {
+                if (instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
+                    instruction.Opcode is
+                        "VReadlaneB32" or
+                        "VReadfirstlaneB32" or
+                        "VPermlane16B32" or
+                        "VPermlanex16B32" or
+                        "VMbcntLoU32B32" or
+                        "VMbcntHiU32B32" ||
+                    instruction.Sources.Any(static operand =>
+                        operand.Kind == Gen5OperandKind.EncodedConstant &&
+                        operand.Value is 251 or 252))
+                {
+                    return false;
+                }
+
+                if (instruction.Opcode.StartsWith("VCmp", StringComparison.Ordinal))
+                {
+                    if (!instruction.Opcode.StartsWith(
+                            "VCmpx",
+                            StringComparison.Ordinal))
+                    {
+                        ordinaryVccRegisters.Clear();
+                    }
+
+                    sawStructuredControl = true;
+                    continue;
+                }
+
+                // Some per-pixel loops save EXEC in a temporary SGPR pair,
+                // narrow it with VCMPX, then restore it after the loop. The
+                // saved mask is safe to keep local to each native wave32 half
+                // as long as no instruction observes or modifies that pair
+                // before the matching restore.
+                if (instruction.Opcode == "SMovB64" &&
+                    TryGetScalarRegister(instruction.Destinations, 0, out var savePair) &&
+                    savePair is not (106 or 126) &&
+                    IsScalarRegister(instruction.Sources, 0, 126))
+                {
+                    savedExecPairs.Add(savePair);
+                    sawStructuredControl = true;
+                    continue;
+                }
+
+                if (instruction.Opcode == "SMovB64" &&
+                    IsScalarRegister(instruction.Destinations, 0, 126) &&
+                    TryGetScalarRegister(instruction.Sources, 0, out var restorePair) &&
+                    savedExecPairs.Remove(restorePair))
+                {
+                    sawStructuredControl = true;
+                    continue;
+                }
+
+                if (savedExecPairs.Any(pair => TouchesScalarPair(instruction, pair)))
+                {
+                    return false;
+                }
+
+                if (instruction.Opcode == "SAndSaveexecB64" &&
+                    IsScalarRegister(
+                        instruction.Destinations,
+                        0,
+                        106) &&
+                    IsScalarRegister(instruction.Sources, 0, 106))
+                {
+                    sawStructuredControl = true;
+                    continue;
+                }
+
+                if (instruction.Opcode == "SMovB64" &&
+                    IsScalarRegister(
+                        instruction.Destinations,
+                        0,
+                        126) &&
+                    IsScalarRegister(instruction.Sources, 0, 106))
+                {
+                    sawStructuredControl = true;
+                    continue;
+                }
+
+                if (instruction.Opcode is "SCbranchExecz" or "SCbranchExecnz")
+                {
+                    sawStructuredControl = true;
+                    continue;
+                }
+
+                if (instruction.Opcode.Contains(
+                        "Saveexec",
+                        StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith(
+                        "SCbranchExec",
+                        StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith(
+                        "SCbranchVcc",
+                        StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith(
+                        "VCndmask",
+                        StringComparison.Ordinal) ||
+                    instruction.Sources.Any(IsExecMaskOperand) ||
+                    instruction.Destinations.Any(IsExecMaskOperand) ||
+                    UsesUnsupportedVccScalarOperation(
+                        instruction,
+                        ordinaryVccRegisters))
+                {
+                    return false;
+                }
+
+                TrackIndependentVccOverwrite(
+                    instruction,
+                    ordinaryVccRegisters);
+            }
+
+            return sawStructuredControl && savedExecPairs.Count == 0;
+        }
+
+        private static bool TryGetScalarRegister(
+            IReadOnlyList<Gen5Operand> operands,
+            int index,
+            out uint register)
+        {
+            if ((uint)index < operands.Count &&
+                operands[index].Kind == Gen5OperandKind.ScalarRegister)
+            {
+                register = operands[index].Value;
+                return true;
+            }
+
+            register = 0;
+            return false;
+        }
+
+        private static bool TouchesScalarPair(
+            Gen5ShaderInstruction instruction,
+            uint pair) =>
+            instruction.Sources.Any(operand => IsScalarPairOperand(operand, pair)) ||
+            instruction.Destinations.Any(operand => IsScalarPairOperand(operand, pair));
+
+        private static bool IsScalarPairOperand(Gen5Operand operand, uint pair) =>
+            operand.Kind == Gen5OperandKind.ScalarRegister &&
+            operand.Value >= pair &&
+            operand.Value <= pair + 1;
+
+        private static bool IsScalarRegister(
+            IReadOnlyList<Gen5Operand> operands,
+            int index,
+            uint register) =>
+            (uint)index < operands.Count &&
+            operands[index].Kind == Gen5OperandKind.ScalarRegister &&
+            operands[index].Value == register;
+
+        private static bool IsExecMaskOperand(Gen5Operand operand) =>
+            operand.Kind == Gen5OperandKind.ScalarRegister &&
+            operand.Value is 126 or 127;
+
+        private static bool UsesUnsupportedVccScalarOperation(
+            Gen5ShaderInstruction instruction,
+            IReadOnlySet<uint> ordinaryVccRegisters)
+        {
+            var vccSources = instruction.Sources.Where(IsVccOperand).ToArray();
+            var vccDestinations = instruction.Destinations.Where(IsVccOperand).ToArray();
+            if (vccSources.Length == 0 && vccDestinations.Length == 0)
+            {
+                return false;
+            }
+
+            // VCC SGPRs are also ordinary scalar registers. Compilers commonly
+            // recycle them between compare/saveexec regions for constants and
+            // loaded values. A vector ALU instruction merely broadcasts that
+            // 32-bit scalar, and a scalar move/load overwrites it without
+            // observing a cross-lane mask. Other scalar operations can combine
+            // or inspect the ballot itself and therefore retain exact wave64.
+            if (instruction.Opcode.StartsWith("V", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var independentOverwrite =
+                instruction.Opcode is "SMovB32" or "SMovkI32" ||
+                instruction.Opcode.StartsWith("SLoad", StringComparison.Ordinal);
+            if (independentOverwrite &&
+                vccDestinations.Length != 0 &&
+                vccSources.Length == 0)
+            {
+                return false;
+            }
+
+            if (vccDestinations.Length == 0 &&
+                vccSources.All(operand => ordinaryVccRegisters.Contains(operand.Value)))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private static void TrackIndependentVccOverwrite(
+            Gen5ShaderInstruction instruction,
+            ISet<uint> ordinaryVccRegisters)
+        {
+            if (instruction.Opcode is not ("SMovB32" or "SMovkI32") &&
+                !instruction.Opcode.StartsWith("SLoad", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            foreach (var destination in instruction.Destinations.Where(IsVccOperand))
+            {
+                ordinaryVccRegisters.Add(destination.Value);
+            }
+        }
+
+        private static bool IsVccOperand(Gen5Operand operand) =>
+            operand.Kind == Gen5OperandKind.ScalarRegister &&
+            operand.Value is 106 or 107;
 
         private bool UsesSubgroupOperations() =>
             _stage == Gen5SpirvStage.Compute &&
