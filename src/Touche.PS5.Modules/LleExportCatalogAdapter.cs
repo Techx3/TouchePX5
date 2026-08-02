@@ -58,7 +58,11 @@ public sealed class LleExportCatalogAdapter
                 loadPlan.ModuleHash,
                 symbol.Name,
                 runtimeAddress,
-                symbol.Size));
+                symbol.Size)
+            {
+                SymbolType = symbol.Type,
+                SonyIdentity = symbol.SonyIdentity,
+            });
         }
         return result;
     }

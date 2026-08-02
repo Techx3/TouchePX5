@@ -9,8 +9,9 @@ namespace Touche.PS5.Modules;
 /// </summary>
 public sealed class HybridImportResolver
 {
-    private readonly IReadOnlyDictionary<string, HleSymbolDescriptor> _hleSymbols;
+    private readonly IReadOnlyDictionary<HleKey, HleSymbolDescriptor> _hleSymbols;
     private readonly IReadOnlyDictionary<LleKey, LleExportDescriptor> _lleSymbols;
+    private readonly IReadOnlyDictionary<LleContextKey, LleExportDescriptor> _contextualLleSymbols;
     private readonly IReadOnlyDictionary<LleKey, LleExportDescriptor> _uniqueLleNids;
 
     public HybridImportResolver(
@@ -20,6 +21,7 @@ public sealed class HybridImportResolver
         _hleSymbols = BuildHleIndex(hleSymbols ?? []);
         var exports = (lleSymbols ?? []).ToArray();
         _lleSymbols = BuildLleIndex(exports);
+        _contextualLleSymbols = BuildContextualLleIndex(exports);
         _uniqueLleNids = BuildUniqueLleNidIndex(exports);
     }
 
@@ -54,12 +56,19 @@ public sealed class HybridImportResolver
         LleDynamicSymbol symbol,
         ModuleResolutionMode mode)
     {
-        _hleSymbols.TryGetValue(symbol.Name, out var hle);
+        var expectedHleType = symbol.Type == 1 ? (byte)1 : (byte)2;
+        _hleSymbols.TryGetValue(new HleKey(symbol.Name, expectedHleType), out var hle);
         if (hle is null)
         {
-            _hleSymbols.TryGetValue(GetSonyNid(symbol.Name), out hle);
+            _hleSymbols.TryGetValue(new HleKey(GetSonyNid(symbol.Name), expectedHleType), out hle);
         }
         _lleSymbols.TryGetValue(new LleKey(profileId, symbol.Name), out var lle);
+        if (lle is null && symbol.SonyIdentity is not null)
+        {
+            _contextualLleSymbols.TryGetValue(
+                LleContextKey.Create(profileId, symbol.SonyIdentity, symbol.Type),
+                out lle);
+        }
         if (lle is null)
         {
             _uniqueLleNids.TryGetValue(new LleKey(profileId, GetSonyNid(symbol.Name)), out lle);
@@ -165,7 +174,19 @@ public sealed class HybridImportResolver
     private static ImportBindingDecision SelectHle(
         LleDynamicSymbol symbol,
         HleSymbolDescriptor descriptor,
-        bool usedFallback) => new()
+        bool usedFallback) => descriptor.RuntimeAddress is not null
+        ? new ImportBindingDecision
+        {
+            SymbolIndex = symbol.Index,
+            SymbolName = symbol.Name,
+            Source = ImportBindingSource.HleData,
+            ProviderModule = descriptor.ModuleName,
+            HleDataRuntimeAddress = descriptor.RuntimeAddress,
+            UsedFallback = usedFallback,
+            ReasonCode = "import.hle-data.mapped",
+            Reason = "A stable HLE data symbol provider is available.",
+        }
+        : new ImportBindingDecision
         {
             SymbolIndex = symbol.Index,
             SymbolName = symbol.Name,
@@ -223,10 +244,10 @@ public sealed class HybridImportResolver
             Reason = "No permitted provider is available for this imported symbol.",
         };
 
-    private static IReadOnlyDictionary<string, HleSymbolDescriptor> BuildHleIndex(
+    private static IReadOnlyDictionary<HleKey, HleSymbolDescriptor> BuildHleIndex(
         IEnumerable<HleSymbolDescriptor> descriptors)
     {
-        var result = new Dictionary<string, HleSymbolDescriptor>(StringComparer.Ordinal);
+        var result = new Dictionary<HleKey, HleSymbolDescriptor>();
         foreach (var descriptor in descriptors)
         {
             ArgumentNullException.ThrowIfNull(descriptor);
@@ -235,7 +256,10 @@ public sealed class HybridImportResolver
             ArgumentException.ThrowIfNullOrWhiteSpace(descriptor.DispatchKey);
             if (descriptor.DispatchKey.Any(char.IsControl) ||
                 !Enum.IsDefined(descriptor.Quality) ||
-                !result.TryAdd(descriptor.SymbolName, descriptor))
+                descriptor.SymbolType is not (1 or 2) ||
+                (descriptor.SymbolType == 1) != (descriptor.RuntimeAddress is not null) ||
+                descriptor.RuntimeAddress == 0 ||
+                !result.TryAdd(new HleKey(descriptor.SymbolName, descriptor.SymbolType), descriptor))
             {
                 throw new InvalidDataException($"Invalid or duplicate HLE symbol provider: {descriptor.SymbolName}");
             }
@@ -246,7 +270,7 @@ public sealed class HybridImportResolver
     private static IReadOnlyDictionary<LleKey, LleExportDescriptor> BuildLleIndex(
         IEnumerable<LleExportDescriptor> descriptors)
     {
-        var result = new Dictionary<LleKey, LleExportDescriptor>();
+        var validated = new List<LleExportDescriptor>();
         foreach (var descriptor in descriptors)
         {
             ArgumentNullException.ThrowIfNull(descriptor);
@@ -256,12 +280,17 @@ public sealed class HybridImportResolver
             ValidateSymbolName(descriptor.SymbolName, nameof(descriptors));
             if (descriptor.RuntimeAddress == 0 ||
                 descriptor.Size > ulong.MaxValue - descriptor.RuntimeAddress ||
-                !result.TryAdd(new LleKey(descriptor.FirmwareProfileId, descriptor.SymbolName), descriptor))
+                !IsValidSonyIdentity(descriptor.SymbolName, descriptor.SymbolType, descriptor.SonyIdentity))
             {
-                throw new InvalidDataException($"Invalid or duplicate LLE symbol provider: {descriptor.SymbolName}");
+                throw new InvalidDataException($"Invalid LLE symbol provider: {descriptor.SymbolName}");
             }
+            validated.Add(descriptor);
         }
-        return result;
+        return validated
+            .GroupBy(descriptor => new LleKey(descriptor.FirmwareProfileId, descriptor.SymbolName))
+            .Select(group => (group.Key, Providers: DistinctProviders(group)))
+            .Where(group => group.Providers.Length == 1)
+            .ToDictionary(group => group.Key, group => group.Providers[0]);
     }
 
     private static IReadOnlyDictionary<LleKey, LleExportDescriptor> BuildUniqueLleNidIndex(
@@ -270,8 +299,35 @@ public sealed class HybridImportResolver
             .GroupBy(descriptor => new LleKey(
                 descriptor.FirmwareProfileId,
                 GetSonyNid(descriptor.SymbolName)))
-            .Where(group => group.Count() == 1)
-            .ToDictionary(group => group.Key, group => group.Single());
+            .Select(group => (group.Key, Providers: DistinctProviders(group)))
+            .Where(group => group.Providers.Length == 1)
+            .ToDictionary(group => group.Key, group => group.Providers[0]);
+
+    private static IReadOnlyDictionary<LleContextKey, LleExportDescriptor> BuildContextualLleIndex(
+        IEnumerable<LleExportDescriptor> descriptors)
+    {
+        return descriptors
+            .Where(item => item.SonyIdentity is not null)
+            .GroupBy(descriptor => LleContextKey.Create(
+                descriptor.FirmwareProfileId,
+                descriptor.SonyIdentity!,
+                descriptor.SymbolType))
+            .Select(group => (group.Key, Providers: DistinctProviders(group)))
+            .Where(group => group.Providers.Length == 1)
+            .ToDictionary(group => group.Key, group => group.Providers[0]);
+    }
+
+    private static LleExportDescriptor[] DistinctProviders(
+        IEnumerable<LleExportDescriptor> descriptors) => descriptors
+        .DistinctBy(descriptor => new LleProviderKey(
+            descriptor.FirmwareProfileId,
+            descriptor.ModuleVirtualPath,
+            descriptor.ModuleHash,
+            descriptor.RuntimeAddress,
+            descriptor.Size,
+            descriptor.SymbolType))
+        .Take(2)
+        .ToArray();
 
     private static void ValidateLinkPlan(LleModuleLinkPlan plan)
     {
@@ -286,7 +342,8 @@ public sealed class HybridImportResolver
             plan.ReferencedSymbols.Any(symbol =>
                 symbol is null ||
                 symbol.Name is null ||
-                symbol.Name.Any(char.IsControl)) ||
+                symbol.Name.Any(char.IsControl) ||
+                !IsValidSonyIdentity(symbol.Name, symbol.Type, symbol.SonyIdentity)) ||
             plan.ReferencedSymbols.GroupBy(symbol => symbol.Index).Any(group => group.Count() > 1) ||
             plan.ImportedSymbols.Any(symbol =>
                 symbol is null ||
@@ -345,4 +402,55 @@ public sealed class HybridImportResolver
     }
 
     private readonly record struct LleKey(string FirmwareProfileId, string SymbolName);
+
+    private readonly record struct HleKey(string SymbolName, byte SymbolType);
+
+    private readonly record struct LleProviderKey(
+        string FirmwareProfileId,
+        string ModuleVirtualPath,
+        string ModuleHash,
+        ulong RuntimeAddress,
+        ulong Size,
+        byte SymbolType);
+
+    private readonly record struct LleContextKey(
+        string FirmwareProfileId,
+        string Nid,
+        string LibraryName,
+        ushort LibraryVersion,
+        string ModuleName,
+        ushort ModuleVersion,
+        byte SymbolType)
+    {
+        public static LleContextKey Create(
+            string firmwareProfileId,
+            LleSonySymbolIdentity identity,
+            byte symbolType) => new(
+                firmwareProfileId,
+                identity.Nid,
+                identity.LibraryName,
+                identity.LibraryVersion,
+                identity.ModuleName,
+                identity.ModuleVersion,
+                symbolType);
+    }
+
+    private static bool IsValidSonyIdentity(
+        string symbolName,
+        byte symbolType,
+        LleSonySymbolIdentity? identity)
+    {
+        if (identity is null)
+        {
+            return true;
+        }
+        return identity.Nid.Length == 11 &&
+            identity.Nid.All(character => char.IsAsciiLetterOrDigit(character) || character is '+' or '-') &&
+            string.Equals(identity.Nid, GetSonyNid(symbolName), StringComparison.Ordinal) &&
+            symbolType is 1 or 2 &&
+            !string.IsNullOrWhiteSpace(identity.LibraryName) &&
+            !identity.LibraryName.Any(char.IsControl) &&
+            !string.IsNullOrWhiteSpace(identity.ModuleName) &&
+            !identity.ModuleName.Any(char.IsControl);
+    }
 }

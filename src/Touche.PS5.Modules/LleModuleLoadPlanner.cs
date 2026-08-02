@@ -165,43 +165,12 @@ public sealed class LleModuleLoadPlanner
         await ReadExactlyAtAsync(stream, programHeaderOffset, table, cancellationToken).ConfigureAwait(false);
 
         var segments = new List<LleLoadSegment>();
-        var hasDynamicTable = false;
-        LleDynamicTable? dynamicTable = null;
         var imageStart = ulong.MaxValue;
         var imageEnd = 0UL;
         for (var index = 0; index < programHeaderCount; index++)
         {
             var item = table.AsSpan(index * ProgramHeaderSize, ProgramHeaderSize);
             var type = BinaryPrimitives.ReadUInt32LittleEndian(item);
-            if (type == ProgramTypeDynamic)
-            {
-                if (dynamicTable is not null)
-                {
-                    throw new InvalidDataException("The ELF contains multiple dynamic table segments.");
-                }
-                var dynamicFileOffset = BinaryPrimitives.ReadUInt64LittleEndian(item[8..]);
-                var dynamicVirtualAddress = BinaryPrimitives.ReadUInt64LittleEndian(item[16..]);
-                var dynamicFileSize = BinaryPrimitives.ReadUInt64LittleEndian(item[32..]);
-                var dynamicMemorySize = BinaryPrimitives.ReadUInt64LittleEndian(item[40..]);
-                if (dynamicFileSize == 0 ||
-                    dynamicFileSize > dynamicMemorySize ||
-                    dynamicFileSize % 16 != 0)
-                {
-                    throw new InvalidDataException("The ELF dynamic table segment is invalid.");
-                }
-                EnsureFileRange(
-                    dynamicFileOffset,
-                    dynamicFileSize,
-                    artifactSize,
-                    "dynamic table segment");
-                dynamicTable = new LleDynamicTable(
-                    index,
-                    dynamicFileOffset,
-                    dynamicFileSize,
-                    dynamicVirtualAddress,
-                    dynamicMemorySize);
-                hasDynamicTable = true;
-            }
             if (type != ProgramTypeLoad)
             {
                 continue;
@@ -249,6 +218,47 @@ public sealed class LleModuleLoadPlanner
         {
             throw new InvalidDataException("The firmware module has no safe, loadable ELF image span.");
         }
+
+        LleDynamicTable? dynamicTable = null;
+        for (var index = 0; index < programHeaderCount; index++)
+        {
+            var item = table.AsSpan(index * ProgramHeaderSize, ProgramHeaderSize);
+            if (BinaryPrimitives.ReadUInt32LittleEndian(item) != ProgramTypeDynamic)
+            {
+                continue;
+            }
+            if (dynamicTable is not null)
+            {
+                throw new InvalidDataException("The ELF contains multiple dynamic table segments.");
+            }
+
+            var declaredFileOffset = BinaryPrimitives.ReadUInt64LittleEndian(item[8..]);
+            var dynamicVirtualAddress = BinaryPrimitives.ReadUInt64LittleEndian(item[16..]);
+            var dynamicFileSize = BinaryPrimitives.ReadUInt64LittleEndian(item[32..]);
+            var dynamicMemorySize = BinaryPrimitives.ReadUInt64LittleEndian(item[40..]);
+            if (dynamicFileSize == 0 ||
+                dynamicFileSize > dynamicMemorySize ||
+                dynamicFileSize % 16 != 0)
+            {
+                throw new InvalidDataException("The ELF dynamic table segment is invalid.");
+            }
+
+            var resolvedFileOffset = ResolveFileBackedOffset(
+                dynamicVirtualAddress,
+                dynamicFileSize,
+                segments,
+                declaredFileOffset,
+                artifactSize,
+                "dynamic table segment");
+            dynamicTable = new LleDynamicTable(
+                index,
+                resolvedFileOffset,
+                dynamicFileSize,
+                dynamicVirtualAddress,
+                dynamicMemorySize);
+        }
+
+        var hasDynamicTable = dynamicTable is not null;
         if (hasDynamicTable != module.HasDynamicTable)
         {
             throw new InvalidDataException("The firmware module dynamic table does not match its catalog.");
@@ -305,6 +315,46 @@ public sealed class LleModuleLoadPlanner
         {
             throw new InvalidDataException($"ELF {description} exceeds the verified firmware object.");
         }
+    }
+
+    private static ulong ResolveFileBackedOffset(
+        ulong virtualAddress,
+        ulong size,
+        IReadOnlyList<LleLoadSegment> loadSegments,
+        ulong fallbackFileOffset,
+        long artifactSize,
+        string description)
+    {
+        ulong? resolved = null;
+        foreach (var segment in loadSegments)
+        {
+            if (virtualAddress < segment.VirtualAddress)
+            {
+                continue;
+            }
+
+            var relative = virtualAddress - segment.VirtualAddress;
+            if (relative > segment.FileSize || size > segment.FileSize - relative)
+            {
+                continue;
+            }
+
+            var candidate = checked(segment.FileOffset + relative);
+            EnsureFileRange(candidate, size, artifactSize, description);
+            if (resolved is not null && resolved.Value != candidate)
+            {
+                throw new InvalidDataException($"ELF {description} maps to conflicting PT_LOAD ranges.");
+            }
+            resolved = candidate;
+        }
+
+        if (resolved is not null)
+        {
+            return resolved.Value;
+        }
+
+        EnsureFileRange(fallbackFileOffset, size, artifactSize, description);
+        return fallbackFileOffset;
     }
 
     private static bool IsPowerOfTwo(ulong value) => (value & (value - 1)) == 0;

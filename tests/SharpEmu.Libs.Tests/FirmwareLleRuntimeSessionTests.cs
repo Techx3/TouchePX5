@@ -20,7 +20,7 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
 
     [Theory]
     [InlineData("missingNid")]
-    [InlineData("missingNid#A#B")]
+    [InlineData("LwG8g3niqwA#A#B")]
     public async Task LoadsUniqueFirmwareProviderForMissingHleImport(string exportSymbolName)
     {
         var source = Path.Combine(_temporaryDirectory, "source");
@@ -38,12 +38,13 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
             memory,
             modules,
             Aerolib.Empty);
+        var requestedSymbolName = exportSymbolName.Split('#')[0];
         var image = new SelfImage(
             isSelf: false,
             elfHeader: default,
             programHeaders: [],
             mappedRegions: [],
-            importStubs: new Dictionary<ulong, string> { [0x4000] = "missingNid" });
+            importStubs: new Dictionary<ulong, string> { [0x4000] = requestedSymbolName });
         var importStubs = new Dictionary<ulong, string>(image.ImportStubs);
         var runtimeSymbols = new Dictionary<string, ulong>(StringComparer.Ordinal);
 
@@ -53,7 +54,7 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
         Assert.Equal(1, summary.CandidateModules);
         Assert.Equal(1, summary.LoadedModules);
         Assert.Equal(1, summary.PublishedImports);
-        Assert.Equal(0x0000_6800_0000_0180UL, runtimeSymbols["missingNid"]);
+        Assert.Equal(0x0000_6800_0000_0180UL, runtimeSymbols[requestedSymbolName]);
     }
 
     private static byte[] CreateProviderElf(string exportSymbolName)
@@ -88,17 +89,22 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
         BinaryPrimitives.WriteUInt32LittleEndian(dynamicHeader[4..], 4);
         BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[8..], 0x200);
         BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[16..], 0x1200);
-        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[32..], 96);
-        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[40..], 96);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[32..], 128);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[40..], 128);
         BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[48..], 8);
 
         WriteDynamic(bytes, 0x200, 5, 0x1400);
-        var stringBytes = Encoding.ASCII.GetBytes($"\0{exportSymbolName}\0");
+        var libraryNameOffset = checked((uint)(exportSymbolName.Length + 2));
+        var moduleNameOffset = checked(libraryNameOffset + 12);
+        var stringBytes = Encoding.ASCII.GetBytes(
+            $"\0{exportSymbolName}\0libProvider\0libProvider\0");
         WriteDynamic(bytes, 0x210, 10, (ulong)stringBytes.Length);
         WriteDynamic(bytes, 0x220, 6, 0x1480);
         WriteDynamic(bytes, 0x230, 11, 24);
         WriteDynamic(bytes, 0x240, 0x6100003F, 48);
-        WriteDynamic(bytes, 0x250, 0, 0);
+        WriteDynamic(bytes, 0x250, 0x61000043, PackSonyRecord(1, 1, moduleNameOffset));
+        WriteDynamic(bytes, 0x260, 0x61000047, PackSonyRecord(0, 1, libraryNameOffset));
+        WriteDynamic(bytes, 0x270, 0, 0);
         stringBytes.CopyTo(bytes.AsSpan(0x400));
         var symbol = bytes.AsSpan(0x480 + 24, 24);
         BinaryPrimitives.WriteUInt32LittleEndian(symbol, 1);
@@ -114,6 +120,9 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
         BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(offset), tag);
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset + 8), value);
     }
+
+    private static ulong PackSonyRecord(ushort id, ushort version, uint nameOffset) =>
+        ((ulong)id << 48) | ((ulong)version << 32) | nameOffset;
 
     public void Dispose()
     {

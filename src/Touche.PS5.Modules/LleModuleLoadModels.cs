@@ -76,5 +76,11 @@ public sealed record LleMappedModule
 
     public required ulong ImageSize { get; init; }
 
+    /// <summary>
+    /// Runtime TLS module identifier used by R_X86_64_DTPMOD64 relocations.
+    /// Zero means that this mapped image has no registered TLS identity.
+    /// </summary>
+    public uint TlsModuleId { get; init; }
+
     public required IReadOnlyList<LleMappedSegment> Segments { get; init; }
 }

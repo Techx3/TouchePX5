@@ -72,6 +72,42 @@ public sealed class HybridImportResolverTests
     }
 
     [Fact]
+    public void ObjectImportUsesDirectHleDataProvider()
+    {
+        var descriptor = CreateHle(HleImplementationQuality.CompleteStable) with
+        {
+            SymbolType = 1,
+            RuntimeAddress = 0x1234,
+        };
+        var imported = new LleDynamicSymbol(1, $"{SymbolName}#A#B", 1, 1, 0, 0, 0, 0);
+        var plan = CreateLinkPlan(imported.Name) with
+        {
+            ReferencedSymbols = [imported],
+            ImportedSymbols = [imported],
+        };
+
+        var binding = Assert.Single(new HybridImportResolver([descriptor]).Resolve(plan).Bindings);
+
+        Assert.Equal(ImportBindingSource.HleData, binding.Source);
+        Assert.Equal(0x1234UL, binding.HleDataRuntimeAddress);
+        Assert.Null(binding.HleDispatchKey);
+    }
+
+    [Fact]
+    public void FunctionImportRejectsHleDataProvider()
+    {
+        var descriptor = CreateHle(HleImplementationQuality.CompleteStable) with
+        {
+            SymbolType = 1,
+            RuntimeAddress = 0x1234,
+        };
+
+        var binding = Assert.Single(new HybridImportResolver([descriptor]).Resolve(CreateLinkPlan()).Bindings);
+
+        Assert.Equal(ImportBindingSource.Unresolved, binding.Source);
+    }
+
+    [Fact]
     public void DecoratedSonyImportUsesUniqueBareLleNid()
     {
         var descriptor = CreateLle() with
@@ -105,6 +141,77 @@ public sealed class HybridImportResolverTests
             resolver.Resolve(CreateLinkPlan($"{SymbolName}#A#B")).Bindings);
 
         Assert.Equal(ImportBindingSource.Unresolved, binding.Source);
+    }
+
+    [Fact]
+    public void ContextualSonyImportSelectsMatchingProviderFromAmbiguousNid()
+    {
+        const string nid = "LwG8g3niqwA";
+        var matchingIdentity = new LleSonySymbolIdentity(
+            nid, 0, "libkernel", 1, 1, "libkernel", 0x0101);
+        var otherIdentity = new LleSonySymbolIdentity(
+            nid, 2, "libOther", 1, 3, "libOther", 1);
+        var matching = CreateLle() with
+        {
+            SymbolName = $"{nid}#C#A",
+            RuntimeAddress = 0x1234,
+            SymbolType = 2,
+            SonyIdentity = matchingIdentity,
+        };
+        var other = CreateLle() with
+        {
+            ModuleVirtualPath = "/system/common/lib/libOther.sprx",
+            ModuleHash = new string('c', 64),
+            SymbolName = $"{nid}#D#A",
+            RuntimeAddress = 0x5678,
+            SymbolType = 2,
+            SonyIdentity = otherIdentity,
+        };
+        var imported = new LleDynamicSymbol(1, $"{nid}#A#B", 1, 2, 0, 0, 0, 0)
+        {
+            SonyIdentity = matchingIdentity,
+        };
+        var linkPlan = CreateLinkPlan(imported.Name) with
+        {
+            ReferencedSymbols = [imported],
+            ImportedSymbols = [imported],
+        };
+
+        var binding = Assert.Single(
+            new HybridImportResolver(lleSymbols: [matching, other]).Resolve(linkPlan).Bindings);
+
+        Assert.Equal(ImportBindingSource.Lle, binding.Source);
+        Assert.Equal(0x1234UL, binding.LleRuntimeAddress);
+    }
+
+    [Fact]
+    public void RepeatedContextualRowsForSameProviderRemainResolvable()
+    {
+        const string nid = "LwG8g3niqwA";
+        var identity = new LleSonySymbolIdentity(
+            nid, 0, "libkernel", 1, 1, "libkernel", 0x0101);
+        var descriptor = CreateLle() with
+        {
+            SymbolName = $"{nid}#C#A",
+            RuntimeAddress = 0x1234,
+            SymbolType = 2,
+            SonyIdentity = identity,
+        };
+        var imported = new LleDynamicSymbol(1, $"{nid}#A#B", 1, 2, 0, 0, 0, 0)
+        {
+            SonyIdentity = identity,
+        };
+        var linkPlan = CreateLinkPlan(imported.Name) with
+        {
+            ReferencedSymbols = [imported],
+            ImportedSymbols = [imported],
+        };
+
+        var binding = Assert.Single(
+            new HybridImportResolver(lleSymbols: [descriptor, descriptor]).Resolve(linkPlan).Bindings);
+
+        Assert.Equal(ImportBindingSource.Lle, binding.Source);
+        Assert.Equal(0x1234UL, binding.LleRuntimeAddress);
     }
 
     [Fact]

@@ -15,7 +15,7 @@ namespace SharpEmu.Core.Runtime;
 /// </summary>
 internal sealed class FirmwareLleRuntimeSession : IDisposable
 {
-    private const int MaximumScannedModules = 512;
+    private const int MaximumScannedModules = 1024;
     private const ulong ModuleArenaStart = 0x0000_6800_0000_0000;
     private const ulong ModuleAlignment = 0x1_0000;
 
@@ -88,6 +88,25 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
             {
                 Console.Error.WriteLine($"[FIRMWARE-LLE][AUDIT] {sample}");
             }
+            foreach (var candidate in discovery.AllCandidates.Where(candidate =>
+                         GetDiagnosticRank(candidate.Module.VirtualPath) < 5))
+            {
+                var exports = candidate.LinkPlan.ExportedSymbols
+                    .Take(12)
+                    .Select(symbol =>
+                    {
+                        var context = symbol.SonyIdentity is null
+                            ? "unknown"
+                            : $"{symbol.SonyIdentity.LibraryName}@{symbol.SonyIdentity.LibraryVersion:x4}/" +
+                              $"{symbol.SonyIdentity.ModuleName}@{symbol.SonyIdentity.ModuleVersion:x4}";
+                        return $"{symbol.Name}[type={symbol.Type},ctx={context}]";
+                    });
+                Console.Error.WriteLine(
+                    $"[FIRMWARE-LLE][AUDIT] core={candidate.Module.VirtualPath} " +
+                    $"imports={candidate.LinkPlan.ImportedSymbols.Count} " +
+                    $"exports={candidate.LinkPlan.ExportedSymbols.Count} " +
+                    $"sample={string.Join(',', exports)}");
+            }
         }
         var uniqueProviders = SelectUniqueProviders(candidates, targets.Keys, out var ambiguousTargets);
         if (uniqueProviders.Count == 0)
@@ -100,102 +119,169 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
                 ambiguousTargets);
         }
 
-        var hleSymbols = new HleImportCatalogAdapter().CreateDescriptors(
-            _moduleManager,
-            defaultQuality: HleImplementationQuality.Partial,
-            target: Generation.Gen5);
-        var availableLleExports = new List<LleExportDescriptor>();
-        var pending = BuildDependencyClosure(
+        var hleCatalog = new HleImportCatalogAdapter();
+        var hleSymbols = hleCatalog.CreateDescriptors(
+                _moduleManager,
+                [new HleModuleDescriptor(
+                    "libSceDbgThreadSanitizer",
+                    HleImplementationQuality.ControlledStub)],
+                defaultQuality: HleImplementationQuality.Partial,
+                target: Generation.Gen5)
+            .Concat(hleCatalog.CreateDataDescriptors())
+            .OrderBy(symbol => symbol.SymbolName, StringComparer.Ordinal)
+            .ToArray();
+        var selectedCandidates = BuildDependencyClosure(
                 uniqueProviders.Values.Select(provider => provider.Candidate),
                 discovery.AllCandidates,
                 hleSymbols)
             .OrderBy(candidate => candidate.Module.Dependencies.Count)
             .ThenBy(candidate => candidate.Module.VirtualPath, StringComparer.Ordinal)
             .ToList();
-        var loadedModules = 0;
-        var publishedImports = 0;
+        var mappedCandidates = new List<MappedCandidate>(selectedCandidates.Count);
         var cursor = ModuleArenaStart;
-        var progress = true;
-        while (pending.Count != 0 && progress)
+        var nextTlsModuleId = 1U;
+        foreach (var candidate in selectedCandidates)
         {
-            progress = false;
-            foreach (var candidate in pending.ToArray())
+            cancellationToken.ThrowIfCancellationRequested();
+            var runtimeImageStart = checked(
+                AlignUp(cursor, ModuleAlignment) +
+                (candidate.LoadPlan.ImageVirtualStart & 0xfff));
+            LleMappedModule? mapped = null;
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var resolution = new HybridImportResolver(hleSymbols, availableLleExports)
-                    .Resolve(candidate.LinkPlan, ModuleResolutionMode.Auto);
-                if (!resolution.CanLink)
+                mapped = await new LleModuleMapper().MapAsync(
+                    candidate.LoadPlan,
+                    runtimeImageStart,
+                    fileSystem,
+                    _memoryTransactions,
+                    cancellationToken).ConfigureAwait(false);
+                mapped = mapped with { TlsModuleId = nextTlsModuleId++ };
+                var exports = new LleExportCatalogAdapter().CreateDescriptors(
+                    candidate.LoadPlan,
+                    mapped,
+                    candidate.LinkPlan);
+                mappedCandidates.Add(new MappedCandidate(candidate, mapped, exports));
+                cursor = AlignUp(checked(runtimeImageStart + candidate.LoadPlan.ImageSize), ModuleAlignment);
+            }
+            catch (Exception exception) when (exception is
+                InvalidDataException or
+                InvalidOperationException or
+                IOException or
+                NotSupportedException or
+                OverflowException)
+            {
+                if (mapped is not null)
                 {
-                    continue;
+                    ReleaseMappedModule(mapped);
                 }
-
-                var runtimeImageStart = checked(
-                    AlignUp(cursor, ModuleAlignment) +
-                    (candidate.LoadPlan.ImageVirtualStart & 0xfff));
-                LleMappedModule? mapped = null;
-                try
-                {
-                    mapped = await new LleModuleMapper().MapAsync(
-                        candidate.LoadPlan,
-                        runtimeImageStart,
-                        fileSystem,
-                        _memoryTransactions,
-                        cancellationToken).ConfigureAwait(false);
-                    var linked = await new LleModuleLinker().LinkAsync(
-                        candidate.LoadPlan,
-                        mapped,
-                        candidate.LinkPlan,
-                        resolution,
-                        _linkTransactions,
-                        cancellationToken).ConfigureAwait(false);
-                    var exports = new LleExportCatalogAdapter().CreateDescriptors(
-                        candidate.LoadPlan,
-                        mapped,
-                        candidate.LinkPlan);
-                    availableLleExports.AddRange(exports);
-                    PublishProviderExports(candidate, exports, uniqueProviders, targets, runtimeSymbols);
-                    foreach (var import in linked.Imports.Where(import => import.HleDispatchKey is not null))
-                    {
-                        importStubs[import.RuntimeAddress] = import.HleDispatchKey!;
-                    }
-                    cursor = AlignUp(checked(runtimeImageStart + candidate.LoadPlan.ImageSize), ModuleAlignment);
-                    loadedModules++;
-                    publishedImports += exports.Count(export => runtimeSymbols.ContainsKey(export.SymbolName));
-                    pending.Remove(candidate);
-                    progress = true;
-                }
-                catch (Exception exception) when (exception is
-                    InvalidDataException or
-                    InvalidOperationException or
-                    IOException or
-                    NotSupportedException or
-                    OverflowException)
-                {
-                    if (mapped is not null)
-                    {
-                        _ = _linkTransactions.TryReleaseModule(
-                            mapped.ModuleVirtualPath,
-                            mapped.RuntimeImageStart);
-                        _ = _memoryTransactions.TryReleaseModule(
-                            mapped.ModuleVirtualPath,
-                            mapped.RuntimeImageStart);
-                    }
-                    Console.Error.WriteLine(
-                        $"[FIRMWARE-LLE][WARN] Provider rejected: {candidate.Module.VirtualPath} " +
-                        $"({exception.GetType().Name}: {exception.Message})");
-                    pending.Remove(candidate);
-                }
+                Console.Error.WriteLine(
+                    $"[FIRMWARE-LLE][WARN] Provider mapping rejected: {candidate.Module.VirtualPath} " +
+                    $"({exception.GetType().Name}: {exception.Message})");
             }
         }
+
+        var availableLleExports = mappedCandidates.SelectMany(item => item.Exports).ToArray();
+        var resolver = new HybridImportResolver(hleSymbols, availableLleExports);
+        var resolutions = mappedCandidates.ToDictionary(
+            item => item.Candidate.Module.VirtualPath,
+            item => resolver.Resolve(item.Candidate.LinkPlan, ModuleResolutionMode.Auto),
+            StringComparer.Ordinal);
+        var viablePaths = resolutions
+            .Where(item => item.Value.CanLink)
+            .Select(item => item.Key)
+            .ToHashSet(StringComparer.Ordinal);
+        PruneUnavailableLleDependencies(viablePaths, resolutions, "pre-link");
+
+        var linkedCandidates = new Dictionary<string, LinkedCandidate>(StringComparer.Ordinal);
+        foreach (var item in mappedCandidates)
+        {
+            var path = item.Candidate.Module.VirtualPath;
+            if (!viablePaths.Contains(path))
+            {
+                ReleaseMappedModule(item.MappedModule);
+                continue;
+            }
+            try
+            {
+                var linked = await new LleModuleLinker().LinkAsync(
+                    item.Candidate.LoadPlan,
+                    item.MappedModule,
+                    item.Candidate.LinkPlan,
+                    resolutions[path],
+                    _linkTransactions,
+                    cancellationToken).ConfigureAwait(false);
+                linkedCandidates.Add(path, new LinkedCandidate(item, linked));
+            }
+            catch (Exception exception) when (exception is
+                InvalidDataException or
+                InvalidOperationException or
+                IOException or
+                NotSupportedException or
+                OverflowException)
+            {
+                ReleaseMappedModule(item.MappedModule);
+                Console.Error.WriteLine(
+                    $"[FIRMWARE-LLE][WARN] Provider link rejected: {path} " +
+                    $"({exception.GetType().Name}: {exception.Message})");
+            }
+        }
+
+        var linkedPaths = linkedCandidates.Keys.ToHashSet(StringComparer.Ordinal);
+        PruneUnavailableLleDependencies(linkedPaths, resolutions, "post-link");
+        foreach (var path in linkedCandidates.Keys.Where(path => !linkedPaths.Contains(path)).ToArray())
+        {
+            ReleaseMappedModule(linkedCandidates[path].Mapped.MappedModule);
+            linkedCandidates.Remove(path);
+        }
+
+        var publishedImports = 0;
+        foreach (var item in linkedCandidates.Values)
+        {
+            PublishProviderExports(
+                item.Mapped.Candidate,
+                item.Mapped.Exports,
+                uniqueProviders,
+                targets,
+                runtimeSymbols);
+            foreach (var import in item.Linked.Imports.Where(import => import.HleDispatchKey is not null))
+            {
+                importStubs[import.RuntimeAddress] = import.HleDispatchKey!;
+            }
+            publishedImports += item.Mapped.Exports.Count(export => runtimeSymbols.ContainsKey(export.SymbolName));
+        }
+
+        var pending = selectedCandidates
+            .Where(candidate => !linkedCandidates.ContainsKey(candidate.Module.VirtualPath))
+            .ToList();
+        var finalLleExports = linkedCandidates.Values.SelectMany(item => item.Mapped.Exports).ToArray();
         if (IsExportAuditEnabled() && pending.Count != 0)
         {
-            foreach (var candidate in pending.Take(12))
+            foreach (var candidate in pending
+                         .OrderBy(candidate => GetDiagnosticRank(candidate.Module.VirtualPath))
+                         .ThenBy(candidate => candidate.Module.VirtualPath, StringComparer.Ordinal)
+                         .Take(24))
             {
-                var resolution = new HybridImportResolver(hleSymbols, availableLleExports)
-                    .Resolve(candidate.LinkPlan, ModuleResolutionMode.Auto);
+                var resolution = resolutions.TryGetValue(candidate.Module.VirtualPath, out var initialResolution)
+                    ? initialResolution
+                    : new HybridImportResolver(hleSymbols, finalLleExports)
+                        .Resolve(candidate.LinkPlan, ModuleResolutionMode.Auto);
                 var unresolved = resolution.Bindings
                     .Where(binding => binding.Source == ImportBindingSource.Unresolved)
-                    .Select(binding => binding.SymbolName)
+                    .Select(binding =>
+                    {
+                        var symbol = candidate.LinkPlan.ImportedSymbols.Single(item => item.Index == binding.SymbolIndex);
+                        var context = symbol.SonyIdentity is null
+                            ? "unknown"
+                            : $"{symbol.SonyIdentity.LibraryName}@{symbol.SonyIdentity.LibraryVersion:x4}/" +
+                              $"{symbol.SonyIdentity.ModuleName}@{symbol.SonyIdentity.ModuleVersion:x4}";
+                        var providers = availableLleExports
+                            .Where(export => ExportMatchesImport(export, symbol))
+                            .Select(export => $"{export.ModuleVirtualPath}@0x{export.RuntimeAddress:x}")
+                            .Distinct(StringComparer.Ordinal)
+                            .Take(4);
+                        return $"{binding.SymbolName}[type={symbol.Type},bind={symbol.Binding},ctx={context}," +
+                               $"providers={string.Join('|', providers)}]";
+                    })
                     .Take(8)
                     .ToArray();
                 Console.Error.WriteLine(
@@ -210,7 +296,7 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
         return new FirmwareLleLoadSummary(
             targets.Values.SelectMany(value => value).Distinct(StringComparer.Ordinal).Count(),
             candidates.Count,
-            loadedModules,
+            linkedCandidates.Count,
             publishedImports,
             ambiguousTargets,
             pending.Count);
@@ -275,7 +361,7 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
                     FirmwareModuleState.LleCompatible or
                     FirmwareModuleState.MissingDependencies) &&
                 module.HasDynamicTable)
-            .OrderBy(module => module.State == FirmwareModuleState.MissingDependencies ? 0 : 1)
+            .OrderBy(module => module.State == FirmwareModuleState.MissingDependencies ? 1 : 0)
             .ThenBy(module => module.VirtualPath, StringComparer.Ordinal)
             .ToArray();
         var eligible = eligibleModules
@@ -304,6 +390,16 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
                     fileSystem,
                     cancellationToken).ConfigureAwait(false);
                 linkedModules++;
+                if (IsExportAuditEnabled() && GetDiagnosticRank(module.VirtualPath) < 5)
+                {
+                    Console.Error.WriteLine(
+                        $"[FIRMWARE-LLE][AUDIT] planned-core={module.VirtualPath} " +
+                        $"imports={linkPlan.ImportedSymbols.Count} exports={linkPlan.ExportedSymbols.Count} " +
+                        $"relocations={linkPlan.Relocations.Count} " +
+                        $"unsupported={string.Join(',', linkPlan.UnsupportedRelocationTypes)} " +
+                        $"str=0x{linkPlan.Metadata.StringTableLocation:x}/0x{linkPlan.Metadata.StringTableSize:x} " +
+                        $"sym=0x{linkPlan.Metadata.SymbolTableLocation:x}/0x{linkPlan.Metadata.SymbolTableSize:x}");
+                }
                 AddSample(
                     samples,
                     $"module={module.VirtualPath} exports={linkPlan.ExportedSymbols.Count} " +
@@ -368,8 +464,8 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
         IReadOnlyList<HleSymbolDescriptor> hleSymbols)
     {
         var hleNames = hleSymbols
-            .Select(symbol => symbol.SymbolName)
-            .ToHashSet(StringComparer.Ordinal);
+            .Select(symbol => (symbol.SymbolName, symbol.SymbolType))
+            .ToHashSet();
         var selected = roots
             .DistinctBy(candidate => candidate.Module.VirtualPath, StringComparer.Ordinal)
             .ToDictionary(candidate => candidate.Module.VirtualPath, StringComparer.Ordinal);
@@ -378,41 +474,104 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
         {
             foreach (var import in candidate.LinkPlan.ImportedSymbols)
             {
-                if (hleNames.Contains(import.Name) ||
-                    hleNames.Contains(GetSonyNid(import.Name)) ||
-                    HasUniqueNidProvider(import.Name, selected.Values))
+                var expectedHleType = import.Type == 1 ? (byte)1 : (byte)2;
+                if (hleNames.Contains((import.Name, expectedHleType)) ||
+                    hleNames.Contains((GetSonyNid(import.Name), expectedHleType)) ||
+                    FindSelectedProvider(import, selected.Values) is not null)
                 {
                     continue;
                 }
-                var importNid = GetSonyNid(import.Name);
-                var providers = allCandidates
-                    .Where(provider => provider.LinkPlan.ExportedSymbols.Any(export =>
-                        string.Equals(GetSonyNid(export.Name), importNid, StringComparison.Ordinal)))
-                    .DistinctBy(provider => provider.Module.VirtualPath, StringComparer.Ordinal)
-                    .Take(2)
-                    .ToArray();
-                if (providers.Length != 1 ||
-                    !selected.TryAdd(providers[0].Module.VirtualPath, providers[0]))
+                var provider = FindSelectedProvider(import, allCandidates);
+                if (provider is null ||
+                    !selected.TryAdd(provider.Module.VirtualPath, provider))
                 {
                     continue;
                 }
-                queue.Enqueue(providers[0]);
+                queue.Enqueue(provider);
             }
         }
         return selected.Values.ToArray();
     }
 
-    private static bool HasUniqueNidProvider(string symbolName, IEnumerable<Candidate> candidates)
+    private static Candidate? FindSelectedProvider(
+        LleDynamicSymbol import,
+        IEnumerable<Candidate> candidates)
     {
-        var nid = GetSonyNid(symbolName);
-        return candidates
-            .Where(candidate => candidate.LinkPlan.ExportedSymbols.Any(export =>
-                string.Equals(GetSonyNid(export.Name), nid, StringComparison.Ordinal)))
-            .Select(candidate => candidate.Module.VirtualPath)
-            .Distinct(StringComparer.Ordinal)
-            .Take(2)
-            .Count() == 1;
+        var available = candidates.ToArray();
+        var exact = available.Where(candidate => candidate.LinkPlan.ExportedSymbols.Any(export =>
+            export.Type == import.Type &&
+            string.Equals(export.Name, import.Name, StringComparison.Ordinal)));
+        var contextual = import.SonyIdentity is null
+            ? []
+            : available.Where(candidate => candidate.LinkPlan.ExportedSymbols.Any(export =>
+                export.Type == import.Type && SonyContextsMatch(import.SonyIdentity, export.SonyIdentity)));
+        var bareNid = available.Where(candidate => candidate.LinkPlan.ExportedSymbols.Any(export =>
+            export.Type == import.Type &&
+            string.Equals(GetSonyNid(export.Name), GetSonyNid(import.Name), StringComparison.Ordinal)));
+        return SelectPreferredCandidate(exact)
+            ?? SelectPreferredCandidate(contextual)
+            ?? SelectPreferredCandidate(bareNid);
     }
+
+    private static bool SonyContextsMatch(
+        LleSonySymbolIdentity expected,
+        LleSonySymbolIdentity? candidate) =>
+        candidate is not null &&
+        string.Equals(expected.Nid, candidate.Nid, StringComparison.Ordinal) &&
+        string.Equals(expected.LibraryName, candidate.LibraryName, StringComparison.Ordinal) &&
+        expected.LibraryVersion == candidate.LibraryVersion &&
+        string.Equals(expected.ModuleName, candidate.ModuleName, StringComparison.Ordinal) &&
+        expected.ModuleVersion == candidate.ModuleVersion;
+
+    private static bool ExportMatchesImport(
+        LleExportDescriptor export,
+        LleDynamicSymbol import) =>
+        export.SymbolType == import.Type &&
+        (string.Equals(export.SymbolName, import.Name, StringComparison.Ordinal) ||
+         (import.SonyIdentity is not null && SonyContextsMatch(import.SonyIdentity, export.SonyIdentity)) ||
+         string.Equals(GetSonyNid(export.SymbolName), GetSonyNid(import.Name), StringComparison.Ordinal));
+
+    private static Candidate? SelectPreferredCandidate(IEnumerable<Candidate> candidates)
+    {
+        var ranked = candidates
+            .DistinctBy(candidate => candidate.Module.VirtualPath, StringComparer.Ordinal)
+            .Select(candidate => (Candidate: candidate, Rank: GetProviderRank(candidate)))
+            .OrderBy(item => item.Rank.State)
+            .ThenBy(item => item.Rank.Dependencies)
+            .ThenBy(item => item.Rank.Location)
+            .ThenBy(item => item.Candidate.Module.VirtualPath, StringComparer.Ordinal)
+            .Take(2)
+            .ToArray();
+        if (ranked.Length == 0)
+        {
+            return null;
+        }
+        return ranked.Length == 1 || ranked[0].Rank != ranked[1].Rank
+            ? ranked[0].Candidate
+            : null;
+    }
+
+    private static (int State, int Dependencies, int Location) GetProviderRank(Candidate candidate) => (
+        candidate.Module.State switch
+        {
+            FirmwareModuleState.LleCompatible => 0,
+            FirmwareModuleState.Parseable => 1,
+            _ => 2,
+        },
+        candidate.Module.Dependencies.Count,
+        candidate.Module.VirtualPath.StartsWith("/system/common/lib/", StringComparison.Ordinal) ? 0 : 1);
+
+    private static int GetDiagnosticRank(string virtualPath) => virtualPath switch
+    {
+        "/system/common/lib/libkernel.sprx" => 0,
+        "/system/common/lib/libSceLibcInternal.sprx" => 1,
+        "/lib/libkernel.sprx" => 2,
+        "/lib/libkernel_sys.sprx" => 3,
+        "/lib/libSceLibcInternal.sprx" => 4,
+        "/lib/libSceAgcDriver.sprx" => 5,
+        _ when virtualPath.StartsWith("/system/common/lib/", StringComparison.Ordinal) => 6,
+        _ => 7,
+    };
 
     private static bool IsExportAuditEnabled() =>
         string.Equals(
@@ -444,11 +603,21 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
                     .Select(symbol => new ProviderSelection(candidate, symbol.Name)))
                 .DistinctBy(
                     provider => (provider.Candidate.Module.VirtualPath, provider.ExportSymbolName))
+                .Select(provider => (Provider: provider, Rank: GetProviderRank(provider.Candidate)))
+                .OrderBy(item => item.Rank.State)
+                .ThenBy(item => item.Rank.Dependencies)
+                .ThenBy(item => item.Rank.Location)
+                .ThenBy(item => item.Provider.Candidate.Module.VirtualPath, StringComparer.Ordinal)
+                .ThenBy(item => item.Provider.ExportSymbolName, StringComparer.Ordinal)
                 .Take(2)
                 .ToArray();
             if (providers.Length == 1)
             {
-                result[target] = providers[0];
+                result[target] = providers[0].Provider;
+            }
+            else if (providers.Length > 1 && providers[0].Rank != providers[1].Rank)
+            {
+                result[target] = providers[0].Provider;
             }
             else if (providers.Length > 1)
             {
@@ -481,6 +650,59 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
                 runtimeSymbols.TryAdd(alias, export.RuntimeAddress);
             }
         }
+    }
+
+    private static void PruneUnavailableLleDependencies(
+        HashSet<string> availablePaths,
+        IReadOnlyDictionary<string, ModuleImportResolutionPlan> resolutions,
+        string phase)
+    {
+        bool removed;
+        do
+        {
+            removed = false;
+            foreach (var path in availablePaths.ToArray())
+            {
+                if (!resolutions.TryGetValue(path, out var resolution))
+                {
+                    availablePaths.Remove(path);
+                    removed = true;
+                    if (IsExportAuditEnabled())
+                    {
+                        Console.Error.WriteLine(
+                            $"[FIRMWARE-LLE][AUDIT] prune phase={phase} module={path} reason=no-resolution");
+                    }
+                    continue;
+                }
+
+                var unavailable = resolution.Bindings.FirstOrDefault(binding =>
+                    binding.Source == ImportBindingSource.Lle &&
+                    (binding.ProviderModule is null ||
+                     !availablePaths.Contains(binding.ProviderModule)));
+                if (unavailable is not null)
+                {
+                    availablePaths.Remove(path);
+                    removed = true;
+                    if (IsExportAuditEnabled())
+                    {
+                        Console.Error.WriteLine(
+                            $"[FIRMWARE-LLE][AUDIT] prune phase={phase} module={path} " +
+                            $"symbol={unavailable.SymbolName} provider={unavailable.ProviderModule ?? "<none>"}");
+                    }
+                }
+            }
+        }
+        while (removed);
+    }
+
+    private void ReleaseMappedModule(LleMappedModule mappedModule)
+    {
+        _ = _linkTransactions.TryReleaseModule(
+            mappedModule.ModuleVirtualPath,
+            mappedModule.RuntimeImageStart);
+        _ = _memoryTransactions.TryReleaseModule(
+            mappedModule.ModuleVirtualPath,
+            mappedModule.RuntimeImageStart);
     }
 
     private static bool MatchesTarget(string symbolName, string target) =>
@@ -516,6 +738,15 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
         LleModuleLinkPlan LinkPlan);
 
     private sealed record ProviderSelection(Candidate Candidate, string ExportSymbolName);
+
+    private sealed record MappedCandidate(
+        Candidate Candidate,
+        LleMappedModule MappedModule,
+        IReadOnlyList<LleExportDescriptor> Exports);
+
+    private sealed record LinkedCandidate(
+        MappedCandidate Mapped,
+        LleLinkedModule Linked);
 
     private sealed record CandidateDiscovery(
         IReadOnlyList<Candidate> Candidates,

@@ -93,6 +93,29 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
     }
 
     [Fact]
+    public async Task ResolvesDynamicTableThroughLoadSegmentBeforeDeclaredFileOffset()
+    {
+        var bytes = CreateDynamicElf(relocationType: 8);
+        var dynamicHeader = bytes.AsSpan(120, 56);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[8..], 0x180);
+        var imported = await ImportAsync(bytes);
+        var catalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(catalog.Modules);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+
+        var loadPlan = await new LleModuleLoadPlanner().BuildAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+        var linkPlan = await new LleModuleLinkPlanner().BuildAsync(loadPlan, fileSystem);
+
+        Assert.Equal(0x200UL, loadPlan.DynamicTable!.FileOffset);
+        Assert.Equal(0x1300UL, linkPlan.Metadata.RelaLocation);
+        Assert.Single(linkPlan.Relocations);
+        Assert.True(linkPlan.CanApply);
+    }
+
+    [Fact]
     public async Task LinkPlanAcceptsRepeatedNeededEntries()
     {
         var imported = await ImportAsync(CreateDynamicElfWithRepeatedNeededEntries());
@@ -116,7 +139,6 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
     }
 
     [Theory]
-    [InlineData(16U)]
     [InlineData(17U)]
     [InlineData(18U)]
     [InlineData(37U)]
@@ -160,6 +182,36 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
         Assert.Equal(symbol, Assert.Single(linkPlan.ImportedSymbols));
         Assert.Equal(48UL, linkPlan.Metadata.SymbolTableSize);
         Assert.True(linkPlan.CanApply);
+    }
+
+    [Fact]
+    public async Task NormalizesSonyImportUsingLocalLibraryAndModuleRecords()
+    {
+        var imported = await ImportAsync(CreateSonySymbolImportElf());
+        var catalog = imported.Result.ModuleCatalog!;
+        var module = Assert.Single(catalog.Modules);
+        var fileSystem = FirmwareVirtualFileSystem.Mount(imported.Store, catalog.ProfileId);
+        var loadPlan = await new LleModuleLoadPlanner().BuildAsync(
+            CreateDecision(module),
+            catalog,
+            fileSystem);
+
+        var linkPlan = await new LleModuleLinkPlanner().BuildAsync(loadPlan, fileSystem);
+
+        var importedModule = Assert.Single(linkPlan.Metadata.ImportedModules);
+        Assert.Equal((ushort)1, importedModule.Id);
+        Assert.Equal((ushort)0x0101, importedModule.Version);
+        Assert.Equal("libkernel", importedModule.Name);
+        var importedLibrary = Assert.Single(linkPlan.Metadata.ImportedLibraries);
+        Assert.Equal((ushort)0, importedLibrary.Id);
+        Assert.Equal("libkernel", importedLibrary.Name);
+        var identity = Assert.Single(linkPlan.ImportedSymbols).SonyIdentity;
+        Assert.NotNull(identity);
+        Assert.Equal("LwG8g3niqwA", identity.Nid);
+        Assert.Equal("libkernel", identity.LibraryName);
+        Assert.Equal("libkernel", identity.ModuleName);
+        Assert.Equal((ushort)1, identity.LibraryVersion);
+        Assert.Equal((ushort)0x0101, identity.ModuleVersion);
     }
 
     [Fact]
@@ -557,6 +609,32 @@ public sealed class LleModuleLoadPlannerTests : IDisposable
         BinaryPrimitives.WriteUInt64LittleEndian(symbol[16..], 16);
         return bytes;
     }
+
+    private static byte[] CreateSonySymbolImportElf()
+    {
+        var bytes = CreateSymbolImportElf();
+        var dynamicHeader = bytes.AsSpan(120, 56);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[32..], 192);
+        BinaryPrimitives.WriteUInt64LittleEndian(dynamicHeader[40..], 192);
+
+        WriteDynamicEntry(bytes, 0x200, 5, 0x1400);
+        WriteDynamicEntry(bytes, 0x210, 10, 64);
+        WriteDynamicEntry(bytes, 0x220, 6, 0x1480);
+        WriteDynamicEntry(bytes, 0x230, 11, 24);
+        WriteDynamicEntry(bytes, 0x240, 7, 0x1500);
+        WriteDynamicEntry(bytes, 0x250, 8, 24);
+        WriteDynamicEntry(bytes, 0x260, 9, 24);
+        WriteDynamicEntry(bytes, 0x270, 0x61000045, PackSonyRecord(1, 0x0101, 27));
+        WriteDynamicEntry(bytes, 0x280, 0x61000049, PackSonyRecord(0, 1, 17));
+        WriteDynamicEntry(bytes, 0x290, 0, 0);
+
+        Array.Clear(bytes, 0x400, 64);
+        "\0LwG8g3niqwA#A#B\0libkernel\0libkernel\0"u8.CopyTo(bytes.AsSpan(0x400));
+        return bytes;
+    }
+
+    private static ulong PackSonyRecord(ushort id, ushort version, uint nameOffset) =>
+        ((ulong)id << 48) | ((ulong)version << 32) | nameOffset;
 
     private static void WriteDynamicEntry(byte[] bytes, int offset, long tag, ulong value)
     {

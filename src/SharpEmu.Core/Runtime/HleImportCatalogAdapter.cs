@@ -12,6 +12,28 @@ namespace SharpEmu.Core.Runtime;
 /// </summary>
 public sealed class HleImportCatalogAdapter
 {
+    public IReadOnlyList<HleSymbolDescriptor> CreateDataDescriptors()
+    {
+        var descriptors = new List<HleSymbolDescriptor>();
+        foreach (var nid in HleDataSymbols.EnumerateKnownNids().Order(StringComparer.Ordinal))
+        {
+            if (!HleDataSymbols.TryGetAddress(nid, out var address) || address == 0)
+            {
+                continue;
+            }
+            descriptors.Add(new HleSymbolDescriptor(
+                "runtime-data",
+                nid,
+                nid,
+                HleImplementationQuality.CompleteStable)
+            {
+                SymbolType = 1,
+                RuntimeAddress = address,
+            });
+        }
+        return descriptors;
+    }
+
     public IReadOnlyList<HleSymbolDescriptor> CreateDescriptors(
         IModuleManager moduleManager,
         IEnumerable<HleModuleDescriptor>? moduleQualities = null,

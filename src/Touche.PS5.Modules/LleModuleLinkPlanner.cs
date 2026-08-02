@@ -41,10 +41,16 @@ public sealed class LleModuleLinkPlanner
     private const long DtSceStrSize = 0x61000037;
     private const long DtSceSymTab = 0x61000039;
     private const long DtSceSymTabSize = 0x6100003F;
+    private const long DtSceExportModule = 0x61000043;
+    private const long DtSceImportModule = 0x61000045;
+    private const long DtSceExportLibrary = 0x61000047;
+    private const long DtSceImportLibrary = 0x61000049;
+    private const string SonyBase64Alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
 
     private static readonly HashSet<uint> SupportedRelocationTypes =
     [
-        0, 1, 2, 4, 6, 7, 8, 10, 11, 24, 32, 33, 38,
+        0, 1, 2, 4, 6, 7, 8, 10, 11, 16, 24, 32, 33, 38,
     ];
     private static readonly HashSet<long> ConsumedSingletonDynamicTags =
     [
@@ -110,6 +116,21 @@ public sealed class LleModuleLinkPlanner
             GetPreferred(entries, DtJmpRel, DtSceJmpRel),
             GetPreferred(entries, DtPltRelSize, DtScePltRelSize));
 
+        var sonyContext = await ReadSonyContextAsync(
+            loadPlan,
+            handle.Content,
+            handle.Artifact.Size,
+            metadata,
+            dynamicBytes,
+            cancellationToken).ConfigureAwait(false);
+        metadata = metadata with
+        {
+            ImportedModules = sonyContext.ImportedModules.Values.OrderBy(item => item.Id).ToArray(),
+            ImportedLibraries = sonyContext.ImportedLibraries.Values.OrderBy(item => item.Id).ToArray(),
+            ExportedModules = sonyContext.ExportedModules.Values.OrderBy(item => item.Id).ToArray(),
+            ExportedLibraries = sonyContext.ExportedLibraries.Values.OrderBy(item => item.Id).ToArray(),
+        };
+
         ValidateTablePair(metadata.RelaLocation, metadata.RelaSize, "RELA");
         ValidateTablePair(
             metadata.ProcedureLinkageLocation,
@@ -154,6 +175,7 @@ public sealed class LleModuleLinkPlanner
             handle.Artifact.Size,
             metadata,
             relocations,
+            sonyContext,
             cancellationToken).ConfigureAwait(false);
         if (metadata.SymbolTableSize == 0 && symbolResult.EffectiveSymbolTableSize != 0)
         {
@@ -164,6 +186,7 @@ public sealed class LleModuleLinkPlanner
             handle.Content,
             handle.Artifact.Size,
             metadata,
+            sonyContext,
             cancellationToken).ConfigureAwait(false);
         return new LleModuleLinkPlan
         {
@@ -344,6 +367,7 @@ public sealed class LleModuleLinkPlanner
         long artifactSize,
         LleDynamicLinkMetadata metadata,
         IReadOnlyList<LleRelocation> relocations,
+        SonyContextCatalog sonyContext,
         CancellationToken cancellationToken)
     {
         var indices = relocations
@@ -403,7 +427,7 @@ public sealed class LleModuleLinkPlanner
         var result = new List<LleDynamicSymbol>(indices.Length);
         foreach (var index in indices)
         {
-            var symbol = ParseSymbol(symbols, strings, index);
+            var symbol = ParseSymbol(symbols, strings, index, sonyContext);
             var name = symbol.Name;
             if (symbol.SectionIndex == 0 && string.IsNullOrEmpty(name))
             {
@@ -419,6 +443,7 @@ public sealed class LleModuleLinkPlanner
         Stream stream,
         long artifactSize,
         LleDynamicLinkMetadata metadata,
+        SonyContextCatalog sonyContext,
         CancellationToken cancellationToken)
     {
         if (metadata.SymbolTableSize == 0)
@@ -462,7 +487,7 @@ public sealed class LleModuleLinkPlanner
         for (uint index = 1; index < count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var symbol = ParseSymbol(symbols, strings, index);
+            var symbol = ParseSymbol(symbols, strings, index, sonyContext);
             if (!symbol.IsUndefined &&
                 !string.IsNullOrWhiteSpace(symbol.Name) &&
                 symbol.Binding is 1 or 2 &&
@@ -486,7 +511,8 @@ public sealed class LleModuleLinkPlanner
     private static LleDynamicSymbol ParseSymbol(
         ReadOnlySpan<byte> symbols,
         ReadOnlySpan<byte> strings,
-        uint index)
+        uint index,
+        SonyContextCatalog sonyContext)
     {
         var entryOffset = checked((int)((ulong)index * SymbolEntrySize));
         if (entryOffset > symbols.Length - SymbolEntrySize)
@@ -497,15 +523,156 @@ public sealed class LleModuleLinkPlanner
         var nameOffset = BinaryPrimitives.ReadUInt32LittleEndian(entry);
         var info = entry[4];
         var other = entry[5];
+        var sectionIndex = BinaryPrimitives.ReadUInt16LittleEndian(entry[6..]);
+        var name = ReadSymbolName(strings, nameOffset);
         return new LleDynamicSymbol(
             index,
-            ReadSymbolName(strings, nameOffset),
+            name,
             (byte)(info >> 4),
             (byte)(info & 0x0f),
             (byte)(other & 0x03),
-            BinaryPrimitives.ReadUInt16LittleEndian(entry[6..]),
+            sectionIndex,
             BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]),
-            BinaryPrimitives.ReadUInt64LittleEndian(entry[16..]));
+            BinaryPrimitives.ReadUInt64LittleEndian(entry[16..]))
+        {
+            SonyIdentity = ParseSonyIdentity(name, sectionIndex == 0, sonyContext),
+        };
+    }
+
+    private static async Task<SonyContextCatalog> ReadSonyContextAsync(
+        LleModuleLoadPlan plan,
+        Stream stream,
+        long artifactSize,
+        LleDynamicLinkMetadata metadata,
+        ReadOnlyMemory<byte> dynamicBytes,
+        CancellationToken cancellationToken)
+    {
+        var rawRecords = ParseSonyContextValues(dynamicBytes.Span);
+        if (rawRecords.Count == 0)
+        {
+            return SonyContextCatalog.Empty;
+        }
+        if (metadata.StringTableLocation == 0 ||
+            metadata.StringTableSize is 0 or > MaximumStringTableBytes)
+        {
+            throw new InvalidDataException("Sony module metadata requires a valid ELF string table.");
+        }
+
+        var stringOffset = ResolveFileOffset(
+            plan,
+            metadata.StringTableLocation,
+            metadata.StringTableSize,
+            artifactSize);
+        var strings = await ReadFileRangeAsync(
+            stream,
+            stringOffset,
+            metadata.StringTableSize,
+            MaximumStringTableBytes,
+            cancellationToken).ConfigureAwait(false);
+
+        return new SonyContextCatalog(
+            BuildSonyRecordIndex(rawRecords, DtSceImportModule, strings, "import module"),
+            BuildSonyRecordIndex(rawRecords, DtSceImportLibrary, strings, "import library"),
+            BuildSonyRecordIndex(rawRecords, DtSceExportModule, strings, "export module"),
+            BuildSonyRecordIndex(rawRecords, DtSceExportLibrary, strings, "export library"));
+    }
+
+    private static IReadOnlyList<(long Tag, ulong Value)> ParseSonyContextValues(
+        ReadOnlySpan<byte> dynamicBytes)
+    {
+        var result = new List<(long Tag, ulong Value)>();
+        for (var offset = 0; offset < dynamicBytes.Length; offset += DynamicEntrySize)
+        {
+            var tag = BinaryPrimitives.ReadInt64LittleEndian(dynamicBytes[offset..]);
+            if (tag == DtNull)
+            {
+                break;
+            }
+            if (tag is DtSceImportModule or DtSceImportLibrary or DtSceExportModule or DtSceExportLibrary)
+            {
+                result.Add((tag, BinaryPrimitives.ReadUInt64LittleEndian(dynamicBytes[(offset + 8)..])));
+            }
+        }
+        return result;
+    }
+
+    private static IReadOnlyDictionary<ushort, LleSonyContextRecord> BuildSonyRecordIndex(
+        IReadOnlyList<(long Tag, ulong Value)> values,
+        long expectedTag,
+        ReadOnlySpan<byte> strings,
+        string description)
+    {
+        var result = new Dictionary<ushort, LleSonyContextRecord>();
+        foreach (var (_, value) in values.Where(item => item.Tag == expectedTag))
+        {
+            var id = (ushort)(value >> 48);
+            var version = (ushort)(value >> 32);
+            var nameOffset = (uint)value;
+            var record = new LleSonyContextRecord(id, version, ReadSymbolName(strings, nameOffset));
+            if (string.IsNullOrWhiteSpace(record.Name))
+            {
+                throw new InvalidDataException($"An ELF Sony {description} has no name.");
+            }
+            if (result.TryGetValue(id, out var existing) && existing != record)
+            {
+                throw new InvalidDataException($"ELF Sony {description} ID {id} is ambiguous.");
+            }
+            result[id] = record;
+        }
+        return result;
+    }
+
+    private static LleSonySymbolIdentity? ParseSonyIdentity(
+        string rawName,
+        bool isImport,
+        SonyContextCatalog context)
+    {
+        var parts = rawName.Split('#');
+        if (parts.Length != 3)
+        {
+            return null;
+        }
+        if (parts[0].Length != 11 || parts[0].Any(character => SonyBase64Alphabet.IndexOf(character) < 0))
+        {
+            throw new InvalidDataException($"Sony symbol '{rawName}' has an invalid NID.");
+        }
+
+        var libraryId = DecodeSonyId(parts[1], rawName);
+        var moduleId = DecodeSonyId(parts[2], rawName);
+        var libraries = isImport ? context.ImportedLibraries : context.ExportedLibraries;
+        var modules = isImport ? context.ImportedModules : context.ExportedModules;
+        if (!libraries.TryGetValue(libraryId, out var library) ||
+            !modules.TryGetValue(moduleId, out var module))
+        {
+            throw new InvalidDataException($"Sony symbol '{rawName}' references an unknown local library or module ID.");
+        }
+        return new LleSonySymbolIdentity(
+            parts[0],
+            libraryId,
+            library.Name,
+            library.Version,
+            moduleId,
+            module.Name,
+            module.Version);
+    }
+
+    private static ushort DecodeSonyId(string encoded, string rawName)
+    {
+        if (encoded.Length == 0)
+        {
+            throw new InvalidDataException($"Sony symbol '{rawName}' has an empty local ID.");
+        }
+        uint value = 0;
+        foreach (var character in encoded)
+        {
+            var digit = SonyBase64Alphabet.IndexOf(character);
+            if (digit < 0 || value > (ushort.MaxValue - (uint)digit) / 64)
+            {
+                throw new InvalidDataException($"Sony symbol '{rawName}' has an invalid local ID.");
+            }
+            value = value * 64 + (uint)digit;
+        }
+        return (ushort)value;
     }
 
     private static string ReadSymbolName(ReadOnlySpan<byte> stringTable, uint nameOffset)
@@ -566,4 +733,17 @@ public sealed class LleModuleLinkPlanner
     private sealed record SymbolReadResult(
         IReadOnlyList<LleDynamicSymbol> Symbols,
         ulong EffectiveSymbolTableSize);
+
+    private sealed record SonyContextCatalog(
+        IReadOnlyDictionary<ushort, LleSonyContextRecord> ImportedModules,
+        IReadOnlyDictionary<ushort, LleSonyContextRecord> ImportedLibraries,
+        IReadOnlyDictionary<ushort, LleSonyContextRecord> ExportedModules,
+        IReadOnlyDictionary<ushort, LleSonyContextRecord> ExportedLibraries)
+    {
+        public static SonyContextCatalog Empty { get; } = new(
+            new Dictionary<ushort, LleSonyContextRecord>(),
+            new Dictionary<ushort, LleSonyContextRecord>(),
+            new Dictionary<ushort, LleSonyContextRecord>(),
+            new Dictionary<ushort, LleSonyContextRecord>());
+    }
 }

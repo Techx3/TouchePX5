@@ -90,6 +90,72 @@ public sealed class LleModuleLinkerTests
     }
 
     [Fact]
+    public async Task AppliesDirectHleDataBindingWithoutCreatingThunk()
+    {
+        var factory = new RecordingLinkTransactionFactory();
+        var imported = new LleDynamicSymbol(1, "dataNid", 1, 1, 0, 0, 0, 0);
+        var linkPlan = CreateLinkPlan(
+            [imported],
+            [new LleRelocation(LleRelocationTableKind.Rela, 0x1100, 1, 6, 0)]);
+        var resolution = CreateResolution(new ImportBindingDecision
+        {
+            SymbolIndex = 1,
+            SymbolName = imported.Name,
+            Source = ImportBindingSource.HleData,
+            ProviderModule = "runtime-data",
+            HleDataRuntimeAddress = 0x1234,
+            ReasonCode = "test.hle-data",
+            Reason = "Test direct HLE data binding.",
+        });
+
+        var result = await new LleModuleLinker().LinkAsync(
+            CreateLoadPlan(),
+            CreateMappedModule(),
+            linkPlan,
+            resolution,
+            factory);
+
+        Assert.Empty(factory.Transaction.Thunks);
+        Assert.Equal(0x1234UL, ReadUInt64(Assert.Single(factory.Transaction.Writes).Data));
+        Assert.Equal(ImportBindingSource.HleData, Assert.Single(result.Imports).Source);
+    }
+
+    [Fact]
+    public async Task AppliesTlsModuleRelocationUsingRegisteredModuleId()
+    {
+        var factory = new RecordingLinkTransactionFactory();
+        var linkPlan = CreateLinkPlan(
+            [],
+            [new LleRelocation(LleRelocationTableKind.Rela, 0x1100, 7, 16, 0)]);
+
+        var result = await new LleModuleLinker().LinkAsync(
+            CreateLoadPlan(),
+            CreateMappedModule() with { TlsModuleId = 23 },
+            linkPlan,
+            CreateResolution(),
+            factory);
+
+        Assert.Equal(23UL, ReadUInt64(Assert.Single(factory.Transaction.Writes).Data));
+        Assert.Equal(16U, Assert.Single(result.Relocations).Type);
+    }
+
+    [Fact]
+    public async Task RejectsTlsModuleRelocationWithoutRegisteredModuleId()
+    {
+        var factory = new RecordingLinkTransactionFactory();
+        var linkPlan = CreateLinkPlan(
+            [],
+            [new LleRelocation(LleRelocationTableKind.Rela, 0x1100, 7, 16, 0)]);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => new LleModuleLinker().LinkAsync(
+            CreateLoadPlan(),
+            CreateMappedModule(),
+            linkPlan,
+            CreateResolution(),
+            factory));
+    }
+
+    [Fact]
     public async Task RollsBackThunksAndWritesWhenStagingFails()
     {
         var factory = new RecordingLinkTransactionFactory(hleAddress: 0xf000, failOnWrite: 2);

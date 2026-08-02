@@ -51,6 +51,21 @@ public sealed class HleImportCatalogAdapterTests
     }
 
     [Fact]
+    public void CreatesDirectDescriptorsForKnownHleDataSymbols()
+    {
+        var descriptors = new HleImportCatalogAdapter().CreateDataDescriptors();
+
+        Assert.Contains(descriptors, descriptor => descriptor.SymbolName == "ZT4ODD2Ts9o");
+        Assert.All(descriptors, descriptor =>
+        {
+            Assert.Equal((byte)1, descriptor.SymbolType);
+            Assert.NotNull(descriptor.RuntimeAddress);
+            Assert.NotEqual(0UL, descriptor.RuntimeAddress!.Value);
+            Assert.Equal(HleImplementationQuality.CompleteStable, descriptor.Quality);
+        });
+    }
+
+    [Fact]
     public void RejectsDuplicateNormalizedModuleQualities()
     {
         var manager = new ModuleManager();

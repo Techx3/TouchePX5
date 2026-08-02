@@ -27,7 +27,30 @@ public sealed record LleDynamicLinkMetadata(
     ulong RelaLocation,
     ulong RelaSize,
     ulong ProcedureLinkageLocation,
-    ulong ProcedureLinkageSize);
+    ulong ProcedureLinkageSize)
+{
+    public IReadOnlyList<LleSonyContextRecord> ImportedModules { get; init; } = [];
+
+    public IReadOnlyList<LleSonyContextRecord> ImportedLibraries { get; init; } = [];
+
+    public IReadOnlyList<LleSonyContextRecord> ExportedModules { get; init; } = [];
+
+    public IReadOnlyList<LleSonyContextRecord> ExportedLibraries { get; init; } = [];
+}
+
+public sealed record LleSonyContextRecord(
+    ushort Id,
+    ushort Version,
+    string Name);
+
+public sealed record LleSonySymbolIdentity(
+    string Nid,
+    ushort LibraryId,
+    string LibraryName,
+    ushort LibraryVersion,
+    ushort ModuleId,
+    string ModuleName,
+    ushort ModuleVersion);
 
 public sealed record LleDynamicSymbol(
     uint Index,
@@ -40,6 +63,8 @@ public sealed record LleDynamicSymbol(
     ulong Size)
 {
     public bool IsUndefined => SectionIndex == 0;
+
+    public LleSonySymbolIdentity? SonyIdentity { get; init; }
 }
 
 public sealed record LleModuleLinkPlan

@@ -95,6 +95,9 @@ public sealed class LleModuleLinker
             ulong address;
             switch (binding.Source)
             {
+                case ImportBindingSource.HleData:
+                    address = binding.HleDataRuntimeAddress!.Value;
+                    break;
                 case ImportBindingSource.Lle:
                     address = binding.LleRuntimeAddress!.Value;
                     break;
@@ -135,7 +138,7 @@ public sealed class LleModuleLinker
             return null;
         }
 
-        var symbol = GetSymbol(relocation, symbols);
+        var symbol = relocation.Type == 16 ? null : GetSymbol(relocation, symbols);
         var symbolAddress = symbol is null
             ? 0UL
             : ResolveSymbolAddress(loadPlan, mappedModule, symbol, importAddresses);
@@ -155,6 +158,9 @@ public sealed class LleModuleLinker
                 Unsigned64(runtimeAddress, relocation.Type, loadBias + addend)),
             10 => Unsigned32(runtimeAddress, relocation.Type, (Int128)symbolAddress + addend),
             11 => Signed32(runtimeAddress, relocation.Type, (Int128)symbolAddress + addend),
+            16 => RequireZeroAddend(
+                relocation,
+                Unsigned64(runtimeAddress, relocation.Type, RequireTlsModuleId(mappedModule))),
             24 => Signed64(runtimeAddress, relocation.Type, (Int128)symbolAddress + addend - place),
             32 => Unsigned32(runtimeAddress, relocation.Type, (Int128)symbolSize + addend),
             33 => Unsigned64(runtimeAddress, relocation.Type, (Int128)symbolSize + addend),
@@ -251,7 +257,7 @@ public sealed class LleModuleLinker
     {
         0 => 0,
         2 or 4 or 10 or 11 or 32 => 4,
-        1 or 6 or 7 or 8 or 24 or 33 or 38 => 8,
+        1 or 6 or 7 or 8 or 16 or 24 or 33 or 38 => 8,
         _ => throw new NotSupportedException($"ELF relocation type {type} is not supported."),
     };
 
@@ -355,9 +361,16 @@ public sealed class LleModuleLinker
         ImportBindingSource.Hle or ImportBindingSource.ControlledStub =>
             !string.IsNullOrWhiteSpace(binding.HleDispatchKey) &&
             !binding.HleDispatchKey.Any(char.IsControl) &&
+            binding.HleDataRuntimeAddress is null &&
+            binding.LleRuntimeAddress is null,
+        ImportBindingSource.HleData =>
+            binding.HleDataRuntimeAddress is not null and not 0 &&
+            binding.HleDispatchKey is null &&
             binding.LleRuntimeAddress is null,
         ImportBindingSource.Lle =>
-            binding.LleRuntimeAddress is not null and not 0 && binding.HleDispatchKey is null,
+            binding.LleRuntimeAddress is not null and not 0 &&
+            binding.HleDispatchKey is null &&
+            binding.HleDataRuntimeAddress is null,
         _ => false,
     };
 
@@ -396,6 +409,15 @@ public sealed class LleModuleLinker
             throw new InvalidDataException($"Relocation type {relocation.Type} requires a zero addend.");
         }
         return patch;
+    }
+
+    private static uint RequireTlsModuleId(LleMappedModule mappedModule)
+    {
+        if (mappedModule.TlsModuleId == 0)
+        {
+            throw new InvalidDataException("R_X86_64_DTPMOD64 requires a registered TLS module identifier.");
+        }
+        return mappedModule.TlsModuleId;
     }
 
     private static RelocationPatch RequireNoSymbol(LleRelocation relocation, RelocationPatch patch)

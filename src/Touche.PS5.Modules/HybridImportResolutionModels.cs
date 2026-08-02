@@ -9,6 +9,7 @@ namespace Touche.PS5.Modules;
 public enum ImportBindingSource
 {
     Hle,
+    HleData,
     Lle,
     ControlledStub,
     Unresolved,
@@ -18,7 +19,12 @@ public sealed record HleSymbolDescriptor(
     string ModuleName,
     string SymbolName,
     string DispatchKey,
-    HleImplementationQuality Quality);
+    HleImplementationQuality Quality)
+{
+    public byte SymbolType { get; init; } = 2;
+
+    public ulong? RuntimeAddress { get; init; }
+}
 
 public sealed record LleExportDescriptor(
     string FirmwareProfileId,
@@ -26,7 +32,12 @@ public sealed record LleExportDescriptor(
     string ModuleHash,
     string SymbolName,
     ulong RuntimeAddress,
-    ulong Size);
+    ulong Size)
+{
+    public byte SymbolType { get; init; }
+
+    public LleSonySymbolIdentity? SonyIdentity { get; init; }
+}
 
 public sealed record ImportBindingDecision
 {
@@ -39,6 +50,8 @@ public sealed record ImportBindingDecision
     public string? ProviderModule { get; init; }
 
     public string? HleDispatchKey { get; init; }
+
+    public ulong? HleDataRuntimeAddress { get; init; }
 
     public ulong? LleRuntimeAddress { get; init; }
 
