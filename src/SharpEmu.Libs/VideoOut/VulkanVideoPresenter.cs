@@ -12792,31 +12792,35 @@ internal static unsafe class VulkanVideoPresenter
             uint zStart,
             uint zCount)
         {
-            const uint maxWorkgroupsPerCommand = 4096;
+            // Keep a guest dispatch intact whenever it fits the device limits.
+            // The former 4096-total-workgroup budget split common full-screen
+            // passes into many consecutive vkCmdDispatchBase calls (15 for a
+            // 320x180 pass) without creating a submission/preemption boundary.
+            // That only repeated host dispatch scheduling while preserving the
+            // same queue dependency, which is especially costly for wave64/LDS
+            // post-processing kernels. Chunk only dimensions Vulkan requires.
             ulong commandCount = 0;
             var maxXChunk = Math.Max(
                 1u,
                 Math.Min(
                     work.GroupCountX,
-                    Math.Min(_maxComputeWorkGroupCountX, maxWorkgroupsPerCommand)));
+                    _maxComputeWorkGroupCountX));
             for (var x = 0u; x < work.GroupCountX;)
             {
                 var countX = Math.Min(maxXChunk, work.GroupCountX - x);
-                var xyBudget = Math.Max(maxWorkgroupsPerCommand / countX, 1u);
                 var maxYChunk = Math.Max(
                     1u,
                     Math.Min(
                         work.GroupCountY,
-                        Math.Min(_maxComputeWorkGroupCountY, xyBudget)));
+                        _maxComputeWorkGroupCountY));
                 for (var y = 0u; y < work.GroupCountY;)
                 {
                     var countY = Math.Min(maxYChunk, work.GroupCountY - y);
-                    var xyzBudget = Math.Max(xyBudget / countY, 1u);
                     var maxZChunk = Math.Max(
                         1u,
                         Math.Min(
                             zCount,
-                            Math.Min(_maxComputeWorkGroupCountZ, xyzBudget)));
+                            _maxComputeWorkGroupCountZ));
                     for (var z = 0u; z < zCount;)
                     {
                         var countZ = Math.Min(maxZChunk, zCount - z);
@@ -12845,7 +12849,6 @@ internal static unsafe class VulkanVideoPresenter
                     $"groups={work.GroupCountX}x{work.GroupCountY}x{work.GroupCountZ} " +
                     $"base={work.BaseGroupX}x{work.BaseGroupY}x{work.BaseGroupZ} " +
                     $"z_range={zStart}..{zStart + zCount} commands={commandCount} " +
-                    $"command_budget={maxWorkgroupsPerCommand} " +
                     $"device_limit={_maxComputeWorkGroupCountX}x" +
                     $"{_maxComputeWorkGroupCountY}x{_maxComputeWorkGroupCountZ}");
             }
