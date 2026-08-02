@@ -484,6 +484,7 @@ internal static unsafe class VulkanVideoPresenter
             ? capMs * 1_000_000UL
             : 100_000_000UL;
     private static readonly HashSet<string> _tracedFenceTimeouts = new();
+    private static readonly HashSet<string> _tracedSlowGuestSubmissions = new();
     private static long _guestQueueBackpressureTraceCount;
     private static long _guestQueueRecoveryTraceCount;
     private static long _orderedActionFenceWaitTraceCount;
@@ -4141,7 +4142,8 @@ internal static unsafe class VulkanVideoPresenter
             ulong Timeline,
             string DebugName,
             VulkanGuestQueueIdentity Queue,
-            long WorkSequence);
+            long WorkSequence,
+            long SubmittedTicks);
 
         public Presenter(uint width, uint height, VulkanHostSurface? hostSurface)
         {
@@ -5937,7 +5939,8 @@ internal static unsafe class VulkanVideoPresenter
                     _submitTimeline,
                     resources.Count > 0 ? resources[0].DebugName : "batch",
                     _activeGuestQueue,
-                    _activeGuestWorkSequence));
+                    _activeGuestWorkSequence,
+                    Stopwatch.GetTimestamp()));
             _lastSubmittedTimelineByGuestQueue[_activeGuestQueue.Name] =
                 _submitTimeline;
         }
@@ -6099,6 +6102,22 @@ internal static unsafe class VulkanVideoPresenter
                     // continue so at least the last good frame can be shown.
                     if (isProbeWait)
                     {
+                        var elapsedMs =
+                            (Stopwatch.GetTimestamp() - oldest.SubmittedTicks) *
+                            1000.0 / Stopwatch.Frequency;
+                        if (elapsedMs >= 500.0 &&
+                            _tracedSlowGuestSubmissions.Add(oldest.DebugName))
+                        {
+                            Console.Error.WriteLine(
+                                $"[LOADER][WARN] vk.slow_guest_submission " +
+                                $"elapsed_ms={elapsedMs:F0} " +
+                                $"pending={_pendingGuestSubmissions.Count} " +
+                                $"queue={oldest.Queue.Name} " +
+                                $"submission={oldest.Queue.SubmissionId} " +
+                                $"work_sequence={oldest.WorkSequence} " +
+                                $"work='{oldest.DebugName}'");
+                        }
+
                         return;
                     }
 
