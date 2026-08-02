@@ -5990,16 +5990,38 @@ internal static unsafe class VulkanVideoPresenter
         private void EnsureGuestSubmissionCapacity()
         {
             CollectCompletedGuestSubmissions(waitForOldest: false);
-            if (_pendingGuestSubmissions.Count >= MaxInFlightGuestSubmissions)
+            if (_pendingGuestSubmissions.Count < MaxInFlightGuestSubmissions)
             {
-                // Bounded wait so the macOS main thread returns to its event
-                // pump promptly under a slow-compute backlog; if the oldest
-                // isn't done yet we proceed (soft cap, dynamic pools).
+                return;
+            }
+
+            if (OperatingSystem.IsMacOS())
+            {
+                // Cocoa owns the render/event thread. Keep the cap soft here so
+                // a slow guest shader cannot stop the native event pump.
                 CollectCompletedGuestSubmissions(
                     waitForOldest: true,
                     maxWaitNs: _submissionCapacityWaitNs == 0
                         ? _guestFenceWaitTimeoutNs
                         : _submissionCapacityWaitNs);
+                return;
+            }
+
+            // Windows and Linux render on a dedicated thread. Enforce the cap:
+            // continuing after a short probe lets slow compute accumulate an
+            // unbounded chain of command buffers, descriptor pools and image
+            // snapshots. Demon's Souls exposes this while idle on its title
+            // screen, where resident memory otherwise grows continuously.
+            var probeWaitNs = _submissionCapacityWaitNs > 0 &&
+                              _submissionCapacityWaitNs < _guestFenceWaitTimeoutNs
+                ? _submissionCapacityWaitNs
+                : Math.Min(100_000_000UL, _guestFenceWaitTimeoutNs - 1UL);
+            while (!_deviceLost &&
+                   _pendingGuestSubmissions.Count >= MaxInFlightGuestSubmissions)
+            {
+                CollectCompletedGuestSubmissions(
+                    waitForOldest: true,
+                    maxWaitNs: probeWaitNs);
             }
         }
 
