@@ -391,6 +391,15 @@ public static partial class AgcExports
     private static readonly ConditionalWeakTable<object, RegisterDefaultsAllocation> _registerDefaultsAllocations = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
 
+    internal static uint GetSubmittedGraphicsInstanceCountForDiagnostics(CpuContext ctx)
+    {
+        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        lock (state.Gate)
+        {
+            return state.Graphics.InstanceCount;
+        }
+    }
+
     private static readonly RegisterDefaultGroup[] PrimaryRegisterDefaults =
         CreatePrimaryRegisterDefaults();
 
@@ -6770,7 +6779,6 @@ public static partial class AgcExports
             stride,
             commandSize);
 
-        var savedInstanceCount = state.InstanceCount;
         var savedDrawIndexOffset = state.DrawIndexOffset;
         var hadBaseVertex = state.UcRegisters.TryGetValue(GeIndxOffset, out var savedBaseVertex);
         try
@@ -6785,6 +6793,11 @@ public static partial class AgcExports
                     break;
                 }
 
+                // NUM_INSTANCES is persistent command-processor state. Indirect draws
+                // update the same state from their argument record; a following direct
+                // draw observes the last decoded value until another packet replaces it.
+                // Restoring the pre-indirect value here broke instanced render sequences.
+                state.InstanceCount = instanceCount;
                 if (op == ItDrawIndexIndirectMulti && commandCount == DrawIndexedIndirectMaxScan &&
                     elementCount == 0 && instanceCount == 0)
                 {
@@ -6811,7 +6824,6 @@ public static partial class AgcExports
                     state.DrawIndexOffset = 0;
                 }
 
-                state.InstanceCount = instanceCount;
                 state.UcRegisters[GeIndxOffset] = baseVertex;
                 state.FrameDrawCount++;
                 state.SawIndexedDraw |= indexed;
@@ -6820,7 +6832,6 @@ public static partial class AgcExports
         }
         finally
         {
-            state.InstanceCount = savedInstanceCount;
             state.DrawIndexOffset = savedDrawIndexOffset;
             if (hadBaseVertex)
             {
