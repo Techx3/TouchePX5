@@ -106,6 +106,46 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
         Assert.Equal(0x0000_6800_0000_0180UL, runtimeSymbols["LwG8g3niqwA"]);
     }
 
+    [Fact]
+    public async Task KeepsTitleProvidedRuntimeSymbolInsteadOfLoadingFirmwareProvider()
+    {
+        const string exportSymbolName = "missingNid";
+        const ulong titleSymbolAddress = 0x0000_0040_0000_1234UL;
+        var source = Path.Combine(_temporaryDirectory, "source-title-provider");
+        var store = Path.Combine(_temporaryDirectory, "store-title-provider");
+        var modulePath = Path.Combine(source, "system", "common", "lib", "libProvider.sprx");
+        Directory.CreateDirectory(Path.GetDirectoryName(modulePath)!);
+        await File.WriteAllBytesAsync(modulePath, CreateProviderElf(exportSymbolName));
+        var imported = await new FirmwareDirectoryImporter(store).ImportAsync(source);
+        var memory = new InMemoryVirtualMemory();
+        var modules = new ModuleManager();
+        modules.Freeze();
+        using var session = new FirmwareLleRuntimeSession(
+            store,
+            imported.Manifest.ProfileId,
+            memory,
+            modules,
+            Aerolib.Empty);
+        var image = new SelfImage(
+            isSelf: false,
+            elfHeader: default,
+            programHeaders: [],
+            mappedRegions: [],
+            importStubs: new Dictionary<ulong, string> { [0x4000] = exportSymbolName });
+        var importStubs = new Dictionary<ulong, string>(image.ImportStubs);
+        var runtimeSymbols = new Dictionary<string, ulong>(StringComparer.Ordinal)
+        {
+            [exportSymbolName] = titleSymbolAddress,
+        };
+
+        var summary = await session.LoadMissingProvidersAsync(image, importStubs, runtimeSymbols);
+
+        Assert.Equal(0, summary.MissingImports);
+        Assert.Equal(0, summary.CandidateModules);
+        Assert.Equal(0, summary.LoadedModules);
+        Assert.Equal(titleSymbolAddress, runtimeSymbols[exportSymbolName]);
+    }
+
     private static byte[] CreateProviderElf(
         string exportSymbolName,
         string providerModuleName = "libProvider")

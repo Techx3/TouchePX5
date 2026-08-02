@@ -61,7 +61,7 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
         }
         _loaded = true;
 
-        var targets = BuildMissingTargetIndex(image.ImportStubs.Values);
+        var targets = BuildMissingTargetIndex(image.ImportStubs.Values, runtimeSymbols);
         if (targets.Count == 0)
         {
             return new FirmwareLleLoadSummary(0, 0, 0, 0, 0);
@@ -313,12 +313,24 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
         _memoryTransactions.Dispose();
     }
 
-    private Dictionary<string, HashSet<string>> BuildMissingTargetIndex(IEnumerable<string> importNids)
+    private Dictionary<string, HashSet<string>> BuildMissingTargetIndex(
+        IEnumerable<string> importNids,
+        IDictionary<string, ulong> runtimeSymbols)
     {
         var result = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var nid in importNids.Where(nid => !string.IsNullOrWhiteSpace(nid)).Distinct(StringComparer.Ordinal))
         {
             if (_moduleManager.TryGetExport(nid, out _))
+            {
+                continue;
+            }
+            if (runtimeSymbols.ContainsKey(nid))
+            {
+                continue;
+            }
+            if (_symbolCatalog.TryGetByNid(nid, out var knownSymbol) &&
+                !string.IsNullOrWhiteSpace(knownSymbol.ExportName) &&
+                runtimeSymbols.ContainsKey(knownSymbol.ExportName))
             {
                 continue;
             }

@@ -178,12 +178,14 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         HleDataSymbols.ConfigureProcessImageName(processImageName);
         MergeKnownHleDataSymbols(activeRuntimeSymbols);
+        var loadedModuleImages = LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
+        // Title-provided modules are the authoritative providers for their own imports.
+        // Firmware LLE is a fallback and must only fill symbols that remain unresolved.
         LoadExperimentalFirmwareProviders(
             image,
             generation,
             activeImportStubs,
             activeRuntimeSymbols);
-        var loadedModuleImages = LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
         RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
         var initializerResult = RunAllInitializers(
             image,
