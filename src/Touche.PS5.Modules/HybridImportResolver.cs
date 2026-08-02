@@ -288,9 +288,9 @@ public sealed class HybridImportResolver
         }
         return validated
             .GroupBy(descriptor => new LleKey(descriptor.FirmwareProfileId, descriptor.SymbolName))
-            .Select(group => (group.Key, Providers: DistinctProviders(group)))
-            .Where(group => group.Providers.Length == 1)
-            .ToDictionary(group => group.Key, group => group.Providers[0]);
+            .Select(group => (group.Key, Provider: SelectUniqueOrCanonicalProvider(group)))
+            .Where(group => group.Provider is not null)
+            .ToDictionary(group => group.Key, group => group.Provider!);
     }
 
     private static IReadOnlyDictionary<LleKey, LleExportDescriptor> BuildUniqueLleNidIndex(
@@ -299,9 +299,9 @@ public sealed class HybridImportResolver
             .GroupBy(descriptor => new LleKey(
                 descriptor.FirmwareProfileId,
                 GetSonyNid(descriptor.SymbolName)))
-            .Select(group => (group.Key, Providers: DistinctProviders(group)))
-            .Where(group => group.Providers.Length == 1)
-            .ToDictionary(group => group.Key, group => group.Providers[0]);
+            .Select(group => (group.Key, Provider: SelectUniqueOrCanonicalProvider(group)))
+            .Where(group => group.Provider is not null)
+            .ToDictionary(group => group.Key, group => group.Provider!);
 
     private static IReadOnlyDictionary<LleContextKey, LleExportDescriptor> BuildContextualLleIndex(
         IEnumerable<LleExportDescriptor> descriptors)
@@ -312,10 +312,29 @@ public sealed class HybridImportResolver
                 descriptor.FirmwareProfileId,
                 descriptor.SonyIdentity!,
                 descriptor.SymbolType))
-            .Select(group => (group.Key, Providers: DistinctProviders(group)))
-            .Where(group => group.Providers.Length == 1)
-            .ToDictionary(group => group.Key, group => group.Providers[0]);
+            .Select(group => (group.Key, Provider: SelectUniqueOrCanonicalProvider(group)))
+            .Where(group => group.Provider is not null)
+            .ToDictionary(group => group.Key, group => group.Provider!);
     }
+
+    private static LleExportDescriptor? SelectUniqueOrCanonicalProvider(
+        IEnumerable<LleExportDescriptor> descriptors)
+    {
+        var providers = DistinctProviders(descriptors);
+        if (providers.Length == 1)
+        {
+            return providers[0];
+        }
+        var canonical = providers.Where(IsCanonicalProvider).Take(2).ToArray();
+        return canonical.Length == 1 ? canonical[0] : null;
+    }
+
+    private static bool IsCanonicalProvider(LleExportDescriptor descriptor) =>
+        descriptor.SonyIdentity is not null &&
+        string.Equals(
+            Path.GetFileNameWithoutExtension(descriptor.ModuleVirtualPath),
+            descriptor.SonyIdentity.ModuleName,
+            StringComparison.Ordinal);
 
     private static LleExportDescriptor[] DistinctProviders(
         IEnumerable<LleExportDescriptor> descriptors) => descriptors
@@ -326,7 +345,6 @@ public sealed class HybridImportResolver
             descriptor.RuntimeAddress,
             descriptor.Size,
             descriptor.SymbolType))
-        .Take(2)
         .ToArray();
 
     private static void ValidateLinkPlan(LleModuleLinkPlan plan)

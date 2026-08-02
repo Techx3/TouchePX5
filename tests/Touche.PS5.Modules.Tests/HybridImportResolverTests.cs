@@ -185,6 +185,47 @@ public sealed class HybridImportResolverTests
     }
 
     [Fact]
+    public void ContextualSonyImportPrefersCanonicalModuleOverCompatibilityVariant()
+    {
+        const string nid = "LwG8g3niqwA";
+        var identity = new LleSonySymbolIdentity(
+            nid, 0, "libkernel", 1, 1, "libkernel", 0x0101);
+        var canonical = CreateLle() with
+        {
+            ModuleVirtualPath = "/lib/libkernel.sprx",
+            SymbolName = $"{nid}#I#A",
+            RuntimeAddress = 0x1234,
+            SymbolType = 2,
+            SonyIdentity = identity,
+        };
+        var compatibility = CreateLle() with
+        {
+            ModuleVirtualPath = "/lib/libkernel_sys.sprx",
+            ModuleHash = new string('c', 64),
+            SymbolName = $"{nid}#J#A",
+            RuntimeAddress = 0x5678,
+            SymbolType = 2,
+            SonyIdentity = identity,
+        };
+        var imported = new LleDynamicSymbol(1, $"{nid}#A#B", 1, 2, 0, 0, 0, 0)
+        {
+            SonyIdentity = identity,
+        };
+        var linkPlan = CreateLinkPlan(imported.Name) with
+        {
+            ReferencedSymbols = [imported],
+            ImportedSymbols = [imported],
+        };
+
+        var binding = Assert.Single(
+            new HybridImportResolver(lleSymbols: [compatibility, canonical]).Resolve(linkPlan).Bindings);
+
+        Assert.Equal(ImportBindingSource.Lle, binding.Source);
+        Assert.Equal("/lib/libkernel.sprx", binding.ProviderModule);
+        Assert.Equal(0x1234UL, binding.LleRuntimeAddress);
+    }
+
+    [Fact]
     public void RepeatedContextualRowsForSameProviderRemainResolvable()
     {
         const string nid = "LwG8g3niqwA";

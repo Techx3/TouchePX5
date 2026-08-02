@@ -57,7 +57,58 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
         Assert.Equal(0x0000_6800_0000_0180UL, runtimeSymbols[requestedSymbolName]);
     }
 
-    private static byte[] CreateProviderElf(string exportSymbolName)
+    [Fact]
+    public async Task PrefersCanonicalProviderOverCompatibilityVariants()
+    {
+        const string exportSymbolName = "LwG8g3niqwA#A#B";
+        const string providerModuleName = "libSceGnmDriver";
+        var source = Path.Combine(_temporaryDirectory, "source-canonical");
+        var store = Path.Combine(_temporaryDirectory, "store-canonical");
+        var library = Path.Combine(source, "lib");
+        Directory.CreateDirectory(library);
+        foreach (var fileName in new[]
+                 {
+                     "libSceGnmDriver.sprx",
+                     "libSceGnmDriverCompat1.sprx",
+                     "libSceGnmDriverForNeoMode.sprx",
+                 })
+        {
+            await File.WriteAllBytesAsync(
+                Path.Combine(library, fileName),
+                CreateProviderElf(exportSymbolName, providerModuleName));
+        }
+
+        var imported = await new FirmwareDirectoryImporter(store).ImportAsync(source);
+        var memory = new InMemoryVirtualMemory();
+        var modules = new ModuleManager();
+        modules.Freeze();
+        using var session = new FirmwareLleRuntimeSession(
+            store,
+            imported.Manifest.ProfileId,
+            memory,
+            modules,
+            Aerolib.Empty);
+        var image = new SelfImage(
+            isSelf: false,
+            elfHeader: default,
+            programHeaders: [],
+            mappedRegions: [],
+            importStubs: new Dictionary<ulong, string> { [0x4000] = "LwG8g3niqwA" });
+        var importStubs = new Dictionary<ulong, string>(image.ImportStubs);
+        var runtimeSymbols = new Dictionary<string, ulong>(StringComparer.Ordinal);
+
+        var summary = await session.LoadMissingProvidersAsync(image, importStubs, runtimeSymbols);
+
+        Assert.Equal(3, summary.CandidateModules);
+        Assert.Equal(1, summary.LoadedModules);
+        Assert.Equal(1, summary.PublishedImports);
+        Assert.Equal(0, summary.AmbiguousImports);
+        Assert.Equal(0x0000_6800_0000_0180UL, runtimeSymbols["LwG8g3niqwA"]);
+    }
+
+    private static byte[] CreateProviderElf(
+        string exportSymbolName,
+        string providerModuleName = "libProvider")
     {
         var bytes = new byte[0x600];
         bytes[0] = 0x7f;
@@ -95,9 +146,9 @@ public sealed class FirmwareLleRuntimeSessionTests : IDisposable
 
         WriteDynamic(bytes, 0x200, 5, 0x1400);
         var libraryNameOffset = checked((uint)(exportSymbolName.Length + 2));
-        var moduleNameOffset = checked(libraryNameOffset + 12);
+        var moduleNameOffset = checked(libraryNameOffset + (uint)providerModuleName.Length + 1);
         var stringBytes = Encoding.ASCII.GetBytes(
-            $"\0{exportSymbolName}\0libProvider\0libProvider\0");
+            $"\0{exportSymbolName}\0{providerModuleName}\0{providerModuleName}\0");
         WriteDynamic(bytes, 0x210, 10, (ulong)stringBytes.Length);
         WriteDynamic(bytes, 0x220, 6, 0x1480);
         WriteDynamic(bytes, 0x230, 11, 24);

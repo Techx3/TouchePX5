@@ -89,7 +89,7 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
                 Console.Error.WriteLine($"[FIRMWARE-LLE][AUDIT] {sample}");
             }
             foreach (var candidate in discovery.AllCandidates.Where(candidate =>
-                         GetDiagnosticRank(candidate.Module.VirtualPath) < 5))
+                         IsCoreExportDiagnosticModule(candidate.Module.VirtualPath)))
             {
                 var exports = candidate.LinkPlan.ExportedSymbols
                     .Take(12)
@@ -390,7 +390,7 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
                     fileSystem,
                     cancellationToken).ConfigureAwait(false);
                 linkedModules++;
-                if (IsExportAuditEnabled() && GetDiagnosticRank(module.VirtualPath) < 5)
+                if (IsExportAuditEnabled() && IsCoreExportDiagnosticModule(module.VirtualPath))
                 {
                     Console.Error.WriteLine(
                         $"[FIRMWARE-LLE][AUDIT] planned-core={module.VirtualPath} " +
@@ -551,7 +551,7 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
             : null;
     }
 
-    private static (int State, int Dependencies, int Location) GetProviderRank(Candidate candidate) => (
+    private static (int State, int Dependencies, int Canonical, int Location) GetProviderRank(Candidate candidate) => (
         candidate.Module.State switch
         {
             FirmwareModuleState.LleCompatible => 0,
@@ -559,7 +559,19 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
             _ => 2,
         },
         candidate.Module.Dependencies.Count,
+        IsCanonicalProviderModule(candidate) ? 0 : 1,
         candidate.Module.VirtualPath.StartsWith("/system/common/lib/", StringComparison.Ordinal) ? 0 : 1);
+
+    private static bool IsCanonicalProviderModule(Candidate candidate)
+    {
+        var fileName = Path.GetFileNameWithoutExtension(candidate.Module.VirtualPath);
+        return candidate.LinkPlan.ExportedSymbols.Any(symbol =>
+            symbol.SonyIdentity is not null &&
+            string.Equals(
+                symbol.SonyIdentity.ModuleName,
+                fileName,
+                StringComparison.Ordinal));
+    }
 
     private static int GetDiagnosticRank(string virtualPath) => virtualPath switch
     {
@@ -572,6 +584,10 @@ internal sealed class FirmwareLleRuntimeSession : IDisposable
         _ when virtualPath.StartsWith("/system/common/lib/", StringComparison.Ordinal) => 6,
         _ => 7,
     };
+
+    private static bool IsCoreExportDiagnosticModule(string virtualPath) =>
+        GetDiagnosticRank(virtualPath) < 5 ||
+        virtualPath.Contains("libSceGnmDriver", StringComparison.Ordinal);
 
     private static bool IsExportAuditEnabled() =>
         string.Equals(
