@@ -10838,6 +10838,96 @@ public static partial class AgcExports
 
     private static readonly HashSet<ulong> _rtSeedTraced = new();
 
+    private const int DrawTraceDigestSamples = 256;
+    private const int DrawTraceMaxBindings = 8;
+    private const int DrawTraceMaxVertexAttributes = 8;
+
+    private static string FormatGlobalBinding(Gen5GlobalMemoryBinding binding)
+    {
+        var digest = 2166136261u;
+        var data = binding.Data;
+        var length = 0;
+        if (data is not null)
+        {
+            length = Math.Clamp(binding.DataLength, 0, data.Length);
+            var sampleCount = Math.Min(length, DrawTraceDigestSamples);
+            for (var sample = 0; sample < sampleCount; sample++)
+            {
+                var index = sampleCount == 1
+                    ? 0
+                    : (int)((long)sample * (length - 1) / (sampleCount - 1));
+                digest = (digest ^ (uint)index) * 16777619u;
+                digest = (digest ^ data[index]) * 16777619u;
+            }
+        }
+
+        digest = (digest ^ (uint)length) * 16777619u;
+
+        return $"s{binding.ScalarAddress}:0x{binding.BaseAddress:X}:{binding.DataLength}:{digest:X8}";
+    }
+
+    private static string FormatGlobalBindings(IReadOnlyList<Gen5GlobalMemoryBinding> bindings)
+    {
+        var formatted = string.Join(
+            '|',
+            bindings.Take(DrawTraceMaxBindings).Select(FormatGlobalBinding));
+        return bindings.Count > DrawTraceMaxBindings
+            ? $"{formatted}|+{bindings.Count - DrawTraceMaxBindings}"
+            : formatted;
+    }
+
+    /// <summary>
+    /// The first scalars a stage starts with, hex so a value can be read either
+    /// as an address/index or as a float without the trace picking for us.
+    /// </summary>
+    private static string FormatScalarWindow(IReadOnlyList<uint> scalars)
+    {
+        if (scalars.Count == 0)
+        {
+            return "-";
+        }
+
+        return string.Join(',', scalars.Take(12).Select(value => $"{value:X8}"));
+    }
+
+    /// <summary>
+    /// First and last vertex of one attribute stream, as two floats each.
+    /// Enough to compare what neighbouring quads request without dumping whole
+    /// vertex buffers into the trace.
+    /// </summary>
+    private static string SampleVertexAttribute(GuestVertexBuffer buffer)
+    {
+        var length = Math.Min(buffer.Length, buffer.Data.Length);
+        if (length < 8 || buffer.OffsetBytes > (uint)(length - 8))
+        {
+            return "-";
+        }
+
+        var stride = Math.Max(buffer.Stride, 4u);
+        var vertexTotal = (int)(((uint)length - buffer.OffsetBytes) / stride);
+        if (vertexTotal <= 0)
+        {
+            return "-";
+        }
+
+        var sampled = new List<string>(2);
+        foreach (var vertex in new[] { 0, vertexTotal - 1 })
+        {
+            var offset = (long)buffer.OffsetBytes + (long)vertex * stride;
+            if (vertex < 0 || offset < 0 || offset + 8 > length)
+            {
+                continue;
+            }
+
+            var byteOffset = (int)offset;
+            sampled.Add(
+                $"{BitConverter.ToSingle(buffer.Data, byteOffset):0.###}," +
+                $"{BitConverter.ToSingle(buffer.Data, byteOffset + 4):0.###}");
+        }
+
+        return sampled.Count == 0 ? "-" : string.Join(';', sampled);
+    }
+
     private static void TraceDrawCompact(
         ulong sequence,
         TranslatedGuestDraw draw,
@@ -10883,6 +10973,21 @@ public static partial class AgcExports
             positions = string.Join(';', sampled);
         }
 
+        // Every attribute, not just position: which vertex stream carries the
+        // texture coordinates depends on the shader's layout, and telling
+        // "these quads request the same atlas region" apart from "they request
+        // different ones" is exactly what identifies a repeated-content bug.
+        var attributes = string.Join(
+            '|',
+            vertexBuffers
+                .OrderBy(buffer => buffer.Location)
+                .Take(DrawTraceMaxVertexAttributes)
+                .Select(buffer => $"{buffer.Location}:{SampleVertexAttribute(buffer)}"));
+        if (vertexBuffers.Count > DrawTraceMaxVertexAttributes)
+        {
+            attributes += $"|+{vertexBuffers.Count - DrawTraceMaxVertexAttributes}";
+        }
+
         Console.Error.WriteLine(
             $"[DRAW] seq={sequence} es=0x{draw.ExportShaderAddress:X} ps=0x{draw.PixelShaderAddress:X} " +
             $"target=0x{target.Address:X}:{target.Width}x{target.Height}:f{target.Format}/n{target.NumberType} " +
@@ -10890,7 +10995,17 @@ public static partial class AgcExports
             $"blend={(blend.Enable ? 1 : 0)}:{blend.ColorSrcFactor}/{blend.ColorDstFactor}/{blend.ColorFunc}" +
             $":a{blend.AlphaSrcFactor}/{blend.AlphaDstFactor}/{blend.AlphaFunc}/s{(blend.SeparateAlphaBlend ? 1 : 0)} " +
             $"mask=0x{blend.WriteMask:X} viewport={viewport} textures={textureList} pos={positions} " +
+            $"attrs=[{attributes}] " +
             $"ps_s0..3={string.Join(',', draw.PixelUserData.Take(4).Select(value => BitConverter.UInt32BitsToSingle(value).ToString("0.###")))} " +
+            // What differentiates one glyph quad from the next is not in the
+            // vertex texcoord (every quad carries the same 0..1 corners), so
+            // the per-draw vertex scalars are the remaining candidate.
+            $"vs_s={FormatScalarWindow(draw.VertexInitialScalars)} " +
+            $"ps_s={FormatScalarWindow(draw.PixelInitialScalars)} " +
+            // Address AND a digest of the bytes: rows whose scalars carry
+            // different pointers must also end up reading different data, and
+            // only the digest shows whether they actually do.
+            $"bufs=[{FormatGlobalBindings(draw.GlobalMemoryBindings)}] " +
             $"rawblend=0x{draw.RawBlendControl:X8} info=0x{draw.RawColorInfo:X8}");
     }
 
