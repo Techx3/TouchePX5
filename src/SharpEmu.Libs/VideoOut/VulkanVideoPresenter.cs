@@ -438,12 +438,15 @@ internal static unsafe class VulkanVideoPresenter
             ? renderBudgetMs
             : OperatingSystem.IsMacOS() ? 12L : 0L) *
         System.Diagnostics.Stopwatch.Frequency / 1000L;
+    // Do not turn an empty producer queue into presentation latency. A positive
+    // diagnostic override may still coalesce bursty submissions, but waiting up
+    // to the follow-up budget on every drained frame prevents 60 Hz presentation.
     private static readonly int _guestWorkFollowupWaitMs =
         int.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_RENDER_FOLLOWUP_WAIT_MS"),
             out var followupWaitMs) && followupWaitMs >= 0
             ? followupWaitMs
-            : 2;
+            : 0;
     private static readonly long _guestWorkFollowupBudgetTicks =
         (long.TryParse(
              Environment.GetEnvironmentVariable("SHARPEMU_RENDER_FOLLOWUP_BUDGET_MS"),

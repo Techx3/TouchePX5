@@ -86,44 +86,6 @@ public static class Gen5ShaderScalarEvaluator
         return writer is not null && Ir.Gen5ScalarSsa.WritesVccImplicitly(writer);
     }
 
-    /// <summary>
-    /// A descriptor assembled from registers that differ per incoming path is not a
-    /// descriptor, it is whichever path the linear walk happened to take last.
-    /// </summary>
-    private static bool IsDescriptorFromDivergentMerge(
-        Gen5ShaderState state,
-        uint pc,
-        uint scalarBase,
-        uint registerCount)
-    {
-        if (!_divergentDescriptorGuard)
-        {
-            return false;
-        }
-
-        var ssa = GetScalarSsa(state);
-        if (!ssa.Graph.HasControlFlow)
-        {
-            return false;
-        }
-
-        for (var offset = 0u; offset < registerCount; offset++)
-        {
-            var reaching = ssa.GetReachingDefinitionAt(pc, scalarBase + offset);
-            if (reaching.State == Ir.IrReachingState.Multiple)
-            {
-                return true;
-            }
-
-            if (ssa.GetScalarAt(pc, scalarBase + offset).State == Ir.IrScalarState.Merged)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     private static void TraceDivergentDescriptor(
         Gen5ShaderState state,
         Gen5ShaderInstruction instruction,
@@ -2101,11 +2063,12 @@ public static class Gen5ShaderScalarEvaluator
         var address = unchecked(
             baseAddress +
             byteOffset) & ~3UL;
-        var descriptorDiverged = IsDescriptorFromDivergentMerge(
-            state,
-            instruction.Pc,
-            scalarBase.Value,
-            isBufferLoad ? 4u : 2u) ||
+        // Multiple reaching definitions are normal for descriptors selected by
+        // guest control flow.  Until the scalar evaluator models the selected
+        // path, the concrete register contents remain a better approximation
+        // than unbinding every resource that crosses a merge.  Only reject an
+        // offset whose writer is provably unmodelled (for example vector VCC).
+        var descriptorDiverged =
             IsOffsetFromUnmodelledWriter(state, instruction, control);
         if (descriptorDiverged)
         {
