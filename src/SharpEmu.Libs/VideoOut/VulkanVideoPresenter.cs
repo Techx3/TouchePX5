@@ -2380,6 +2380,44 @@ internal static unsafe class VulkanVideoPresenter
         return hash ^ byteCount;
     }
 
+    /// <summary>
+    /// Detects CPU-authored content without assuming that the first rows of a
+    /// guest image are populated. Some framebuffers intentionally keep their
+    /// leading scanlines black while later rows contain the composed scene.
+    /// </summary>
+    internal static bool HasSparseGuestImageContent(
+        SharpEmu.HLE.ICpuMemory memory,
+        ulong address,
+        ulong byteCount)
+    {
+        if (byteCount == 0)
+        {
+            return false;
+        }
+
+        const int sampleSize = 128;
+        const int sampleCount = 33;
+        Span<byte> sample = stackalloc byte[sampleSize];
+        var maxOffset = byteCount > sampleSize
+            ? byteCount - sampleSize
+            : 0UL;
+
+        for (var index = 0; index < sampleCount; index++)
+        {
+            var offset = sampleCount == 1
+                ? 0UL
+                : maxOffset * (ulong)index / (sampleCount - 1);
+            var length = (int)Math.Min((ulong)sampleSize, byteCount - offset);
+            if (memory.TryRead(address + offset, sample[..length]) &&
+                sample[..length].IndexOfAnyExcept((byte)0) >= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public static bool TrySubmitGuestImageBlit(
         ulong sourceAddress,
         uint sourceWidth,
@@ -9427,14 +9465,13 @@ internal static unsafe class VulkanVideoPresenter
 
                     // GPU-only RTs often get Dirty via page-overlap. A full
                     // plane read/upload per false dirty destroys Dead Cells FPS
-                    // and can stall GTA after intro. Probe 4 KiB first unless
-                    // the surface is already known CPU-backed.
+                    // and can stall GTA after intro. Probe 4 KiB distributed
+                    // across the image first unless the surface is already
+                    // known CPU-backed. A contiguous leading probe misses
+                    // framebuffers whose first scanlines are intentionally black.
                     if (!target.IsCpuBacked)
                     {
-                        var probeLen = (int)Math.Min(byteCount, 4096UL);
-                        var probe = new byte[probeLen];
-                        if (!memory.TryRead(address, probe) ||
-                            probe.AsSpan().IndexOfAnyExcept((byte)0) < 0)
+                        if (!HasSparseGuestImageContent(memory, address, byteCount))
                         {
                             continue;
                         }
