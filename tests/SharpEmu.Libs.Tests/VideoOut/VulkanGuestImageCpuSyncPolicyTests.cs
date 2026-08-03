@@ -167,4 +167,56 @@ public sealed class VulkanGuestImageCpuSyncPolicyTests
                 hasUploadedGeneration: true,
                 uploadedGeneration: 4));
     }
+
+    [Fact]
+    public void SparseProbeFindsContentPastBlackLeadingRows()
+    {
+        const ulong baseAddress = 0x100000;
+        const int imageBytes = 512 * 384 * 4;
+        var memory = new FakeCpuMemory(baseAddress, imageBytes);
+
+        // The former contiguous 4 KiB probe saw only black and incorrectly
+        // classified this CPU-composed framebuffer as GPU-only.
+        Assert.True(memory.TryWrite(
+            baseAddress + imageBytes / 2,
+            new byte[] { 0x73, 0x5A, 0x00, 0xFF }));
+
+        Assert.True(
+            VulkanVideoPresenter.HasSparseGuestImageContent(
+                memory,
+                baseAddress,
+                imageBytes));
+    }
+
+    [Fact]
+    public void SparseProbeRejectsAnEmptyGpuFeedbackSurface()
+    {
+        const ulong baseAddress = 0x200000;
+        const int imageBytes = 512 * 384 * 4;
+        var memory = new FakeCpuMemory(baseAddress, imageBytes);
+
+        Assert.False(
+            VulkanVideoPresenter.HasSparseGuestImageContent(
+                memory,
+                baseAddress,
+                imageBytes));
+    }
+
+    [Fact]
+    public void SparseProbeFindsContentAtFinalTexel()
+    {
+        const ulong baseAddress = 0x300000;
+        const int imageBytes = 512 * 384 * 4;
+        var memory = new FakeCpuMemory(baseAddress, imageBytes);
+
+        Assert.True(memory.TryWrite(
+            baseAddress + imageBytes - 1,
+            new byte[] { 0xFF }));
+
+        Assert.True(
+            VulkanVideoPresenter.HasSparseGuestImageContent(
+                memory,
+                baseAddress,
+                imageBytes));
+    }
 }
