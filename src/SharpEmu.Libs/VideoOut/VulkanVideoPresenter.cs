@@ -3667,6 +3667,20 @@ internal static unsafe class VulkanVideoPresenter
          state.StencilTestEnable ||
          state.StencilClearEnable);
 
+    internal static bool ShouldDropStaleAliasedDepth(
+        bool selfAlias,
+        bool writtenAsColorThisFrame,
+        bool writtenAsColorPreviousFrame,
+        bool hasInitializedColorImage,
+        bool hasColorRenderPass,
+        bool extentMatches) =>
+        !selfAlias &&
+        !writtenAsColorThisFrame &&
+        !writtenAsColorPreviousFrame &&
+        hasInitializedColorImage &&
+        hasColorRenderPass &&
+        extentMatches;
+
     internal static void ConvertBgraToYuv420(
         ReadOnlySpan<byte> bgra,
         int width,
@@ -13157,16 +13171,16 @@ internal static unsafe class VulkanVideoPresenter
             // this frame is a live role change, but one that holds rendered
             // color and has not been written as color for a frame is a
             // leftover the DB_Z_* registers are still naming.
-            var staleAsColor = !_colorTargetsSinceFlip.Contains(address) &&
-                !_colorTargetsPreviousFrame.Contains(address);
             var hasColor = _guestImages.TryGetValue(address, out var colorImage);
-            var matches = !selfAlias &&
-                staleAsColor &&
+            var matches = ShouldDropStaleAliasedDepth(
+                selfAlias,
+                _colorTargetsSinceFlip.Contains(address),
+                _colorTargetsPreviousFrame.Contains(address),
+                hasColor && colorImage!.Initialized,
+                hasColor && colorImage!.RenderPass.Handle != 0,
                 hasColor &&
-                colorImage!.RenderPass.Handle != 0 &&
-                colorImage.Initialized &&
-                colorImage.LogicalWidth == depthTarget.Width &&
-                colorImage.LogicalHeight == depthTarget.Height;
+                    colorImage!.LogicalWidth == depthTarget.Width &&
+                    colorImage.LogicalHeight == depthTarget.Height);
 
             if (matches &&
                 _tracedStaleAliasedDepth.Add((address, depthTarget.Width, depthTarget.Height)))
@@ -18412,8 +18426,13 @@ internal static unsafe class VulkanVideoPresenter
             Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_DISABLE_CULL") == "1";
         private static readonly bool _forceTitleDisableDepth =
             Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TITLE_DISABLE_DEPTH") == "1";
+        // The predicate is deliberately narrow (an initialized color image,
+        // matching extent, different from this draw's color targets, and no
+        // recent color writes), so stale DB_Z_* aliases are safe to reject by
+        // default. Keep an escape hatch for titles that rely on unusual
+        // color/depth memory reuse.
         private static readonly bool _dropStaleAliasedDepth =
-            Environment.GetEnvironmentVariable("SHARPEMU_DROP_STALE_ALIASED_DEPTH") == "1";
+            Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_STALE_ALIASED_DEPTH") != "1";
         private static readonly bool _forceAliasedSurfaceDisableDepth =
             Environment.GetEnvironmentVariable("SHARPEMU_FORCE_ALIASED_SURFACE_DISABLE_DEPTH") == "1";
         private static readonly bool _forceAliasedDepthClearOne =

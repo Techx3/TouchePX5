@@ -136,4 +136,40 @@ public sealed class VulkanDepthAttachmentTests
 
         Assert.True(VulkanVideoPresenter.ShouldAttachGuestDepth(Target, state));
     }
+
+    [Fact]
+    public void StaleColorAlias_DropsDepthOnlyForAConfirmedStaleSurface()
+    {
+        Assert.True(VulkanVideoPresenter.ShouldDropStaleAliasedDepth(
+            selfAlias: false,
+            writtenAsColorThisFrame: false,
+            writtenAsColorPreviousFrame: false,
+            hasInitializedColorImage: true,
+            hasColorRenderPass: true,
+            extentMatches: true));
+    }
+
+    [Theory]
+    [InlineData(true, false, false, true, true, true)]
+    [InlineData(false, true, false, true, true, true)]
+    [InlineData(false, false, true, true, true, true)]
+    [InlineData(false, false, false, false, true, true)]
+    [InlineData(false, false, false, true, false, true)]
+    [InlineData(false, false, false, true, true, false)]
+    public void StaleColorAlias_PreservesLegitimateDepth(
+        bool selfAlias,
+        bool writtenThisFrame,
+        bool writtenPreviousFrame,
+        bool hasInitializedColor,
+        bool hasRenderPass,
+        bool extentMatches)
+    {
+        Assert.False(VulkanVideoPresenter.ShouldDropStaleAliasedDepth(
+            selfAlias,
+            writtenThisFrame,
+            writtenPreviousFrame,
+            hasInitializedColor,
+            hasRenderPass,
+            extentMatches));
+    }
 }

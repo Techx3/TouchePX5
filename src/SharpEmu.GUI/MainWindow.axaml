@@ -524,8 +524,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvDropStaleAliasedDepthRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_DROP_STALE_ALIASED_DEPTH"
-                                        Description="Ignore a depth buffer whose address is really a leftover color surface.&#10;Fixes titles that render a black gameplay screen (Castlevania Dominus Collection).">
+                      <local:SettingRow x:Name="EnvDropStaleAliasedDepthRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_DISABLE_STALE_ALIASED_DEPTH"
+                                        Description="Compatibility: keep a depth buffer even when its address is a stale color surface.&#10;Only use if automatic stale-depth detection breaks a title.">
                         <ToggleSwitch x:Name="EnvDropStaleAliasedDepthToggle" OnContent="On" OffContent="Off"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>

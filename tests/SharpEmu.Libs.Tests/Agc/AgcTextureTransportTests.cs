@@ -9,6 +9,34 @@ namespace SharpEmu.Libs.Tests.Agc;
 
 public sealed class AgcTextureTransportTests
 {
+    [Fact]
+    public void SingleChannelAltReverse_RoutesAlphaIntoTheStoredChannel()
+    {
+        Assert.Equal(
+            0xE7,
+            AgcExports.GetSingleChannelRenderTargetComponentMapping(
+                format: 1,
+                compSwap: 3,
+                enabled: true));
+    }
+
+    [Theory]
+    [InlineData(2u, 3u, true)]
+    [InlineData(1u, 1u, true)]
+    [InlineData(1u, 3u, false)]
+    public void SingleChannelCompSwap_PreservesIdentityOutsideMeasuredCase(
+        uint format,
+        uint compSwap,
+        bool enabled)
+    {
+        Assert.Equal(
+            0xE4,
+            AgcExports.GetSingleChannelRenderTargetComponentMapping(
+                format,
+                compSwap,
+                enabled));
+    }
+
     [Theory]
     [InlineData(10u, 4u, 4u)]
     [InlineData(10u, 0u, 1u)]
