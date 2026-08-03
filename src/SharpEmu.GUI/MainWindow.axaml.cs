@@ -252,7 +252,7 @@ public partial class MainWindow : Window
             SetEnvironmentToggle("TOUCHEPX5_DUMP_SPIRV", EnvDumpSpirvToggle.IsChecked == true);
         EnvDropStaleAliasedDepthToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle(
-                "TOUCHEPX5_DROP_STALE_ALIASED_DEPTH",
+                "TOUCHEPX5_DISABLE_STALE_ALIASED_DEPTH",
                 EnvDropStaleAliasedDepthToggle.IsChecked == true);
         EnvDisableRtCompSwapToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle(
@@ -940,7 +940,7 @@ public partial class MainWindow : Window
         EnvVkValidationToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_VK_VALIDATION");
         EnvDumpSpirvToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_DUMP_SPIRV");
         EnvDropStaleAliasedDepthToggle.IsChecked =
-            _settings.EnvironmentToggles.Contains("TOUCHEPX5_DROP_STALE_ALIASED_DEPTH");
+            _settings.EnvironmentToggles.Contains("TOUCHEPX5_DISABLE_STALE_ALIASED_DEPTH");
         EnvDisableRtCompSwapToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("TOUCHEPX5_DISABLE_RT_COMP_SWAP");
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_DIRECT_MEMORY");

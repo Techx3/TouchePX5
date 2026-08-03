@@ -523,10 +523,19 @@ public static partial class AgcExports
     // else stays identity rather than inventing semantics for combinations no
     // title has exercised here -- a wrong guess would corrupt working games.
     private static byte GetRenderTargetComponentMapping(RenderTargetDescriptor target)
+        => GetSingleChannelRenderTargetComponentMapping(
+            target.Format,
+            target.CompSwap,
+            _honorSingleChannelCompSwap);
+
+    internal static byte GetSingleChannelRenderTargetComponentMapping(
+        uint format,
+        uint compSwap,
+        bool enabled)
     {
-        if (!_honorSingleChannelCompSwap ||
-            target.CompSwap != CompSwapAltReversed ||
-            !IsSingleChannelRenderTargetFormat(target.Format))
+        if (!enabled ||
+            compSwap != CompSwapAltReversed ||
+            !IsSingleChannelRenderTargetFormat(format))
         {
             return Gen5ComponentMapping.Identity;
         }
@@ -545,6 +554,9 @@ public static partial class AgcExports
     private static bool IsSingleChannelRenderTargetFormat(uint format) =>
         format is 1;
 
+    // The mapping above is limited to the measured 8-bit, one-channel,
+    // SWAP_ALT_REV combination. Keep it opt-in: A/B testing confirmed that
+    // applying it globally darkens unrelated 512x384 targets in Castlevania.
     private static readonly bool _honorSingleChannelCompSwap =
         Environment.GetEnvironmentVariable("SHARPEMU_HONOR_SINGLE_CHANNEL_COMP_SWAP") == "1";
 
