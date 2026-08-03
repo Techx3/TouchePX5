@@ -46,6 +46,7 @@ public static unsafe class GuestImageWriteTracker
         public long FirstCpuWriteTimestampNanoseconds;
         public ulong FirstCpuWriteAddress;
         public ulong FirstCpuWritePage;
+        public ulong FirstCpuWriteInstruction;
         public string Source = "unspecified";
     }
 
@@ -481,7 +482,7 @@ public static unsafe class GuestImageWriteTracker
     /// range, restore write access, mark the range dirty, and return true so
     /// the faulting write can be retried. Must not allocate or lock.
     /// </summary>
-    public static bool TryHandleWriteFault(ulong faultAddress)
+    public static bool TryHandleWriteFault(ulong faultAddress, ulong instructionAddress = 0)
     {
         if (!_enabled || faultAddress == 0)
         {
@@ -583,6 +584,7 @@ public static unsafe class GuestImageWriteTracker
                 range.FirstCpuWriteTimestampNanoseconds = GetMonotonicNanoseconds();
                 range.FirstCpuWriteAddress = faultAddress;
                 range.FirstCpuWritePage = faultAddress & ~0xFFFUL;
+                range.FirstCpuWriteInstruction = instructionAddress;
                 Volatile.Write(ref range.PendingFirstCpuWrite, 1);
                 Volatile.Write(ref range.FirstCpuWriteSeen, 2);
             }
@@ -751,6 +753,7 @@ public static unsafe class GuestImageWriteTracker
             "first-cpu-write-disarm",
             range.FirstCpuWriteAddress,
             range.FirstCpuWritePage,
+            range.FirstCpuWriteInstruction,
             range.FirstCpuWriteTraceSequence,
             range.FirstCpuWriteTimestampNanoseconds);
     }
@@ -760,6 +763,7 @@ public static unsafe class GuestImageWriteTracker
         string operation,
         ulong faultAddress = 0,
         ulong faultPage = 0,
+        ulong instructionAddress = 0,
         long traceSequence = 0,
         long timestampNanoseconds = 0)
     {
@@ -780,7 +784,8 @@ public static unsafe class GuestImageWriteTracker
             $"event={operation} source_seq={range.SourceSequence} source='{range.Source}' " +
             $"requested=0x{range.Address:X16}+0x{range.ByteCount:X} " +
             $"range=0x{range.Start:X16}..0x{range.End:X16} " +
-            $"fault=0x{faultAddress:X16} page=0x{faultPage:X16}");
+            $"fault=0x{faultAddress:X16} page=0x{faultPage:X16} " +
+            $"rip=0x{instructionAddress:X16}");
     }
 
     private static bool TrySetProtection(ulong start, ulong length, bool writable)
