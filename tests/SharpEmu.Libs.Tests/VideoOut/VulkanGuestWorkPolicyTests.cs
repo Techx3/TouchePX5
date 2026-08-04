@@ -98,4 +98,66 @@ public sealed class VulkanGuestWorkPolicyTests
         Assert.True(accepted);
         Assert.Equal(1, publicationCount);
     }
+
+    [Fact]
+    public void OrderedVisibilityRemainsNonBlockingWithoutBacklog()
+    {
+        var waitNs = VulkanVideoPresenter.ResolveOrderedVisibilityWaitNs(
+            isMacOS: false,
+            hasExplicitOverride: false,
+            explicitWaitNs: 0,
+            pendingPayloadWorkCount: 127,
+            pendingTotalWorkCount: 127,
+            maximumPendingPayloadWorkCount: 512);
+
+        Assert.Equal(0UL, waitNs);
+    }
+
+    [Theory]
+    [InlineData(256, 256)]
+    [InlineData(128, 256)]
+    public void OrderedVisibilityUsesBoundedWaitUnderSustainedBacklog(
+        int pendingPayloadWorkCount,
+        int pendingTotalWorkCount)
+    {
+        var waitNs = VulkanVideoPresenter.ResolveOrderedVisibilityWaitNs(
+            isMacOS: false,
+            hasExplicitOverride: false,
+            explicitWaitNs: 0,
+            pendingPayloadWorkCount,
+            pendingTotalWorkCount,
+            maximumPendingPayloadWorkCount: 512);
+
+        Assert.Equal(2_000_000UL, waitNs);
+    }
+
+    [Theory]
+    [InlineData(0UL)]
+    [InlineData(7_000_000UL)]
+    public void OrderedVisibilityHonorsExplicitOverride(ulong explicitWaitNs)
+    {
+        var waitNs = VulkanVideoPresenter.ResolveOrderedVisibilityWaitNs(
+            isMacOS: false,
+            hasExplicitOverride: true,
+            explicitWaitNs,
+            pendingPayloadWorkCount: 512,
+            pendingTotalWorkCount: 1024,
+            maximumPendingPayloadWorkCount: 512);
+
+        Assert.Equal(explicitWaitNs, waitNs);
+    }
+
+    [Fact]
+    public void OrderedVisibilityNeverBlocksMacOSMainThread()
+    {
+        var waitNs = VulkanVideoPresenter.ResolveOrderedVisibilityWaitNs(
+            isMacOS: true,
+            hasExplicitOverride: true,
+            explicitWaitNs: 7_000_000,
+            pendingPayloadWorkCount: 512,
+            pendingTotalWorkCount: 1024,
+            maximumPendingPayloadWorkCount: 512);
+
+        Assert.Equal(0UL, waitNs);
+    }
 }
