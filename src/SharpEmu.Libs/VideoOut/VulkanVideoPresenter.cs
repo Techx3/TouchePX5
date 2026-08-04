@@ -84,25 +84,18 @@ internal sealed record VulkanComputeGuestDispatch(
     uint ThreadCountY = uint.MaxValue,
     uint ThreadCountZ = uint.MaxValue);
 
-internal enum VulkanGuestWriteBackMode
-{
-    AllDirty,
-    Selective,
-    None,
-}
-
 internal sealed record VulkanOrderedGuestAction(
     Action Action,
     string DebugName,
     ulong WriteBackAddress = 0,
     ulong WriteBackLength = 0,
-    VulkanGuestWriteBackMode WriteBackMode = VulkanGuestWriteBackMode.AllDirty)
+    GuestGpuWriteBackMode WriteBackMode = GuestGpuWriteBackMode.AllDirty)
 {
     public bool RequiresGuestBufferWriteBack =>
-        WriteBackMode != VulkanGuestWriteBackMode.None;
+        WriteBackMode != GuestGpuWriteBackMode.None;
 
     public bool HasSelectiveGuestBufferWriteBack =>
-        WriteBackMode == VulkanGuestWriteBackMode.Selective &&
+        WriteBackMode == GuestGpuWriteBackMode.Selective &&
         WriteBackAddress != 0 &&
         WriteBackLength != 0;
 }
@@ -1355,26 +1348,10 @@ internal static unsafe class VulkanVideoPresenter
                     depthTarget,
                     PublishTarget: true,
                     shaderAddress));
-            if (workSequence <= 0)
-            {
-                return false;
-            }
-
-            // Publication is the commit point: consumers must never observe
-            // a target whose producing work was rejected by back-pressure or
-            // presenter shutdown.
-            foreach (var target in targets)
-            {
-                var guestTextureFormat = GetGuestTextureFormat(
-                    target.Format,
-                    target.NumberType);
-                if (guestTextureFormat != 0)
-                {
-                    _availableGuestImages[target.Address] = guestTextureFormat;
-                }
-            }
-
-            return true;
+            return TryCommitGuestWorkPublication(
+                workSequence,
+                targets,
+                static publishTargets => PublishGuestImages(publishTargets));
         }
     }
 
@@ -1535,20 +1512,38 @@ internal static unsafe class VulkanVideoPresenter
                     blue,
                     alpha,
                     shaderAddress));
-            if (workSequence <= 0)
-            {
-                return;
-            }
+            _ = TryCommitGuestWorkPublication(
+                workSequence,
+                targets,
+                static publishTargets => PublishGuestImages(publishTargets));
+        }
+    }
 
-            foreach (var target in targets)
+    internal static bool TryCommitGuestWorkPublication<TState>(
+        long workSequence,
+        TState state,
+        Action<TState> publish)
+    {
+        ArgumentNullException.ThrowIfNull(publish);
+        if (workSequence <= 0)
+        {
+            return false;
+        }
+
+        publish(state);
+        return true;
+    }
+
+    private static void PublishGuestImages(IReadOnlyList<GuestRenderTarget> targets)
+    {
+        foreach (var target in targets)
+        {
+            var guestTextureFormat = GetGuestTextureFormat(
+                target.Format,
+                target.NumberType);
+            if (guestTextureFormat != 0)
             {
-                var guestTextureFormat = GetGuestTextureFormat(
-                    target.Format,
-                    target.NumberType);
-                if (guestTextureFormat != 0)
-                {
-                    _availableGuestImages[target.Address] = guestTextureFormat;
-                }
+                _availableGuestImages[target.Address] = guestTextureFormat;
             }
         }
     }
@@ -1737,7 +1732,10 @@ internal static unsafe class VulkanVideoPresenter
     /// before it. The render thread flushes its open batch and waits for the
     /// corresponding guest fences before invoking the action.
     /// </summary>
-    public static long SubmitOrderedGuestAction(Action action, string debugName)
+    public static long SubmitOrderedGuestAction(
+        Action action,
+        string debugName,
+        GuestGpuWriteBackMode writeBackMode)
     {
         ArgumentNullException.ThrowIfNull(action);
         lock (_gate)
@@ -1748,18 +1746,9 @@ internal static unsafe class VulkanVideoPresenter
                     new VulkanOrderedGuestAction(
                         action,
                         debugName,
-                        WriteBackMode: GetOrderedActionWriteBackMode(debugName)));
+                        WriteBackMode: writeBackMode));
         }
     }
-
-    private static VulkanGuestWriteBackMode GetOrderedActionWriteBackMode(
-        string debugName) =>
-        // Preserve the legacy AGC API boundary while carrying the decision as
-        // explicit work metadata from this point forward. ACQUIRE_MEM only
-        // invalidates guest GPU caches; it does not expose GPU writes to CPU.
-        debugName.StartsWith("acquire_mem_flush ", StringComparison.Ordinal)
-            ? VulkanGuestWriteBackMode.None
-            : VulkanGuestWriteBackMode.AllDirty;
 
     public static long SubmitOrderedGuestBufferReadback(
         ulong address,
@@ -1781,7 +1770,7 @@ internal static unsafe class VulkanVideoPresenter
                         debugName,
                         address,
                         byteCount,
-                        VulkanGuestWriteBackMode.Selective));
+                        GuestGpuWriteBackMode.Selective));
         }
     }
 
@@ -2107,6 +2096,16 @@ internal static unsafe class VulkanVideoPresenter
         isCpuBacked ||
         (textureWriteGeneration > 0 &&
             (!hasUploadedGeneration || uploadedGeneration != textureWriteGeneration));
+
+    /// <summary>
+    /// Sparse content probing is only a fallback for untracked GPU feedback
+    /// surfaces. A confirmed guest CPU write is authoritative even when every
+    /// uploaded byte is zero (for example, a legitimate clear).
+    /// </summary>
+    internal static bool ShouldProbeGuestImageContent(
+        bool isCpuBacked,
+        bool hasTrackedCpuWrite) =>
+        !isCpuBacked && !hasTrackedCpuWrite;
 
     // Maps a UNORM swapchain format to the sRGB view of the same bit layout,
     // or Undefined when no counterpart exists. Used to encode linear-float
@@ -3322,12 +3321,16 @@ internal static unsafe class VulkanVideoPresenter
         return sequences;
     }
 
-    private static bool AreGuestWorkDependenciesCompletedLocked(
-        IReadOnlyList<long> sequences)
+    internal static bool AreGuestWorkDependenciesSatisfied(
+        IReadOnlyList<long> sequences,
+        long completedThrough,
+        IReadOnlySet<long> completedOutOfOrder)
     {
         foreach (var sequence in sequences)
         {
-            if (!IsGuestWorkCompletedLocked(sequence))
+            if (sequence > 0 &&
+                sequence > completedThrough &&
+                !completedOutOfOrder.Contains(sequence))
             {
                 return false;
             }
@@ -3335,6 +3338,13 @@ internal static unsafe class VulkanVideoPresenter
 
         return true;
     }
+
+    private static bool AreGuestWorkDependenciesCompletedLocked(
+        IReadOnlyList<long> sequences) =>
+        AreGuestWorkDependenciesSatisfied(
+            sequences,
+            _completedGuestWorkSequence,
+            _completedGuestWorkOutOfOrder);
 
     private static void RecordGuestImageWritersLocked(object work, long sequence)
     {
@@ -9622,7 +9632,9 @@ internal static unsafe class VulkanVideoPresenter
                     var hasTrackedCpuWrite =
                         hasWriteGeneration &&
                         currentWriteGeneration > uploadedWriteGeneration;
-                    if (!target.IsCpuBacked && !hasTrackedCpuWrite)
+                    if (ShouldProbeGuestImageContent(
+                            target.IsCpuBacked,
+                            hasTrackedCpuWrite))
                     {
                         if (!HasSparseGuestImageContent(memory, address, byteCount))
                         {

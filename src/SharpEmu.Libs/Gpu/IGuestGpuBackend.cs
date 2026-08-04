@@ -7,6 +7,17 @@ using SharpEmu.ShaderCompiler;
 namespace SharpEmu.Libs.Gpu;
 
 /// <summary>
+/// Controls whether an ordered guest action must expose earlier GPU buffer
+/// writes to guest CPU memory before the action executes.
+/// </summary>
+internal enum GuestGpuWriteBackMode
+{
+    AllDirty,
+    Selective,
+    None,
+}
+
+/// <summary>
 /// The guest-GPU backend seam: everything the AGC/VideoOut export layers need from a
 /// host renderer, expressed in guest-domain terms so Vulkan, Metal, and DX12 backends
 /// can each translate to their native API. Two rules keep it that way: no host-API
@@ -207,7 +218,10 @@ internal interface IGuestGpuBackend
 
     /// <summary>Enqueues an action at its exact position in the current guest queue;
     /// returns its work sequence, or 0 when nothing could be enqueued.</summary>
-    long SubmitOrderedGuestAction(Action action, string debugName);
+    long SubmitOrderedGuestAction(
+        Action action,
+        string debugName,
+        GuestGpuWriteBackMode writeBackMode = GuestGpuWriteBackMode.AllDirty);
 
     /// <summary>Publishes GPU writes overlapping a guest buffer range before
     /// later CPU-side command decoding reads it.</summary>

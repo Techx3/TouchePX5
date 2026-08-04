@@ -4890,7 +4890,10 @@ public static partial class AgcExports
             }
         }
 
-        var sequence = GuestGpu.Current.SubmitOrderedGuestAction(ApplyAcquire, debugName);
+        var sequence = GuestGpu.Current.SubmitOrderedGuestAction(
+            ApplyAcquire,
+            debugName,
+            GuestGpuWriteBackMode.None);
         if (sequence == 0)
         {
             ApplyAcquire();

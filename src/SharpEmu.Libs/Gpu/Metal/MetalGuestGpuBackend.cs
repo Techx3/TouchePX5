@@ -374,14 +374,23 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public IDisposable EnterGuestQueue(string queueName, ulong submissionId) =>
         MetalVideoPresenter.EnterGuestQueue(queueName, submissionId);
 
-    public long SubmitOrderedGuestAction(Action action, string debugName) =>
-        MetalVideoPresenter.SubmitOrderedGuestAction(action, debugName);
+    public long SubmitOrderedGuestAction(
+        Action action,
+        string debugName,
+        GuestGpuWriteBackMode writeBackMode = GuestGpuWriteBackMode.AllDirty) =>
+        MetalVideoPresenter.SubmitOrderedGuestAction(
+            action,
+            debugName,
+            writeBackMode);
 
     public long SubmitOrderedGuestBufferReadback(
         ulong address,
         ulong byteCount,
         string debugName) =>
-        MetalVideoPresenter.SubmitOrderedGuestAction(static () => { }, debugName);
+        MetalVideoPresenter.SubmitOrderedGuestAction(
+            static () => { },
+            debugName,
+            GuestGpuWriteBackMode.Selective);
 
     public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) =>
         MetalVideoPresenter.SubmitOrderedGuestFlipWait(videoOutHandle, displayBufferIndex);
