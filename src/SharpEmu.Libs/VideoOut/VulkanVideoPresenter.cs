@@ -475,13 +475,18 @@ internal static unsafe class VulkanVideoPresenter
             ? fenceMs * 1_000_000UL
             : 3_000_000_000UL;
     // Ordered PM4 actions split draw batches at guest-visible synchronization
-    // points. Poll fences by default and defer an unfinished logical queue;
-    // even a short wait here is paid once per marker and can accumulate into
-    // thousands of render-thread stalls. A non-zero override remains useful
-    // for targeted diagnostics.
+    // points. Keep the normal path non-blocking, but under sustained producer
+    // backlog allow a short bounded wait. Otherwise one unfinished marker can
+    // defer the only logical guest queue until the next host frame, limiting a
+    // frame containing several markers to a fraction of the display rate.
+    private const ulong AdaptiveOrderedVisibilityWaitNs = 2_000_000UL;
+    private static readonly string? _orderedVisibilityWaitOverride =
+        Environment.GetEnvironmentVariable("SHARPEMU_ORDERED_VISIBILITY_WAIT_MS");
+    private static readonly bool _orderedVisibilityWaitOverridden =
+        ulong.TryParse(_orderedVisibilityWaitOverride, out _);
     private static readonly ulong _orderedVisibilityProbeNs =
         ulong.TryParse(
-            Environment.GetEnvironmentVariable("SHARPEMU_ORDERED_VISIBILITY_WAIT_MS"),
+            _orderedVisibilityWaitOverride,
             out var orderedVisibilityWaitMs)
             ? orderedVisibilityWaitMs * 1_000_000UL
             : 0UL;
@@ -3345,6 +3350,31 @@ internal static unsafe class VulkanVideoPresenter
             sequences,
             _completedGuestWorkSequence,
             _completedGuestWorkOutOfOrder);
+
+    internal static ulong ResolveOrderedVisibilityWaitNs(
+        bool isMacOS,
+        bool hasExplicitOverride,
+        ulong explicitWaitNs,
+        int pendingPayloadWorkCount,
+        int pendingTotalWorkCount,
+        int maximumPendingPayloadWorkCount)
+    {
+        if (isMacOS)
+        {
+            return 0;
+        }
+
+        if (hasExplicitOverride)
+        {
+            return explicitWaitNs;
+        }
+
+        var elevatedBacklogThreshold = Math.Max(1, maximumPendingPayloadWorkCount / 2);
+        return pendingPayloadWorkCount >= elevatedBacklogThreshold ||
+               pendingTotalWorkCount >= elevatedBacklogThreshold
+            ? AdaptiveOrderedVisibilityWaitNs
+            : 0;
+    }
 
     private static void RecordGuestImageWritersLocked(object work, long sequence)
     {
@@ -6702,16 +6732,14 @@ internal static unsafe class VulkanVideoPresenter
             var status = _vk.GetFenceStatus(_device, fence);
             if (status == Result.NotReady)
             {
-                // Keep normal rendering non-blocking. The ordered item remains
-                // at the head of its logical queue and is retried after its
-                // predecessor fence signals. Other logical queues may continue
-                // filling the existing in-flight command-buffer ring.
-                if (OperatingSystem.IsMacOS())
-                {
-                    return false;
-                }
-
-                if (_orderedVisibilityProbeNs == 0)
+                var visibilityWaitNs = ResolveOrderedVisibilityWaitNs(
+                    OperatingSystem.IsMacOS(),
+                    _orderedVisibilityWaitOverridden,
+                    _orderedVisibilityProbeNs,
+                    Volatile.Read(ref _pendingPayloadGuestWorkCount),
+                    Volatile.Read(ref _pendingGuestWorkCount),
+                    _maxPendingGuestWorkItems);
+                if (visibilityWaitNs == 0)
                 {
                     return false;
                 }
@@ -6721,7 +6749,7 @@ internal static unsafe class VulkanVideoPresenter
                     1,
                     &fence,
                     true,
-                    _orderedVisibilityProbeNs);
+                    visibilityWaitNs);
                 if (waitResult == Result.Timeout)
                 {
                     return false;
