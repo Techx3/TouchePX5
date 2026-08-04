@@ -33,7 +33,10 @@ internal static partial class MetalVideoPresenter
         long Sequence,
         GuestQueueIdentity Queue);
 
-    private sealed record OrderedGuestAction(Action Action, string DebugName);
+    private sealed record OrderedGuestAction(
+        Action Action,
+        string DebugName,
+        GuestGpuWriteBackMode WriteBackMode);
 
     private sealed record GuestImageWrite(ulong Address, byte[]? Pixels, uint FillValue);
 
@@ -179,14 +182,18 @@ internal static partial class MetalVideoPresenter
         Volatile.Write(ref _cpuWrittenGuestImageSyncRequested, 1);
     }
 
-    public static long SubmitOrderedGuestAction(Action action, string debugName)
+    public static long SubmitOrderedGuestAction(
+        Action action,
+        string debugName,
+        GuestGpuWriteBackMode writeBackMode)
     {
         ArgumentNullException.ThrowIfNull(action);
         lock (_gate)
         {
             return _closed || _thread is null
                 ? 0
-                : EnqueueGuestWorkLocked(new OrderedGuestAction(action, debugName));
+                : EnqueueGuestWorkLocked(
+                    new OrderedGuestAction(action, debugName, writeBackMode));
         }
     }
 

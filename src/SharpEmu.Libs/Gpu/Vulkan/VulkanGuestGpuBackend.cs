@@ -354,8 +354,14 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     public IDisposable EnterGuestQueue(string queueName, ulong submissionId) =>
         VulkanVideoPresenter.EnterGuestQueue(queueName, submissionId);
 
-    public long SubmitOrderedGuestAction(Action action, string debugName) =>
-        VulkanVideoPresenter.SubmitOrderedGuestAction(action, debugName);
+    public long SubmitOrderedGuestAction(
+        Action action,
+        string debugName,
+        GuestGpuWriteBackMode writeBackMode = GuestGpuWriteBackMode.AllDirty) =>
+        VulkanVideoPresenter.SubmitOrderedGuestAction(
+            action,
+            debugName,
+            writeBackMode);
 
     public long SubmitOrderedGuestBufferReadback(
         ulong address,

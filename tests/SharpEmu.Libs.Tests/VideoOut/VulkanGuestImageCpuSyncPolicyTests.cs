@@ -169,6 +169,33 @@ public sealed class VulkanGuestImageCpuSyncPolicyTests
     }
 
     [Fact]
+    public void ConfirmedCpuWriteSkipsContentProbeEvenWhenUploadIsAllZero()
+    {
+        Assert.False(
+            VulkanVideoPresenter.ShouldProbeGuestImageContent(
+                isCpuBacked: false,
+                hasTrackedCpuWrite: true));
+    }
+
+    [Fact]
+    public void UntrackedGpuFeedbackSurfaceStillRequiresContentProbe()
+    {
+        Assert.True(
+            VulkanVideoPresenter.ShouldProbeGuestImageContent(
+                isCpuBacked: false,
+                hasTrackedCpuWrite: false));
+    }
+
+    [Fact]
+    public void KnownCpuBackedSurfaceDoesNotRequireContentProbe()
+    {
+        Assert.False(
+            VulkanVideoPresenter.ShouldProbeGuestImageContent(
+                isCpuBacked: true,
+                hasTrackedCpuWrite: false));
+    }
+
+    [Fact]
     public void SparseProbeFindsContentPastBlackLeadingRows()
     {
         const ulong baseAddress = 0x100000;
