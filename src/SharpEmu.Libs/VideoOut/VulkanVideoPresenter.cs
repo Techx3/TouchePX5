@@ -1341,6 +1341,15 @@ internal static unsafe class VulkanVideoPresenter
                 $"{firstTarget.Width}x{firstTarget.Height} textures={textures.Count}");
         }
 
+        GuestDrawCapture.CaptureIfRequested(
+            pixelSpirv,
+            textures,
+            targets,
+            shaderAddress,
+            vertexCount,
+            instanceCount,
+            primitiveType);
+
         var effectiveRenderState = renderState ?? GuestRenderState.Default;
         if (effectiveRenderState.Blends.Count == 1 && targets.Count > 1)
         {
