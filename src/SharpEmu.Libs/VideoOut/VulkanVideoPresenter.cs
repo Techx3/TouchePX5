@@ -4215,6 +4215,7 @@ internal static unsafe class VulkanVideoPresenter
             public VertexBufferResource[] VertexBuffers = [];
             public VkBuffer IndexBuffer;
             public DeviceMemory IndexMemory;
+            public VulkanHostBufferAllocation? IndexHostAllocation;
             public bool Index32Bit;
             public uint VertexCount = 3;
             public uint InstanceCount = 1;
@@ -4300,6 +4301,7 @@ internal static unsafe class VulkanVideoPresenter
             public ulong GuestOffset;
             public ulong GuestSize;
             public GuestBufferAllocation? Allocation;
+            public VulkanHostBufferAllocation? HostAllocation;
         }
 
         private sealed class VertexBufferResource
@@ -4307,6 +4309,7 @@ internal static unsafe class VulkanVideoPresenter
             public VkBuffer Buffer;
             public DeviceMemory Memory;
             public bool OwnsBuffer;
+            public VulkanHostBufferAllocation? HostAllocation;
             public ulong Size;
             public uint Location;
             public uint ComponentCount;
@@ -7847,11 +7850,12 @@ internal static unsafe class VulkanVideoPresenter
 
                 if (draw.IndexBuffer is { Length: > 0 } indexBuffer)
                 {
-                    resources.IndexBuffer = CreateHostBuffer(
+                    var indexAllocation = CreateHostBuffer(
                         indexBuffer.Data.AsSpan(0, indexBuffer.Length),
-                        BufferUsageFlags.IndexBufferBit,
-                        out resources.IndexMemory,
-                        out _);
+                        BufferUsageFlags.IndexBufferBit);
+                    resources.IndexBuffer = indexAllocation.Buffer;
+                    resources.IndexMemory = indexAllocation.Memory;
+                    resources.IndexHostAllocation = indexAllocation;
                     resources.Index32Bit = indexBuffer.Is32Bit;
                     if (indexBuffer.Pooled)
                     {
@@ -11320,23 +11324,22 @@ internal static unsafe class VulkanVideoPresenter
                 guestBuffer.Data.AsSpan(0, guestBuffer.Length).CopyTo(
                     snapshotData[checked((int)byteBias)..]);
 
-                var buffer = CreateHostBuffer(
+                var hostAllocation = CreateHostBuffer(
                     snapshotData,
-                    BufferUsageFlags.StorageBufferBit,
-                    out var memory,
-                    out var mapped);
+                    BufferUsageFlags.StorageBufferBit);
                 return new GlobalBufferResource
                 {
                     BaseAddress = guestBuffer.BaseAddress,
                     Writable = false,
                     WriteBackToGuest = false,
-                    Buffer = buffer,
-                    Memory = memory,
-                    Mapped = mapped + checked((nint)byteBias),
+                    Buffer = hostAllocation.Buffer,
+                    Memory = hostAllocation.Memory,
+                    Mapped = hostAllocation.Mapped + checked((nint)byteBias),
                     Offset = 0,
                     Size = descriptorSize,
                     GuestOffset = byteBias,
                     GuestSize = guestSize,
+                    HostAllocation = hostAllocation,
                 };
             }
             finally
@@ -11352,11 +11355,9 @@ internal static unsafe class VulkanVideoPresenter
         private GlobalBufferResource CreateTransientGlobalBufferResource(
             GuestMemoryBuffer guestBuffer)
         {
-            var buffer = CreateHostBuffer(
+            var hostAllocation = CreateHostBuffer(
                 guestBuffer.Data.AsSpan(0, guestBuffer.Length),
-                BufferUsageFlags.StorageBufferBit,
-                out var memory,
-                out var mapped);
+                BufferUsageFlags.StorageBufferBit);
             if (guestBuffer.Pooled)
             {
                 GuestDataPool.Shared.Return(guestBuffer.Data);
@@ -11367,13 +11368,14 @@ internal static unsafe class VulkanVideoPresenter
                 BaseAddress = 0,
                 Writable = false,
                 WriteBackToGuest = false,
-                Buffer = buffer,
-                Memory = memory,
-                Mapped = mapped,
+                Buffer = hostAllocation.Buffer,
+                Memory = hostAllocation.Memory,
+                Mapped = hostAllocation.Mapped,
                 Offset = 0,
                 Size = (ulong)Math.Max(guestBuffer.Length, sizeof(uint)),
                 GuestOffset = 0,
                 GuestSize = (ulong)Math.Max(guestBuffer.Length, sizeof(uint)),
+                HostAllocation = hostAllocation,
             };
         }
 
@@ -11579,11 +11581,11 @@ internal static unsafe class VulkanVideoPresenter
                     $"[LOADER][TRACE] vk.vertex_force_title_color_white " +
                     $"base=0x{guestBuffer.BaseAddress:X16} bytes={guestBuffer.Length}");
             }
-            var buffer = CreateHostBuffer(
+            var hostAllocation = CreateHostBuffer(
                 source,
-                BufferUsageFlags.VertexBufferBit,
-                out var memory,
-                out _);
+                BufferUsageFlags.VertexBufferBit);
+            var buffer = hostAllocation.Buffer;
+            var memory = hostAllocation.Memory;
             var size = (ulong)Math.Max(guestBuffer.Length, sizeof(uint));
             if (_setDebugUtilsObjectName is not null)
             {
@@ -11608,7 +11610,8 @@ internal static unsafe class VulkanVideoPresenter
                 memory,
                 size,
                 guestBuffer,
-                ownsBuffer: true);
+                ownsBuffer: true,
+                hostAllocation);
         }
 
         private static VertexBufferResource CreateVertexBufferResource(
@@ -11616,13 +11619,15 @@ internal static unsafe class VulkanVideoPresenter
             DeviceMemory memory,
             ulong size,
             GuestVertexBuffer guestBuffer,
-            bool ownsBuffer)
+            bool ownsBuffer,
+            VulkanHostBufferAllocation? hostAllocation = null)
         {
             return new VertexBufferResource
             {
                 Buffer = buffer,
                 Memory = memory,
                 OwnsBuffer = ownsBuffer,
+                HostAllocation = hostAllocation,
                 Size = size,
                 Location = guestBuffer.Location,
                 ComponentCount = guestBuffer.ComponentCount,
@@ -11651,11 +11656,9 @@ internal static unsafe class VulkanVideoPresenter
             PerInstance = guestBuffer.PerInstance,
         };
 
-        private VkBuffer CreateHostBuffer(
+        private VulkanHostBufferAllocation CreateHostBuffer(
             ReadOnlySpan<byte> data,
-            BufferUsageFlags usage,
-            out DeviceMemory memory,
-            out nint mapped)
+            BufferUsageFlags usage)
         {
             var size = (ulong)Math.Max(data.Length, sizeof(uint));
             var capacity = BitOperations.RoundUpToPowerOf2(size);
@@ -11668,28 +11671,57 @@ internal static unsafe class VulkanVideoPresenter
             }
             else
             {
-                var buffer = CreateBuffer(
-                    capacity,
-                    usage,
-                    MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
-                    out var allocatedMemory);
-                // Persistently mapped: map/unmap per draw was a measurable
-                // share of the per-draw fixed cost, and HOST_COHERENT memory
-                // may legally stay mapped for its lifetime.
-                void* persistentMapping;
-                Check(
-                    _vk.MapMemory(_device, allocatedMemory, 0, capacity, 0, &persistentMapping),
-                    "vkMapMemory(host persistent)");
-                allocation = new VulkanHostBufferAllocation(
-                    buffer,
-                    allocatedMemory,
-                    key,
-                    (nint)persistentMapping);
-                _hostBufferPool.Register(allocation);
+                VkBuffer buffer = default;
+                DeviceMemory allocatedMemory = default;
+                void* persistentMapping = null;
+                try
+                {
+                    buffer = CreateBuffer(
+                        capacity,
+                        usage,
+                        MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
+                        out allocatedMemory);
+                    // Persistently mapped: map/unmap per draw was a measurable
+                    // share of the per-draw fixed cost, and HOST_COHERENT memory
+                    // may legally stay mapped for its lifetime.
+                    Check(
+                        _vk.MapMemory(_device, allocatedMemory, 0, capacity, 0, &persistentMapping),
+                        "vkMapMemory(host persistent)");
+                    allocation = _hostBufferPool.Register(
+                        new VulkanHostBufferAllocation(
+                            buffer,
+                            allocatedMemory,
+                            key,
+                            (nint)persistentMapping));
+                }
+                catch
+                {
+                    if (persistentMapping is not null && allocatedMemory.Handle != 0)
+                    {
+                        _vk.UnmapMemory(_device, allocatedMemory);
+                    }
+                    if (buffer.Handle != 0)
+                    {
+                        _vk.DestroyBuffer(_device, buffer, null);
+                    }
+                    if (allocatedMemory.Handle != 0)
+                    {
+                        _vk.FreeMemory(_device, allocatedMemory, null);
+                    }
+
+                    throw;
+                }
             }
 
-            memory = allocation.Memory;
-            mapped = allocation.Mapped;
+            // Only clear bytes that were meaningful to the previous lease and
+            // are outside the new logical payload. This prevents stale tail
+            // reads without clearing the full power-of-two capacity per draw.
+            if (allocation.WrittenLength > (ulong)data.Length)
+            {
+                NativeMemory.Clear(
+                    (void*)(allocation.Mapped + data.Length),
+                    checked((nuint)(allocation.WrittenLength - (ulong)data.Length)));
+            }
             fixed (byte* source = data)
             {
                 System.Buffer.MemoryCopy(
@@ -11699,26 +11731,33 @@ internal static unsafe class VulkanVideoPresenter
                     data.Length);
             }
 
-            return allocation.Buffer;
+            if (!_hostBufferPool.UpdateWrittenLength(allocation, (ulong)data.Length))
+            {
+                throw new InvalidOperationException(
+                    "The Vulkan host-buffer lease expired while it was being populated.");
+            }
+
+            return allocation with { WrittenLength = (ulong)data.Length };
         }
 
-        private void RecycleHostBuffer(VkBuffer buffer, DeviceMemory memory)
+        private void RecycleHostBuffer(VulkanHostBufferAllocation allocation)
         {
-            if (buffer.Handle == 0)
+            if (allocation.Buffer.Handle == 0)
             {
                 return;
             }
 
-            if (_hostBufferPool.Return(buffer, memory))
+            if (_hostBufferPool.Return(allocation))
             {
                 return;
             }
 
-            _vk.DestroyBuffer(_device, buffer, null);
-            if (memory.Handle != 0)
-            {
-                _vk.FreeMemory(_device, memory, null);
-            }
+            // A rejected return is either stale or races pool shutdown. The
+            // current lease may already belong to another draw, so destroying
+            // by raw handle here would create a use-after-free on the GPU.
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Ignored stale Vulkan host-buffer lease " +
+                $"buffer=0x{allocation.Buffer.Handle:X} lease={allocation.LeaseId}.");
         }
 
         private void DestroyHostBufferAllocation(VulkanHostBufferAllocation allocation)
@@ -19379,7 +19418,10 @@ internal static unsafe class VulkanVideoPresenter
                     continue;
                 }
 
-                RecycleHostBuffer(globalBuffer.Buffer, globalBuffer.Memory);
+                if (globalBuffer.HostAllocation is { } hostAllocation)
+                {
+                    RecycleHostBuffer(hostAllocation);
+                }
             }
 
             foreach (var vertexBuffer in resources.VertexBuffers)
@@ -19389,10 +19431,16 @@ internal static unsafe class VulkanVideoPresenter
                     continue;
                 }
 
-                RecycleHostBuffer(vertexBuffer.Buffer, vertexBuffer.Memory);
+                if (vertexBuffer.HostAllocation is { } hostAllocation)
+                {
+                    RecycleHostBuffer(hostAllocation);
+                }
             }
 
-            RecycleHostBuffer(resources.IndexBuffer, resources.IndexMemory);
+            if (resources.IndexHostAllocation is { } indexAllocation)
+            {
+                RecycleHostBuffer(indexAllocation);
+            }
 
             if (!resources.PipelineCached && resources.Pipeline.Handle != 0)
             {
