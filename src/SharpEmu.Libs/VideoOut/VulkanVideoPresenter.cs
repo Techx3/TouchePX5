@@ -54,7 +54,8 @@ internal sealed record VulkanOffscreenGuestDraw(
     IReadOnlyList<GuestRenderTarget> Targets,
     GuestDepthTarget? DepthTarget,
     bool PublishTarget,
-    ulong ShaderAddress);
+    ulong ShaderAddress,
+    IReadOnlyList<GuestTargetSubresourceKey> PendingColorClears);
 
 internal sealed record VulkanOffscreenColorClear(
     IReadOnlyList<GuestRenderTarget> Targets,
@@ -1004,7 +1005,7 @@ internal static unsafe class VulkanVideoPresenter
         _pendingGuestImageUploads.Clear();
         _pendingGuestImageInitialData.Clear();
         _guestImageExtents.Clear();
-        _pendingGuestColorClears.Clear();
+        _pendingGuestColorClears.Reset();
         _tracedGuestImageSubmissions.Clear();
         Volatile.Write(ref _cpuWrittenGuestImageSyncRequested, 0);
         _guestQueueStarvationLastQueued = -1;
@@ -1385,7 +1386,8 @@ internal static unsafe class VulkanVideoPresenter
                     targets.ToArray(),
                     depthTarget,
                     PublishTarget: true,
-                    shaderAddress));
+                    shaderAddress,
+                    PendingColorClears: []));
             return TryCommitGuestWorkPublication(
                 workSequence,
                 targets,
@@ -1447,7 +1449,8 @@ internal static unsafe class VulkanVideoPresenter
                         NumberType: 0)],
                     depthTarget,
                     PublishTarget: false,
-                    shaderAddress));
+                    shaderAddress,
+                    PendingColorClears: []));
         }
     }
 
@@ -1496,7 +1499,7 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
-    private static readonly ConcurrentDictionary<ulong, byte> _pendingGuestColorClears = new();
+    private static readonly GuestColorClearTracker _pendingGuestColorClears = new();
 
     /// <summary>
     /// Clear a guest colour target to zero at its next render pass.
@@ -1507,11 +1510,19 @@ internal static unsafe class VulkanVideoPresenter
     /// previous contents. Dropping <c>Initialized</c> makes the render pass
     /// itself clear via <see cref="AttachmentLoadOp.Clear"/>.
     /// </summary>
-    internal static void RequestGuestColorClear(ulong address)
+    internal static void RequestGuestColorClear(GuestRenderTarget target)
     {
-        if (address != 0)
+        if (target.Address == 0)
         {
-            _pendingGuestColorClears[address] = 0;
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (!_closed)
+            {
+                _pendingGuestColorClears.Request(target);
+            }
         }
     }
 
@@ -1678,7 +1689,8 @@ internal static unsafe class VulkanVideoPresenter
                         NumberType: 7)],
                     DepthTarget: null,
                     PublishTarget: false,
-                    shaderAddress));
+                    shaderAddress,
+                    PendingColorClears: []));
         }
     }
 
@@ -3196,6 +3208,18 @@ internal static unsafe class VulkanVideoPresenter
         if (_closed)
         {
             return 0;
+        }
+
+        // Bind clears at the actual enqueue point, after backpressure may have
+        // released the gate. The render thread then consumes immutable state
+        // belonging to this draw instead of racing a global address-only map.
+        if (work is VulkanOffscreenGuestDraw offscreenDraw)
+        {
+            work = offscreenDraw with
+            {
+                PendingColorClears =
+                    _pendingGuestColorClears.TakeFor(offscreenDraw.Targets),
+            };
         }
 
         var queue = _submittingGuestQueue ?? VulkanGuestQueueIdentity.Default;
@@ -13985,7 +14009,8 @@ internal static unsafe class VulkanVideoPresenter
                 // guest clears it. Consume a pending clear here, before the
                 // render pass is built, so the pass uses LoadOp.Clear.
                 if (work.Targets[index].Address != 0 &&
-                    _pendingGuestColorClears.TryRemove(work.Targets[index].Address, out _))
+                    work.PendingColorClears.Contains(
+                        GuestColorClearTracker.GetKey(work.Targets[index])))
                 {
                     targets[index].Initialized = false;
                 }

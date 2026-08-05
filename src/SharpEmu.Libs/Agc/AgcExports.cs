@@ -7160,7 +7160,7 @@ public static partial class AgcExports
                 {
                     if (target.Address != 0)
                     {
-                        VulkanVideoPresenter.RequestGuestColorClear(target.Address);
+                        VulkanVideoPresenter.RequestGuestColorClear(target);
                     }
                 }
 
