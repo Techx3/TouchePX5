@@ -20,9 +20,10 @@ public enum VulkanHostSurfaceKind
 /// </summary>
 public sealed class VulkanHostSurface : IDisposable
 {
-    private int _pixelWidth;
-    private int _pixelHeight;
+    private const int MaximumPixelDimension = 32768;
+    private long _packedPixelSize;
     private int _resizeGeneration;
+    private int _disposed;
     private readonly bool _ownsDisplay;
     private readonly bool _pollNativeSize;
     private long _nextNativeSizePoll;
@@ -31,6 +32,7 @@ public sealed class VulkanHostSurface : IDisposable
         VulkanHostSurfaceKind kind,
         nint windowHandle,
         nint displayHandle = 0,
+        nint instanceHandle = 0,
         nint metalLayerHandle = 0,
         bool ownsDisplay = false,
         bool pollNativeSize = false)
@@ -38,6 +40,7 @@ public sealed class VulkanHostSurface : IDisposable
         Kind = kind;
         WindowHandle = windowHandle;
         DisplayHandle = displayHandle;
+        InstanceHandle = instanceHandle;
         MetalLayerHandle = metalLayerHandle;
         _ownsDisplay = ownsDisplay;
         _pollNativeSize = pollNativeSize;
@@ -50,27 +53,40 @@ public sealed class VulkanHostSurface : IDisposable
     /// <summary>X11 Display* when <see cref="Kind"/> is <see cref="VulkanHostSurfaceKind.Xlib"/>.</summary>
     public nint DisplayHandle { get; }
 
+    /// <summary>Win32 HINSTANCE when <see cref="Kind"/> is <see cref="VulkanHostSurfaceKind.Win32"/>.</summary>
+    public nint InstanceHandle { get; }
+
     /// <summary>CAMetalLayer* when <see cref="Kind"/> is <see cref="VulkanHostSurfaceKind.Metal"/>.</summary>
     public nint MetalLayerHandle { get; }
 
-    public int PixelWidth => Volatile.Read(ref _pixelWidth);
+    public int PixelWidth => UnpackWidth(Volatile.Read(ref _packedPixelSize));
 
-    public int PixelHeight => Volatile.Read(ref _pixelHeight);
+    public int PixelHeight => UnpackHeight(Volatile.Read(ref _packedPixelSize));
 
     internal int ResizeGeneration => Volatile.Read(ref _resizeGeneration);
 
     public void UpdatePixelSize(int width, int height)
     {
-        width = Math.Max(width, 1);
-        height = Math.Max(height, 1);
-        if (Volatile.Read(ref _pixelWidth) == width && Volatile.Read(ref _pixelHeight) == height)
+        if (Volatile.Read(ref _disposed) != 0)
         {
             return;
         }
 
-        Volatile.Write(ref _pixelWidth, width);
-        Volatile.Write(ref _pixelHeight, height);
+        width = Math.Clamp(width, 1, MaximumPixelDimension);
+        height = Math.Clamp(height, 1, MaximumPixelDimension);
+        var packed = PackPixelSize(width, height);
+        if (Interlocked.Exchange(ref _packedPixelSize, packed) == packed)
+        {
+            return;
+        }
+
         Interlocked.Increment(ref _resizeGeneration);
+    }
+
+    public (int Width, int Height) GetPixelSize()
+    {
+        var packed = Volatile.Read(ref _packedPixelSize);
+        return (UnpackWidth(packed), UnpackHeight(packed));
     }
 
     /// <summary>
@@ -80,7 +96,7 @@ public sealed class VulkanHostSurface : IDisposable
     /// </summary>
     internal void RefreshChildProcessPixelSize()
     {
-        if (!_pollNativeSize)
+        if (!_pollNativeSize || Volatile.Read(ref _disposed) != 0)
         {
             return;
         }
@@ -131,9 +147,10 @@ public sealed class VulkanHostSurface : IDisposable
         }
 
         var kind = Kind == VulkanHostSurfaceKind.Win32 ? "win32" : "xlib";
+        var (width, height) = GetPixelSize();
         descriptor = string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
-            $"{kind}:{unchecked((ulong)WindowHandle):X}:{Math.Max(PixelWidth, 1)}:{Math.Max(PixelHeight, 1)}:{unchecked((ulong)DisplayHandle):X}");
+            $"{kind}:{unchecked((ulong)WindowHandle):X}:{Math.Max(width, 1)}:{Math.Max(height, 1)}:0");
         return true;
     }
 
@@ -160,7 +177,8 @@ public sealed class VulkanHostSurface : IDisposable
             return false;
         }
 
-        if (window == 0 || width <= 0 || height <= 0)
+        if (window == 0 || width <= 0 || height <= 0 ||
+            width > MaximumPixelDimension || height > MaximumPixelDimension)
         {
             error = "host-surface descriptor has an invalid size or handle";
             return false;
@@ -168,14 +186,25 @@ public sealed class VulkanHostSurface : IDisposable
 
         if (string.Equals(parts[0], "win32", StringComparison.OrdinalIgnoreCase))
         {
+            if (!OperatingSystem.IsWindows())
+            {
+                error = "a Win32 host surface is only valid on Windows";
+                return false;
+            }
+
             surface = new VulkanHostSurface(
                 VulkanHostSurfaceKind.Win32,
                 unchecked((nint)window),
-                unchecked((nint)nativeDisplay),
                 pollNativeSize: true);
         }
         else if (string.Equals(parts[0], "xlib", StringComparison.OrdinalIgnoreCase))
         {
+            if (!OperatingSystem.IsLinux())
+            {
+                error = "an Xlib host surface is only valid on Linux";
+                return false;
+            }
+
             var display = XOpenDisplay(0);
             if (display == 0)
             {
@@ -202,11 +231,23 @@ public sealed class VulkanHostSurface : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         if (_ownsDisplay && DisplayHandle != 0 && OperatingSystem.IsLinux())
         {
             _ = XCloseDisplay(DisplayHandle);
         }
     }
+
+    private static long PackPixelSize(int width, int height) =>
+        unchecked(((long)(uint)width << 32) | (uint)height);
+
+    private static int UnpackWidth(long packed) => unchecked((int)(uint)(packed >> 32));
+
+    private static int UnpackHeight(long packed) => unchecked((int)(uint)packed);
 
     [System.Runtime.InteropServices.DllImport("libX11.so.6", EntryPoint = "XOpenDisplay")]
     private static extern nint XOpenDisplay(nint displayName);
@@ -261,8 +302,8 @@ public static class VulkanVideoHost
     public static bool TryAttachSurface(VulkanHostSurface surface) =>
         VulkanVideoPresenter.TryAttachHostSurface(surface);
 
-    public static void DetachSurface(VulkanHostSurface surface) =>
-        VulkanVideoPresenter.DetachHostSurface(surface);
+    public static bool DetachSurface(VulkanHostSurface surface, TimeSpan timeout) =>
+        VulkanVideoPresenter.DetachHostSurface(surface, timeout);
 
     public static void RequestClose() => VulkanVideoPresenter.RequestClose();
 
