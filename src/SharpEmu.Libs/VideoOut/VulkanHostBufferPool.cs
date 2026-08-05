@@ -14,7 +14,9 @@ internal readonly record struct VulkanHostBufferAllocation(
     VkBuffer Buffer,
     DeviceMemory Memory,
     VulkanHostBufferPoolKey Key,
-    nint Mapped);
+    nint Mapped,
+    long LeaseId = 0,
+    ulong WrittenLength = 0);
 
 internal sealed class VulkanHostBufferPool : IDisposable
 {
@@ -24,6 +26,9 @@ internal sealed class VulkanHostBufferPool : IDisposable
     private readonly Dictionary<ulong, VulkanHostBufferAllocation> _allocations = [];
     private readonly HashSet<ulong> _cachedHandles = [];
     private readonly Action<VulkanHostBufferAllocation> _destroy;
+    private long _nextLeaseId;
+    private ulong _cachedBytes;
+    private bool _disposed;
 
     public VulkanHostBufferPool(
         ulong maximumCachedBytes,
@@ -35,7 +40,16 @@ internal sealed class VulkanHostBufferPool : IDisposable
 
     public ulong MaximumCachedBytes { get; }
 
-    public ulong CachedBytes { get; private set; }
+    public ulong CachedBytes
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _cachedBytes;
+            }
+        }
+    }
 
     public bool TryRent(
         VulkanHostBufferPoolKey key,
@@ -43,6 +57,12 @@ internal sealed class VulkanHostBufferPool : IDisposable
     {
         lock (_gate)
         {
+            if (_disposed)
+            {
+                allocation = default;
+                return false;
+            }
+
             if (!_available.TryGetValue(key, out var available) ||
                 !available.TryPop(out allocation))
             {
@@ -51,56 +71,102 @@ internal sealed class VulkanHostBufferPool : IDisposable
             }
 
             _cachedHandles.Remove(allocation.Buffer.Handle);
-            CachedBytes -= allocation.Key.Capacity;
+            _cachedBytes -= allocation.Key.Capacity;
+            allocation = allocation with { LeaseId = NextLeaseIdLocked() };
+            _allocations[allocation.Buffer.Handle] = allocation;
             return true;
         }
     }
 
-    public void Register(VulkanHostBufferAllocation allocation)
+    public VulkanHostBufferAllocation Register(VulkanHostBufferAllocation allocation)
     {
         if (allocation.Buffer.Handle == 0)
         {
             throw new ArgumentException("A pooled buffer must have a valid handle.", nameof(allocation));
         }
+        if (allocation.Memory.Handle == 0)
+        {
+            throw new ArgumentException("A pooled buffer must have valid memory.", nameof(allocation));
+        }
+        if (allocation.WrittenLength > allocation.Key.Capacity)
+        {
+            throw new ArgumentException("Written length exceeds the pooled buffer capacity.", nameof(allocation));
+        }
 
         lock (_gate)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            allocation = allocation with { LeaseId = NextLeaseIdLocked() };
             _allocations.Add(allocation.Buffer.Handle, allocation);
+            return allocation;
         }
     }
 
-    public bool Return(VkBuffer buffer, DeviceMemory memory)
+    public bool UpdateWrittenLength(
+        VulkanHostBufferAllocation allocation,
+        ulong writtenLength)
     {
-        VulkanHostBufferAllocation? toDestroy = null;
+        if (writtenLength > allocation.Key.Capacity)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(writtenLength),
+                "Written length exceeds the pooled buffer capacity.");
+        }
+
         lock (_gate)
         {
-            if (!_allocations.TryGetValue(buffer.Handle, out var allocation) ||
-                allocation.Memory.Handle != memory.Handle)
+            if (_disposed ||
+                !_allocations.TryGetValue(allocation.Buffer.Handle, out var current) ||
+                current.Memory.Handle != allocation.Memory.Handle ||
+                current.LeaseId != allocation.LeaseId ||
+                _cachedHandles.Contains(allocation.Buffer.Handle))
             {
                 return false;
             }
 
-            if (!_cachedHandles.Add(buffer.Handle))
+            _allocations[allocation.Buffer.Handle] = current with
+            {
+                WrittenLength = writtenLength,
+            };
+            return true;
+        }
+    }
+
+    public bool Return(VulkanHostBufferAllocation allocation)
+    {
+        VulkanHostBufferAllocation? toDestroy = null;
+        lock (_gate)
+        {
+            if (_disposed ||
+                !_allocations.TryGetValue(allocation.Buffer.Handle, out var current) ||
+                current.Memory.Handle != allocation.Memory.Handle ||
+                current.LeaseId != allocation.LeaseId)
+            {
+                return false;
+            }
+
+            if (!_cachedHandles.Add(allocation.Buffer.Handle))
             {
                 return true;
             }
 
-            if (allocation.Key.Capacity > MaximumCachedBytes - CachedBytes)
+            if (current.Key.Capacity > MaximumCachedBytes ||
+                _cachedBytes > MaximumCachedBytes - current.Key.Capacity)
             {
-                _cachedHandles.Remove(buffer.Handle);
-                _allocations.Remove(buffer.Handle);
-                toDestroy = allocation;
+                _cachedHandles.Remove(current.Buffer.Handle);
+                _allocations.Remove(current.Buffer.Handle);
+                toDestroy = current;
             }
             else
             {
-                if (!_available.TryGetValue(allocation.Key, out var available))
+                if (!_available.TryGetValue(current.Key, out var available))
                 {
                     available = [];
-                    _available.Add(allocation.Key, available);
+                    _available.Add(current.Key, available);
                 }
 
-                available.Push(allocation);
-                CachedBytes += allocation.Key.Capacity;
+                available.Push(current);
+                _cachedBytes += current.Key.Capacity;
             }
         }
 
@@ -108,10 +174,9 @@ internal sealed class VulkanHostBufferPool : IDisposable
         // grab device-level locks, and holding _gate while doing so risks
         // a lock-ordering deadlock with a thread that holds the device lock
         // and is waiting on _gate.
-if (toDestroy is { } td)
-{
-    _destroy(td);
-
+        if (toDestroy is { } allocationToDestroy)
+        {
+            _destroy(allocationToDestroy);
         }
 
         return true;
@@ -126,16 +191,33 @@ if (toDestroy is { } td)
         List<VulkanHostBufferAllocation> toDestroy;
         lock (_gate)
         {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
             toDestroy = new List<VulkanHostBufferAllocation>(_allocations.Values);
             _allocations.Clear();
             _available.Clear();
             _cachedHandles.Clear();
-            CachedBytes = 0;
+            _cachedBytes = 0;
         }
 
         foreach (var allocation in toDestroy)
         {
             _destroy(allocation);
         }
+    }
+
+    private long NextLeaseIdLocked()
+    {
+        _nextLeaseId++;
+        if (_nextLeaseId == 0)
+        {
+            _nextLeaseId++;
+        }
+
+        return _nextLeaseId;
     }
 }
