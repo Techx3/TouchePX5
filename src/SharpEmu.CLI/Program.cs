@@ -410,8 +410,16 @@ internal static partial class Program
             if (hostSurface is not null)
             {
                 VulkanVideoHost.RequestClose();
-                VulkanVideoHost.DetachSurface(hostSurface);
-                hostSurface.Dispose();
+                if (VulkanVideoHost.DetachSurface(hostSurface, TimeSpan.FromSeconds(5)))
+                {
+                    hostSurface.Dispose();
+                }
+                else
+                {
+                    Console.Error.WriteLine(
+                        "[LOADER][WARN] Timed out waiting for the Vulkan host surface to detach; " +
+                        "its native handles were intentionally left alive.");
+                }
             }
         }
     }

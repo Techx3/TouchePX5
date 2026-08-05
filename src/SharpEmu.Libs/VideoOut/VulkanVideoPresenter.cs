@@ -899,25 +899,46 @@ internal static unsafe class VulkanVideoPresenter
     /// <summary>
     /// Releases the host surface after the guest session has stopped.
     /// </summary>
-    public static void DetachHostSurface(VulkanHostSurface surface)
+    public static bool DetachHostSurface(VulkanHostSurface surface, TimeSpan timeout)
     {
         ArgumentNullException.ThrowIfNull(surface);
+        if (timeout < TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        }
 
         lock (_gate)
         {
             if (!ReferenceEquals(_hostSurface, surface))
             {
-                return;
+                return true;
             }
 
             if (_thread is null)
             {
                 _hostSurface = null;
+                return true;
             }
-            else
+
+            _hostSurfacePendingDetach = surface;
+            if (ReferenceEquals(_thread, Thread.CurrentThread))
             {
-                _hostSurfacePendingDetach = surface;
+                return false;
             }
+
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            while (ReferenceEquals(_hostSurface, surface))
+            {
+                var remaining = timeout == Timeout.InfiniteTimeSpan
+                    ? Timeout.InfiniteTimeSpan
+                    : timeout - System.Diagnostics.Stopwatch.GetElapsedTime(started);
+                if (remaining <= TimeSpan.Zero || !System.Threading.Monitor.Wait(_gate, remaining))
+                {
+                    return !ReferenceEquals(_hostSurface, surface);
+                }
+            }
+
+            return true;
         }
     }
 
@@ -943,14 +964,17 @@ internal static unsafe class VulkanVideoPresenter
             return;
         }
 
-        try
+        foreach (Action<VulkanHostSurface> subscriber in callback.GetInvocationList())
         {
-            callback(surface);
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine(
-                $"[LOADER][WARN] Embedded first-frame notification failed: {exception.Message}");
+            try
+            {
+                subscriber(surface);
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] Embedded first-frame notification failed: {exception.Message}");
+            }
         }
     }
 
@@ -4432,9 +4456,10 @@ internal static unsafe class VulkanVideoPresenter
 
             if (_hostSurface is not null)
             {
+                var hostSize = _hostSurface.GetPixelSize();
                 _hostSurface.UpdatePixelSize(
-                    _hostSurface.PixelWidth > 0 ? _hostSurface.PixelWidth : (int)width,
-                    _hostSurface.PixelHeight > 0 ? _hostSurface.PixelHeight : (int)height);
+                    hostSize.Width > 0 ? hostSize.Width : (int)width,
+                    hostSize.Height > 0 ? hostSize.Height : (int)height);
                 _lastHostResizeGeneration = _hostSurface.ResizeGeneration;
                 return;
             }
@@ -5112,8 +5137,8 @@ internal static unsafe class VulkanVideoPresenter
             var createInfo = new Win32SurfaceCreateInfoKHR
             {
                 SType = StructureType.Win32SurfaceCreateInfoKhr,
-                Hinstance = hostSurface.DisplayHandle != 0
-                    ? hostSurface.DisplayHandle
+                Hinstance = hostSurface.InstanceHandle != 0
+                    ? hostSurface.InstanceHandle
                     : GetModuleHandleW(null),
                 Hwnd = hostSurface.WindowHandle,
             };
@@ -16859,20 +16884,24 @@ internal static unsafe class VulkanVideoPresenter
 
             PollPerfOverlayHotkey();
 
-            if (_hostSurface is not null)
-            {
-                _hostSurface.RefreshChildProcessPixelSize();
-                if (_lastHostResizeGeneration != _hostSurface.ResizeGeneration)
-                {
-                    _lastHostResizeGeneration = _hostSurface.ResizeGeneration;
-                    RecreateSwapchainResources("embedded host resize", Result.SuboptimalKhr);
-                    _pendingHostSplashReplay = _lastHostSplashPresentation;
-                }
-            }
-
             if (!_vulkanReady)
             {
                 return;
+            }
+
+            if (_hostSurface is not null)
+            {
+                _hostSurface.RefreshChildProcessPixelSize();
+                var resizeGeneration = _hostSurface.ResizeGeneration;
+                if (_lastHostResizeGeneration != resizeGeneration)
+                {
+                    RecreateSwapchainResources("embedded host resize", Result.SuboptimalKhr);
+                    if (!_deviceLost)
+                    {
+                        _lastHostResizeGeneration = resizeGeneration;
+                        _pendingHostSplashReplay = _lastHostSplashPresentation;
+                    }
+                }
             }
 
             if (_deviceLost)
@@ -20259,7 +20288,8 @@ internal static unsafe class VulkanVideoPresenter
 
             if (_hostSurface is not null)
             {
-                return new Vector2D<int>(_hostSurface.PixelWidth, _hostSurface.PixelHeight);
+                var hostSize = _hostSurface.GetPixelSize();
+                return new Vector2D<int>(hostSize.Width, hostSize.Height);
             }
 
             return new Vector2D<int>((int)DefaultWindowWidth, (int)DefaultWindowHeight);

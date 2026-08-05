@@ -290,7 +290,7 @@ public sealed class GameSurfaceHost : NativeControlHost
         _surface = new VulkanHostSurface(
             VulkanHostSurfaceKind.Win32,
             _windowHandle,
-            classInfo.Instance);
+            instanceHandle: classInfo.Instance);
         return new PlatformHandle(_windowHandle, "HWND");
     }
 
@@ -350,13 +350,14 @@ public sealed class GameSurfaceHost : NativeControlHost
         var renderScale = (VisualRoot as TopLevel)?.RenderScaling ?? 1.0;
         var width = Math.Max(1, (int)Math.Round(Bounds.Width * renderScale));
         var height = Math.Max(1, (int)Math.Round(Bounds.Height * renderScale));
-        var sizeChanged = _surface.PixelWidth != width || _surface.PixelHeight != height;
+        var previousSize = _surface.GetPixelSize();
+        var sizeChanged = previousSize.Width != width || previousSize.Height != height;
         if (Environment.GetEnvironmentVariable("SHARPEMU_TRACE_SURFACE_SIZE") == "1")
         {
             Console.Error.WriteLine(
                 $"[GUI][TRACE] GameSurfaceHost.UpdateSurfaceSize bounds={Bounds.Width}x{Bounds.Height} " +
                 $"scale={renderScale} computed={width}x{height} changed={sizeChanged} " +
-                $"prevSurface={_surface.PixelWidth}x{_surface.PixelHeight}");
+                $"prevSurface={previousSize.Width}x{previousSize.Height}");
         }
         _surface.UpdatePixelSize(width, height);
 
