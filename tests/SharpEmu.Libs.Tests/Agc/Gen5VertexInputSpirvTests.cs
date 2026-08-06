@@ -185,6 +185,70 @@ public sealed class Gen5VertexInputSpirvTests
                 candidate.Operands[2] == inputVariable));
     }
 
+    [Fact]
+    public void XyzwFetchAppliesDescriptorDestinationSelect()
+    {
+        var fetch = CreateVertexFetch(0);
+        var end = new Gen5ShaderInstruction(
+            4,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [],
+            [],
+            [],
+            null);
+        var state = new Gen5ShaderState(
+            new Gen5ShaderProgram(0, [fetch, end]),
+            [],
+            null);
+        var registers = new uint[256];
+        var data = new byte[12];
+        var evaluation = new Gen5ShaderEvaluation(
+            registers,
+            registers,
+            [],
+            [],
+            VertexInputs:
+            [
+                new Gen5VertexInputBinding(
+                    0,
+                    0,
+                    3,
+                    13,
+                    7,
+                    0x1000,
+                    12,
+                    0,
+                    data,
+                    data.Length,
+                    DataPooled: false,
+                    // Select the implicit W component rather than constant 1
+                    // directly. A three-component buffer fetch must still
+                    // produce W=1 before descriptor swizzling.
+                    DestinationSelect: 0xFAC),
+            ]);
+
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileVertexShader(
+                state,
+                evaluation,
+                out var shader,
+                out var error),
+            error);
+
+        var module = ParseModule(shader.Spirv);
+        var one = module.Single(candidate =>
+            candidate.Opcode == SpirvOp.Constant &&
+            candidate.Operands.Length >= 3 &&
+            candidate.Operands[2] == 0x3F800000u).Operands[1];
+        Assert.Contains(
+            module,
+            candidate =>
+                candidate.Opcode == SpirvOp.Select &&
+                candidate.Operands.Length >= 5 &&
+                candidate.Operands[3] == one);
+    }
+
     private static Gen5ShaderInstruction CreateVertexFetch(uint pc) =>
         new(
             pc,

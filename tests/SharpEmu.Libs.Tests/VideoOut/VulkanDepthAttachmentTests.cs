@@ -144,22 +144,62 @@ public sealed class VulkanDepthAttachmentTests
             selfAlias: false,
             writtenAsColorThisFrame: false,
             writtenAsColorPreviousFrame: false,
+            hasReciprocalCrossedPair: false,
+            explicitlyInitializedAsDepth: false,
             hasInitializedColorImage: true,
             hasColorRenderPass: true,
             extentMatches: true));
     }
 
     [Theory]
-    [InlineData(true, false, false, true, true, true)]
-    [InlineData(false, true, false, true, true, true)]
-    [InlineData(false, false, true, true, true, true)]
-    [InlineData(false, false, false, false, true, true)]
-    [InlineData(false, false, false, true, false, true)]
-    [InlineData(false, false, false, true, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    [InlineData(true, false, true)]
+    public void CrossedLiveColorAlias_DropsBogusDepth(
+        bool writtenThisFrame,
+        bool writtenPreviousFrame,
+        bool explicitlyInitializedAsDepth)
+    {
+        Assert.True(VulkanVideoPresenter.ShouldDropStaleAliasedDepth(
+            selfAlias: false,
+            writtenAsColorThisFrame: writtenThisFrame,
+            writtenAsColorPreviousFrame: writtenPreviousFrame,
+            hasReciprocalCrossedPair: true,
+            explicitlyInitializedAsDepth,
+            hasInitializedColorImage: true,
+            hasColorRenderPass: true,
+            extentMatches: true));
+    }
+
+    [Fact]
+    public void CrossedLiveColorAlias_DoesNotDependOnVulkanImageCacheState()
+    {
+        Assert.True(VulkanVideoPresenter.ShouldDropStaleAliasedDepth(
+            selfAlias: false,
+            writtenAsColorThisFrame: false,
+            writtenAsColorPreviousFrame: false,
+            hasReciprocalCrossedPair: true,
+            explicitlyInitializedAsDepth: true,
+            hasInitializedColorImage: false,
+            hasColorRenderPass: false,
+            extentMatches: false));
+    }
+
+    [Theory]
+    [InlineData(true, false, false, false, false, true, true, true)]
+    [InlineData(false, true, false, false, false, true, true, true)]
+    [InlineData(true, false, false, true, false, true, true, true)]
+    [InlineData(false, false, false, false, true, true, true, true)]
+    [InlineData(false, false, false, false, false, false, true, true)]
+    [InlineData(false, false, false, false, false, true, false, true)]
+    [InlineData(false, false, false, false, false, true, true, false)]
     public void StaleColorAlias_PreservesLegitimateDepth(
         bool selfAlias,
         bool writtenThisFrame,
         bool writtenPreviousFrame,
+        bool hasReciprocalCrossedPair,
+        bool explicitlyInitializedAsDepth,
         bool hasInitializedColor,
         bool hasRenderPass,
         bool extentMatches)
@@ -168,8 +208,49 @@ public sealed class VulkanDepthAttachmentTests
             selfAlias,
             writtenThisFrame,
             writtenPreviousFrame,
+            hasReciprocalCrossedPair,
+            explicitlyInitializedAsDepth,
             hasInitializedColor,
             hasRenderPass,
             extentMatches));
+    }
+
+    [Theory]
+    [InlineData(true, false, true, true)]
+    [InlineData(false, false, true, false)]
+    [InlineData(true, true, true, false)]
+    [InlineData(true, false, false, false)]
+    public void ColorWrite_InvalidatesOnlyMatchingInactiveDepthBacking(
+        bool aliasesDepthAddress,
+        bool selfAliasesActiveDepth,
+        bool extentMatches,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            VulkanVideoPresenter.ShouldInvalidateDepthBackingAfterColorWrite(
+                aliasesDepthAddress,
+                selfAliasesActiveDepth,
+                extentMatches));
+    }
+
+    [Theory]
+    [InlineData(100L, 100L, 8192L, true)]
+    [InlineData(8292L, 100L, 8192L, true)]
+    [InlineData(8293L, 100L, 8192L, false)]
+    [InlineData(99L, 100L, 8192L, false)]
+    [InlineData(100L, -1L, 8192L, false)]
+    public void CrossedColorDepthPair_UsesBoundedWorkSequenceHistory(
+        long currentSequence,
+        long observedSequence,
+        long maximumAge,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            VulkanVideoPresenter.IsRecentCrossedColorDepthPair(
+                currentSequence,
+                observedSequence,
+                maximumAge));
     }
 }

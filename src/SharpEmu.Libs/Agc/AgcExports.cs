@@ -301,10 +301,21 @@ public static partial class AgcExports
             StringComparison.Ordinal);
     private static readonly ulong? _traceComputeShaderAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_COMPUTE_SHADER_ADDRESS"));
+    private static readonly ulong? _traceComputeImageAddress = ParseOptionalHexAddress(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_COMPUTE_IMAGE_ADDRESS"));
     private static readonly ulong? _tracePixelShaderAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SHADER_ADDRESS"));
     private static readonly ulong? _traceRenderTargetAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RENDER_TARGET_ADDRESS"));
+    // Diagnostic opt-in for CPU-produced sampled textures which never become
+    // Vulkan render targets. Protect only the requested allocation so native
+    // guest stores invalidate the cached upload without widening the normal
+    // write-tracker hot path to every sampled asset.
+    private static readonly ulong? _trackSampledTextureWriteAddress = ParseOptionalHexAddress(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACK_SAMPLED_TEXTURE_WRITE_ADDRESS"));
+    private static readonly (uint Width, uint Height)? _traceRenderTargetSize =
+        ParseOptionalDimensions(
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RENDER_TARGET_SIZE"));
     private static readonly bool _traceDraws = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAWS"),
         "1",
@@ -4445,6 +4456,16 @@ public static partial class AgcExports
             return;
         }
 
+        if (_traceComputeImageAddress is { } tracedAddress &&
+            byteCount != 0 &&
+            RangesOverlap(destinationAddress, byteCount, tracedAddress, 1))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.dma_target_trace kind=dcb " +
+                $"target=0x{tracedAddress:X16} dst=0x{destinationAddress:X16} " +
+                $"src=0x{sourceAddress:X16} bytes={byteCount} compact={compactLayout}");
+        }
+
         SubmitOrderedGpuSideEffect(
             ctx,
             gpuState,
@@ -5217,6 +5238,19 @@ public static partial class AgcExports
             destinationSwap == 0 &&
             destinationSelect is 0 or 3 &&
             (destinationSelect == 3 || destinationAddressSpace == 0);
+
+        if (_traceComputeImageAddress is { } tracedAddress &&
+            byteCount != 0 &&
+            RangesOverlap(destinationAddress, byteCount, tracedAddress, 1))
+        {
+            var sourceAddress = sourceLow | ((ulong)sourceHigh << 32);
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.dma_target_trace kind=standard " +
+                $"target=0x{tracedAddress:X16} dst=0x{destinationAddress:X16} " +
+                $"src=0x{sourceAddress:X16} bytes={byteCount} " +
+                $"src_sel={(control >> 29) & 0x3u} dst_sel={destinationSelect} " +
+                $"dst_swap={destinationSwap} guest={writesGuestMemory}");
+        }
 
         SubmitOrderedGpuSideEffect(
             ctx,
@@ -6985,7 +7019,10 @@ public static partial class AgcExports
 
             if (_traceAgcShader ||
                 _tracePixelShaderAddress == pixelShaderAddress ||
-                _traceRenderTargetAddress == target.Address)
+                _traceRenderTargetAddress == target.Address ||
+                (_traceRenderTargetSize is { } traceSize &&
+                 target.Width == traceSize.Width &&
+                 target.Height == traceSize.Height))
             {
                 Console.Error.WriteLine(
                     "[LOADER][TRACE] " +
@@ -8130,8 +8167,8 @@ public static partial class AgcExports
             TraceTargetVertexState(
                 pixelShaderAddress,
                 exportShaderAddress,
-                textures,
                 vertexInputs,
+                exportEvaluation.GlobalMemoryBindings,
                 exportEvaluation.InitialScalarRegisters,
                 exportEvaluation.ScalarRegisters);
         }
@@ -8213,13 +8250,12 @@ public static partial class AgcExports
     private static void TraceTargetVertexState(
         ulong pixelShaderAddress,
         ulong exportShaderAddress,
-        IReadOnlyList<TranslatedImageBinding> textures,
         IReadOnlyList<Gen5VertexInputBinding> vertexInputs,
+        IReadOnlyList<Gen5GlobalMemoryBinding> globalMemoryBindings,
         IReadOnlyList<uint> initialScalars,
         IReadOnlyList<uint> evaluatedScalars)
     {
-        if (_tracePixelShaderAddress != pixelShaderAddress ||
-            !textures.Any(binding => binding.Descriptor.Address == 0x0000000103E2D100))
+        if (_tracePixelShaderAddress != pixelShaderAddress)
         {
             return;
         }
@@ -8241,7 +8277,17 @@ public static partial class AgcExports
                     $"f{input.DataFormat}:n{input.NumberFormat}:" +
                     Convert.ToHexString(input.Data.AsSpan(0, byteCount));
             }));
-        var signature = $"{scalarHex}|{evaluatedHex}|{inputState}";
+        var globalState = string.Join(
+            ';',
+            globalMemoryBindings.Take(8).Select(binding =>
+            {
+                var byteCount = Math.Min(binding.DataLength, 320);
+                return
+                    $"s{binding.ScalarAddress}:a0x{binding.BaseAddress:X}:" +
+                    $"l{binding.DataLength}:w{(binding.Writable ? 1 : 0)}:" +
+                    Convert.ToHexString(binding.Data.AsSpan(0, byteCount));
+            }));
+        var signature = $"{scalarHex}|{evaluatedHex}|{inputState}|{globalState}";
 
         lock (_submitTraceGate)
         {
@@ -8255,7 +8301,8 @@ public static partial class AgcExports
         Console.Error.WriteLine(
             "[LOADER][TRACE] agc.vertex_snapshot " +
             $"ps=0x{pixelShaderAddress:X16} es=0x{exportShaderAddress:X16} " +
-            $"initial=[{scalarHex}] evaluated=[{evaluatedHex}] inputs=[{inputState}]");
+            $"initial=[{scalarHex}] evaluated=[{evaluatedHex}] " +
+            $"inputs=[{inputState}] globals=[{globalState}]");
     }
 
     private static bool TryAppendTranslatedImageBindings(
@@ -8288,7 +8335,7 @@ public static partial class AgcExports
             var isStorage = Gen5ShaderTranslator.RequiresStorageImage(
                 binding,
                 stageBindings);
-            if (_traceAgcShader)
+            if (_traceAgcShader || _tracePixelShaderAddress == pixelShaderAddress)
             {
                 Console.Error.WriteLine(
                     "[LOADER][TRACE] " +
@@ -10522,6 +10569,16 @@ public static partial class AgcExports
         // The generation rides on the texture and is recorded by the
         // presenter after upload, where the upload-known skip compares it
         // against the tracker to force fresh texels for rewritten memory.
+        if (SharpEmu.HLE.GuestImageWriteTracker.Enabled &&
+            _trackSampledTextureWriteAddress == descriptor.Address)
+        {
+            SharpEmu.HLE.GuestImageWriteTracker.Track(
+                descriptor.Address + baseMipByteOffset,
+                physicalSourceByteCount,
+                source: "agc.sampled-texture-diagnostic",
+                protect: true);
+        }
+
         var hasWriteGeneration =
             SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
                 descriptor.Address,
@@ -11115,6 +11172,39 @@ public static partial class AgcExports
         return sampled.Count == 0 ? "-" : string.Join(';', sampled);
     }
 
+    private static string SampleVertexAttributeRaw(GuestVertexBuffer buffer)
+    {
+        var length = Math.Min(buffer.Length, buffer.Data.Length);
+        if (length < 8 || buffer.OffsetBytes > (uint)(length - 8))
+        {
+            return "-";
+        }
+
+        var stride = Math.Max(buffer.Stride, 4u);
+        var vertexTotal = (int)(((uint)length - buffer.OffsetBytes) / stride);
+        if (vertexTotal <= 0)
+        {
+            return "-";
+        }
+
+        var sampled = new List<string>(2);
+        foreach (var vertex in new[] { 0, vertexTotal - 1 })
+        {
+            var offset = (long)buffer.OffsetBytes + (long)vertex * stride;
+            if (vertex < 0 || offset < 0 || offset + 8 > length)
+            {
+                continue;
+            }
+
+            var byteOffset = (int)offset;
+            sampled.Add(
+                $"{BitConverter.ToUInt32(buffer.Data, byteOffset):X8}," +
+                $"{BitConverter.ToUInt32(buffer.Data, byteOffset + 4):X8}");
+        }
+
+        return sampled.Count == 0 ? "-" : string.Join(';', sampled);
+    }
+
     private static void TraceDrawCompact(
         ulong sequence,
         TranslatedGuestDraw draw,
@@ -11127,6 +11217,21 @@ public static partial class AgcExports
         }
 
         var target = draw.RenderTargets.FirstOrDefault();
+        // A render-target address also scopes the compact draw trace.  Without
+        // this filter, a single frame can contain thousands of unrelated draws
+        // and obscure the vertex/UV data of the surface under investigation.
+        if (_traceRenderTargetAddress is { } traceTarget &&
+            target.Address != traceTarget)
+        {
+            return;
+        }
+
+        if (_traceRenderTargetSize is { } traceSize &&
+            (target.Width != traceSize.Width || target.Height != traceSize.Height))
+        {
+            return;
+        }
+
         var blend = draw.RenderState.Blend;
         var viewport = draw.RenderState.Viewport is { } vp
             ? $"{vp.X:0.#},{vp.Y:0.#},{vp.Width:0.#}x{vp.Height:0.#}"
@@ -11169,7 +11274,16 @@ public static partial class AgcExports
             vertexBuffers
                 .OrderBy(buffer => buffer.Location)
                 .Take(DrawTraceMaxVertexAttributes)
-                .Select(buffer => $"{buffer.Location}:{SampleVertexAttribute(buffer)}"));
+                .Select(buffer =>
+                {
+                    var binding = draw.VertexInputs.FirstOrDefault(
+                        candidate => candidate.Location == buffer.Location);
+                    var destinationSelect = binding?.DestinationSelect ?? 0u;
+                    return $"{buffer.Location}:c{buffer.ComponentCount}/f{buffer.DataFormat}" +
+                           $"/n{buffer.NumberFormat}/s{buffer.Stride}/o{buffer.OffsetBytes}" +
+                           $"/d{destinationSelect:X3}:raw={SampleVertexAttributeRaw(buffer)}" +
+                           $":flt={SampleVertexAttribute(buffer)}";
+                }));
         if (vertexBuffers.Count > DrawTraceMaxVertexAttributes)
         {
             attributes += $"|+{vertexBuffers.Count - DrawTraceMaxVertexAttributes}";
@@ -11318,6 +11432,13 @@ public static partial class AgcExports
             return;
         }
 
+        var triggerFile = Environment.GetEnvironmentVariable(
+            "SHARPEMU_TEXTURE_DUMP_TRIGGER_FILE");
+        if (!string.IsNullOrWhiteSpace(triggerFile) && !File.Exists(triggerFile))
+        {
+            return;
+        }
+
         if (!TextureDumpDimensionsMatch(descriptor.Width, descriptor.Height))
         {
             return;
@@ -11361,6 +11482,13 @@ public static partial class AgcExports
     {
         var directory = Environment.GetEnvironmentVariable("SHARPEMU_TEXTURE_LINEAR_DUMP_DIR");
         if (string.IsNullOrWhiteSpace(directory))
+        {
+            return;
+        }
+
+        var triggerFile = Environment.GetEnvironmentVariable(
+            "SHARPEMU_TEXTURE_DUMP_TRIGGER_FILE");
+        if (!string.IsNullOrWhiteSpace(triggerFile) && !File.Exists(triggerFile))
         {
             return;
         }
@@ -11790,6 +11918,7 @@ public static partial class AgcExports
         var descriptions = new List<string>(bindings.Count);
         var translatedBindings = new List<TranslatedImageBinding>(bindings.Count);
         var hasStorageBinding = false;
+        var tracesTargetImageWrite = false;
         foreach (var binding in bindings)
         {
             var isStorage = Gen5ShaderTranslator.RequiresStorageImage(binding, bindings);
@@ -11817,6 +11946,7 @@ public static partial class AgcExports
                 $"{descriptorState}/{ProbeTexture(ctx, texture)}");
             if (writesStorage && descriptorValid && texture.Address != 0)
             {
+                tracesTargetImageWrite |= _traceComputeImageAddress == texture.Address;
                 gpuState.ComputeImageWriters[texture.Address] = new ComputeImageWriter(
                     sequence,
                     shaderAddress,
@@ -11833,6 +11963,17 @@ public static partial class AgcExports
         var localSizeX = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadX);
         var localSizeY = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadY);
         var localSizeZ = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadZ);
+        if (tracesTargetImageWrite)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.compute_image_trace seq={sequence} " +
+                $"cs=0x{shaderAddress:X16} " +
+                $"groups={dispatch.GroupCountX}x{dispatch.GroupCountY}x{dispatch.GroupCountZ} " +
+                $"base={dispatch.BaseGroupX}x{dispatch.BaseGroupY}x{dispatch.BaseGroupZ} " +
+                $"local={localSizeX}x{localSizeY}x{localSizeZ} " +
+                $"bindings=[{string.Join(',', descriptions)}]");
+        }
+
         if (_traceComputeShaderAddress == shaderAddress)
         {
             Console.Error.WriteLine(
@@ -11846,6 +11987,33 @@ public static partial class AgcExports
 
         var writesGlobalMemory = evaluation.GlobalMemoryBindings.Any(static binding =>
             binding.Writable);
+        if (_traceComputeImageAddress is { } tracedAddress)
+        {
+            var tracedGlobalBindings = evaluation.GlobalMemoryBindings
+                .Where(binding =>
+                    binding.Writable &&
+                    binding.BaseAddress != 0 &&
+                    binding.DataLength > 0 &&
+                    RangesOverlap(
+                        binding.BaseAddress,
+                        (ulong)binding.DataLength,
+                        tracedAddress,
+                        1))
+                .ToArray();
+            if (tracedGlobalBindings.Length != 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] agc.compute_global_trace seq={sequence} " +
+                    $"target=0x{tracedAddress:X16} cs=0x{shaderAddress:X16} " +
+                    $"groups={dispatch.GroupCountX}x{dispatch.GroupCountY}x{dispatch.GroupCountZ} " +
+                    $"base={dispatch.BaseGroupX}x{dispatch.BaseGroupY}x{dispatch.BaseGroupZ} " +
+                    $"local={localSizeX}x{localSizeY}x{localSizeZ} " +
+                    $"bindings=[{string.Join(',', tracedGlobalBindings.Select(binding =>
+                        $"s{binding.ScalarAddress}:0x{binding.BaseAddress:X16}+{binding.DataLength}" +
+                        $":off=0x{tracedAddress - binding.BaseAddress:X}" +
+                        $":writeback={(binding.WriteBackToGuest ? 1 : 0)}"))}]");
+            }
+        }
         var gpuDispatch = false;
         var evaluationHandledByCpu = false;
         var computeError = string.Empty;
@@ -14465,6 +14633,23 @@ public static partial class AgcExports
             System.Globalization.CultureInfo.InvariantCulture,
             out var address)
             ? address
+            : null;
+    }
+
+    private static (uint Width, uint Height)? ParseOptionalDimensions(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var parts = value.Trim().Split('x', 'X');
+        return parts.Length == 2 &&
+               uint.TryParse(parts[0], out var width) &&
+               uint.TryParse(parts[1], out var height) &&
+               width > 0 &&
+               height > 0
+            ? (width, height)
             : null;
     }
 

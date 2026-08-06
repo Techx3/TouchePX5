@@ -164,8 +164,17 @@ public static partial class KernelMemoryCompatExports
     private static int _hostMemoryReadFallbackCount;
     private static int _nullWcscpyRecoveryCount;
     private static int _nullStrcasecmpRecoveryCount;
+    private static int _memoryRangeCopyTraceCount;
     private static string? _cachedApp0Root;
     private static string? _cachedDownload0Root;
+
+    // Narrow, opt-in diagnostic for tracking libc copies that populate a
+    // guest image. Keeping this in libc avoids page protection and therefore
+    // cannot stall native guest threads that share the same host page.
+    private static readonly ulong _memoryRangeCopyTraceAddress = ParseHexEnvironmentVariable(
+        "SHARPEMU_TRACE_MEMCPY_ADDRESS");
+    private static readonly ulong _memoryRangeCopyTraceLength = ParseHexEnvironmentVariable(
+        "SHARPEMU_TRACE_MEMCPY_SIZE");
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MemoryBasicInformation
@@ -1116,7 +1125,8 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (count > 0 && !ctx.Memory.TryCopy(destination, source, (ulong)count))
+        var copied = count == 0 || ctx.Memory.TryCopy(destination, source, (ulong)count);
+        if (count > 0 && !copied)
         {
             var payload = GC.AllocateUninitializedArray<byte>(count);
             if (!TryReadCompat(ctx, source, payload) || !TryWriteCompat(ctx, destination, payload))
@@ -1124,6 +1134,8 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
         }
+
+        TraceMemoryRangeCopy(ctx, destination, source, (ulong)count);
 
         ctx[CpuRegister.Rax] = destination;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -4363,6 +4375,94 @@ public static partial class KernelMemoryCompatExports
 
         Console.Error.WriteLine(
             $"[LOADER][TRACE] {operation}: ret=0x{returnRip:X16} size=0x{size:X16} count=0x{count:X16} align=0x{alignment:X16} in=0x{existingAddress:X16} result=0x{resultAddress:X16} errno={(errorCode.HasValue ? errorCode.Value : 0)}");
+    }
+
+    private static void TraceMemoryRangeCopy(
+        CpuContext ctx,
+        ulong destination,
+        ulong source,
+        ulong byteCount)
+    {
+        if (_memoryRangeCopyTraceAddress == 0 ||
+            _memoryRangeCopyTraceLength == 0 ||
+            byteCount == 0)
+        {
+            return;
+        }
+
+        var destinationHit = RangesOverlap(
+            destination,
+            byteCount,
+            _memoryRangeCopyTraceAddress,
+            _memoryRangeCopyTraceLength);
+        var sourceHit = RangesOverlap(
+            source,
+            byteCount,
+            _memoryRangeCopyTraceAddress,
+            _memoryRangeCopyTraceLength);
+        if (!destinationHit && !sourceHit)
+        {
+            return;
+        }
+
+        var traceIndex = Interlocked.Increment(ref _memoryRangeCopyTraceCount);
+        if (traceIndex > 4096)
+        {
+            return;
+        }
+
+        var returnRip = 0UL;
+        var stackPointer = ctx[CpuRegister.Rsp];
+        if (stackPointer != 0)
+        {
+            _ = ctx.TryReadUInt64(stackPointer, out returnRip);
+        }
+
+        var probeAddress = destinationHit
+            ? Math.Max(destination, _memoryRangeCopyTraceAddress)
+            : Math.Max(source, _memoryRangeCopyTraceAddress);
+        Span<byte> probe = stackalloc byte[16];
+        var readable = TryReadCompat(ctx, probeAddress, probe);
+        Console.Error.WriteLine(
+            $"[MEMRANGE] copy#{traceIndex} rip=0x{ctx.Rip:X16} ret=0x{returnRip:X16} " +
+            $"dst=0x{destination:X16} src=0x{source:X16} bytes=0x{byteCount:X} " +
+            $"dst_hit={(destinationHit ? 1 : 0)} src_hit={(sourceHit ? 1 : 0)} " +
+            $"probe=0x{probeAddress:X16}:{(readable ? Convert.ToHexString(probe) : "<unreadable>")}");
+    }
+
+    private static bool RangesOverlap(ulong leftStart, ulong leftLength, ulong rightStart, ulong rightLength)
+    {
+        if (leftLength == 0 || rightLength == 0)
+        {
+            return false;
+        }
+
+        var leftEnd = leftStart > ulong.MaxValue - leftLength
+            ? ulong.MaxValue
+            : leftStart + leftLength;
+        var rightEnd = rightStart > ulong.MaxValue - rightLength
+            ? ulong.MaxValue
+            : rightStart + rightLength;
+        return leftStart < rightEnd && rightStart < leftEnd;
+    }
+
+    private static ulong ParseHexEnvironmentVariable(string name)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return 0;
+        }
+
+        value = value.Trim();
+        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value[2..];
+        }
+
+        return ulong.TryParse(value, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : 0;
     }
 
     internal static string FormatStringFromVarArgs(CpuContext ctx, string format, int firstGpArgIndex)

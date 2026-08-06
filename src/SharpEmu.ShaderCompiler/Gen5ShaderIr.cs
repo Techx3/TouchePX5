@@ -334,7 +334,8 @@ public sealed record Gen5VertexInputBinding(
     int DataLength,
     bool DataPooled,
     bool PerInstance = false,
-    IReadOnlyList<uint>? AliasPcs = null);
+    IReadOnlyList<uint>? AliasPcs = null,
+    uint DestinationSelect = 0xFAC);
 
 public sealed record Gen5ShaderEvaluation(
     IReadOnlyList<uint> InitialScalarRegisters,

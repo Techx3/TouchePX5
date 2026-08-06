@@ -170,6 +170,60 @@ public sealed class Gen5ImageTests
     }
 
     [Fact]
+    public void TwoDimensionalImageLoadCanonicalizesUnitHeightToZero()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation(
+                "ImageLoad",
+                dimension: 1,
+                width: 16,
+                height: 1));
+        var fetch = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.ImageFetch);
+        var coordinate = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.CompositeConstruct &&
+                    item.Operands.Length == 4 &&
+                    item.Operands[1] == fetch.Operands[3]);
+        var y = coordinate.Operands[3];
+
+        Assert.Contains(
+            instructions,
+            item => item.Opcode == SpirvOp.Constant &&
+                    item.Operands.Length == 3 &&
+                    item.Operands[1] == y &&
+                    item.Operands[2] == 0);
+    }
+
+    [Fact]
+    public void TwoDimensionalImageLoadPreservesYForMultiRowImage()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation(
+                "ImageLoad",
+                dimension: 1,
+                width: 16,
+                height: 2));
+        var fetch = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.ImageFetch);
+        var coordinate = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.CompositeConstruct &&
+                    item.Operands.Length == 4 &&
+                    item.Operands[1] == fetch.Operands[3]);
+        var y = coordinate.Operands[3];
+
+        Assert.DoesNotContain(
+            instructions,
+            item => item.Opcode == SpirvOp.Constant &&
+                    item.Operands.Length == 3 &&
+                    item.Operands[1] == y &&
+                    item.Operands[2] == 0);
+    }
+
+    [Fact]
     public void PaletteDescriptorDecodesSizeMinusOneFieldsExactly()
     {
         const ulong address = 0x0000_1234_5678_0000;
@@ -275,20 +329,26 @@ public sealed class Gen5ImageTests
         uint dimension,
         uint dmask = 0xF,
         uint unifiedFormat = 71,
-        string? storageAliasOpcode = null) =>
+        string? storageAliasOpcode = null,
+        uint width = 256,
+        uint height = 1) =>
         CompileImageOperationWithContext(
             opcode,
             dimension,
             dmask,
             unifiedFormat,
-            storageAliasOpcode).Shader.Spirv;
+            storageAliasOpcode,
+            width,
+            height).Shader.Spirv;
 
     private static CompiledImageOperation CompileImageOperationWithContext(
         string opcode,
         uint dimension,
         uint dmask = 0xF,
         uint unifiedFormat = 71,
-        string? storageAliasOpcode = null)
+        string? storageAliasOpcode = null,
+        uint width = 256,
+        uint height = 1)
     {
         var addressRegisters = dimension == 2
             ? new uint[] { 0, 1, 2 }
@@ -329,8 +389,8 @@ public sealed class Gen5ImageTests
         var scalarRegisters = new uint[256];
         var descriptor = CreateDescriptor(
             unifiedFormat,
-            width: 256,
-            height: 1,
+            width,
+            height,
             address: 0x0000_1234_5678_0000,
             resourceType: dimension == 2 ? 10u : 9u);
         var bindings = new List<Gen5ImageBinding>

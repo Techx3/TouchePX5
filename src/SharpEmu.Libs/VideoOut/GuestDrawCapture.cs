@@ -18,19 +18,34 @@ internal static class GuestDrawCapture
 {
     private const int DefaultMaxCaptures = 256;
     private static readonly ConcurrentDictionary<string, byte> CapturedKeys = new();
+    private static readonly string? CaptureDirectory =
+        GetEnvironmentVariable("DRAW_CAPTURE_DIR");
     private static int _captureCount;
 
+    public static bool Enabled => !string.IsNullOrWhiteSpace(CaptureDirectory);
+
     public static void CaptureIfRequested(
+        byte[] vertexSpirv,
         byte[] pixelSpirv,
         IReadOnlyList<GuestDrawTexture> textures,
+        IReadOnlyList<GuestVertexBuffer> vertexBuffers,
+        GuestIndexBuffer? indexBuffer,
+        GuestRenderState renderState,
+        GuestDepthTarget? depthTarget,
         IReadOnlyList<GuestRenderTarget> targets,
         ulong shaderAddress,
         uint vertexCount,
         uint instanceCount,
         uint primitiveType)
     {
-        var directory = GetEnvironmentVariable("DRAW_CAPTURE_DIR");
+        var directory = CaptureDirectory;
         if (string.IsNullOrWhiteSpace(directory) || targets.Count == 0)
+        {
+            return;
+        }
+
+        var triggerFile = GetEnvironmentVariable("DRAW_CAPTURE_TRIGGER_FILE");
+        if (!string.IsNullOrWhiteSpace(triggerFile) && !File.Exists(triggerFile))
         {
             return;
         }
@@ -71,6 +86,30 @@ internal static class GuestDrawCapture
             .Append(vertexCount).Append('|')
             .Append(instanceCount).Append('|')
             .Append(primitiveType);
+
+        AppendHash(key, vertexSpirv);
+        foreach (var vertexBuffer in vertexBuffers)
+        {
+            var length = Math.Clamp(vertexBuffer.Length, 0, vertexBuffer.Data.Length);
+            key.Append('|').Append(vertexBuffer.Location)
+                .Append(':').Append(vertexBuffer.ComponentCount)
+                .Append(':').Append(vertexBuffer.DataFormat)
+                .Append(':').Append(vertexBuffer.NumberFormat)
+                .Append(':').Append(vertexBuffer.BaseAddress)
+                .Append(':').Append(vertexBuffer.Stride)
+                .Append(':').Append(vertexBuffer.OffsetBytes)
+                .Append(':').Append(vertexBuffer.PerInstance);
+            AppendHash(key, vertexBuffer.Data.AsSpan(0, length));
+        }
+
+        if (indexBuffer is not null)
+        {
+            var length = Math.Clamp(indexBuffer.Length, 0, indexBuffer.Data.Length);
+            key.Append("|index:").Append(indexBuffer.Is32Bit);
+            AppendHash(key, indexBuffer.Data.AsSpan(0, length));
+        }
+
+        AppendRenderStateKey(key, renderState, depthTarget);
 
         for (var index = 0; index < textures.Count; index++)
         {
@@ -124,6 +163,20 @@ internal static class GuestDrawCapture
         {
             var captureDirectory = Path.Combine(directory, $"draw-{captureNumber:D4}");
             Directory.CreateDirectory(captureDirectory);
+            string? vertexSpirvFile = null;
+            if (vertexSpirv.Length != 0)
+            {
+                vertexSpirvFile = "vertex.spv";
+                File.WriteAllBytes(Path.Combine(captureDirectory, vertexSpirvFile), vertexSpirv);
+            }
+
+            string? pixelSpirvFile = null;
+            if (pixelSpirv.Length != 0)
+            {
+                pixelSpirvFile = "pixel.spv";
+                File.WriteAllBytes(Path.Combine(captureDirectory, pixelSpirvFile), pixelSpirv);
+            }
+
             var textureReports = new object[payloads.Length];
             for (var index = 0; index < payloads.Length; index++)
             {
@@ -160,14 +213,62 @@ internal static class GuestDrawCapture
                 };
             }
 
+            var vertexBufferReports = new object[vertexBuffers.Count];
+            for (var index = 0; index < vertexBuffers.Count; index++)
+            {
+                var buffer = vertexBuffers[index];
+                var length = Math.Clamp(buffer.Length, 0, buffer.Data.Length);
+                var bytes = buffer.Data.AsSpan(0, length).ToArray();
+                var fileName = $"vertex-{index:D2}.bin";
+                File.WriteAllBytes(Path.Combine(captureDirectory, fileName), bytes);
+                vertexBufferReports[index] = new
+                {
+                    Index = index,
+                    buffer.Location,
+                    buffer.ComponentCount,
+                    buffer.DataFormat,
+                    buffer.NumberFormat,
+                    Address = $"0x{buffer.BaseAddress:X16}",
+                    buffer.Stride,
+                    buffer.OffsetBytes,
+                    buffer.PerInstance,
+                    File = fileName,
+                    ByteLength = bytes.Length,
+                    Sha256 = Convert.ToHexString(SHA256.HashData(bytes)),
+                };
+            }
+
+            object? indexBufferReport = null;
+            if (indexBuffer is not null)
+            {
+                var length = Math.Clamp(indexBuffer.Length, 0, indexBuffer.Data.Length);
+                var bytes = indexBuffer.Data.AsSpan(0, length).ToArray();
+                const string fileName = "index.bin";
+                File.WriteAllBytes(Path.Combine(captureDirectory, fileName), bytes);
+                indexBufferReport = new
+                {
+                    indexBuffer.Is32Bit,
+                    File = fileName,
+                    ByteLength = bytes.Length,
+                    Sha256 = Convert.ToHexString(SHA256.HashData(bytes)),
+                };
+            }
+
             var report = new
             {
                 Capture = captureNumber,
                 ShaderAddress = $"0x{shaderAddress:X16}",
+                VertexSpirvSha256 = Convert.ToHexString(SHA256.HashData(vertexSpirv)),
+                VertexSpirvFile = vertexSpirvFile,
                 PixelSpirvSha256 = Convert.ToHexString(SHA256.HashData(pixelSpirv)),
+                PixelSpirvFile = pixelSpirvFile,
                 vertexCount,
                 instanceCount,
                 primitiveType,
+                VertexBuffers = vertexBufferReports,
+                IndexBuffer = indexBufferReport,
+                RenderState = renderState,
+                DepthTarget = depthTarget,
                 Target = new
                 {
                     Address = $"0x{target.Address:X16}",
@@ -190,6 +291,26 @@ internal static class GuestDrawCapture
         {
             Console.Error.WriteLine($"[LOADER][WARN] Guest draw capture failed: {exception.Message}");
         }
+    }
+
+    private static void AppendHash(StringBuilder key, ReadOnlySpan<byte> bytes)
+    {
+        key.Append(':');
+        if (!bytes.IsEmpty)
+        {
+            key.Append(Convert.ToHexString(SHA256.HashData(bytes)));
+        }
+    }
+
+    private static void AppendRenderStateKey(
+        StringBuilder key,
+        GuestRenderState renderState,
+        GuestDepthTarget? depthTarget)
+    {
+        key.Append("|state:")
+            .Append(JsonSerializer.Serialize(renderState))
+            .Append("|depth:")
+            .Append(JsonSerializer.Serialize(depthTarget));
     }
 
     private static (string Kind, byte[] Bytes) GetTexturePayload(GuestDrawTexture texture)

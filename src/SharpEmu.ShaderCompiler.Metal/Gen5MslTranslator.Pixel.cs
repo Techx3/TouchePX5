@@ -794,7 +794,7 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
-            if (control.DwordCount == 0 || control.DwordCount > input.ComponentCount)
+            if (control.DwordCount == 0 || control.DwordCount > 4)
             {
                 error =
                     $"invalid vertex input fetch components={control.DwordCount} " +
@@ -802,12 +802,33 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            for (uint component = 0; component < control.DwordCount; component++)
+            var canonical = new string[4];
+            for (uint component = 0; component < canonical.Length; component++)
             {
-                var value = input.ComponentCount == 1
-                    ? $"sharpemu_vin.in{input.Location}"
-                    : $"sharpemu_vin.in{input.Location}[{component}]";
-                StoreVector(control.VectorData + component, AsUInt(value));
+                if (component < input.ComponentCount)
+                {
+                    var value = input.ComponentCount == 1
+                        ? $"sharpemu_vin.in{input.Location}"
+                        : $"sharpemu_vin.in{input.Location}[{component}]";
+                    canonical[component] = AsUInt(value);
+                }
+                else
+                {
+                    canonical[component] = "0u";
+                }
+            }
+
+            var one = input.NumberFormat is 4 or 5 ? "1u" : "0x3F800000u";
+            for (uint destination = 0; destination < control.DwordCount; destination++)
+            {
+                var selector = (input.DestinationSelect >> checked((int)(destination * 3))) & 7u;
+                var value = selector switch
+                {
+                    1 => one,
+                    >= 4 and <= 7 => canonical[selector - 4],
+                    _ => "0u",
+                };
+                StoreVector(control.VectorData + destination, value);
             }
 
             return true;
