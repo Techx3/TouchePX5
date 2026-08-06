@@ -44,6 +44,7 @@
   "Options.Env.DumpSpirv.Desc": "Dump AGC shaders and their SPIR-V translations to the shader-dumps folder.\nUse when reporting shader or rendering bugs.",
   "Options.Env.DropStaleAliasedDepth.Desc": "Compatibility: keep a depth buffer even when its address is a stale color surface.\nOnly use if automatic stale-depth detection breaks a title.",
   "Options.Env.DisableRtCompSwap.Desc": "Compatibility: ignore the render target's channel order (CB_COLOR_INFO.COMP_SWAP).\nOnly for titles that looked correct before this was honored.",
+  "Options.Env.SingleChannelCompSwap.Desc": "Store the shader's alpha in single-channel render targets that ask for it (COMP_SWAP=ALT_REV).\nNeeded by the Castlevania Dominus Collection title logo, whose mask is built this way.",
   "Options.Env.LogDirectMemory.Desc": "Log direct memory allocations and failures to the console.\nUse when a game aborts or exits during boot.",
   "Options.Env.LogIo.Desc": "Log file open, read, and path-resolve activity to the console.\nUse when a game cannot find its data files during boot.",
   "Options.Env.LogNp.Desc": "Log NP (PlayStation Network) library calls to the console.",

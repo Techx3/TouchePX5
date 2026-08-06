@@ -277,6 +277,10 @@ public partial class MainWindow : Window
             SetEnvironmentToggle(
                 "TOUCHEPX5_DISABLE_RT_COMP_SWAP",
                 EnvDisableRtCompSwapToggle.IsChecked == true);
+        EnvSingleChannelCompSwapToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle(
+                "TOUCHEPX5_HONOR_SINGLE_CHANNEL_COMP_SWAP",
+                EnvSingleChannelCompSwapToggle.IsChecked == true);
         EnvLogDirectMemoryToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("TOUCHEPX5_LOG_DIRECT_MEMORY", EnvLogDirectMemoryToggle.IsChecked == true);
         EnvLogIoToggle.IsCheckedChanged += (_, _) =>
@@ -695,6 +699,7 @@ public partial class MainWindow : Window
         EnvDumpSpirvRow.Description = loc.Get("Options.Env.DumpSpirv.Desc");
         EnvDropStaleAliasedDepthRow.Description = loc.Get("Options.Env.DropStaleAliasedDepth.Desc");
         EnvDisableRtCompSwapRow.Description = loc.Get("Options.Env.DisableRtCompSwap.Desc");
+        EnvSingleChannelCompSwapRow.Description = loc.Get("Options.Env.SingleChannelCompSwap.Desc");
         EnvLogDirectMemoryRow.Description = loc.Get("Options.Env.LogDirectMemory.Desc");
         EnvLogIoRow.Description = loc.Get("Options.Env.LogIo.Desc");
         EnvLogNpRow.Description = loc.Get("Options.Env.LogNp.Desc");
@@ -976,6 +981,8 @@ public partial class MainWindow : Window
             _settings.EnvironmentToggles.Contains("TOUCHEPX5_DISABLE_STALE_ALIASED_DEPTH");
         EnvDisableRtCompSwapToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("TOUCHEPX5_DISABLE_RT_COMP_SWAP");
+        EnvSingleChannelCompSwapToggle.IsChecked =
+            _settings.EnvironmentToggles.Contains("TOUCHEPX5_HONOR_SINGLE_CHANNEL_COMP_SWAP");
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_DIRECT_MEMORY");
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("TOUCHEPX5_LOG_NP");
