@@ -69,6 +69,8 @@ public static class Ngs2Exports
         public bool Playing { get; set; }
         public bool Paused { get; set; }
         public bool Stopped { get; set; }
+        public bool HasTransportCommand { get; set; }
+        public ulong DestinationVoiceHandle { get; set; }
         public int LoopStart { get; set; } = -1;
         public int LoopEnd { get; set; }
         public float Gain { get; set; } = 1f;
@@ -307,6 +309,9 @@ public static class Ngs2Exports
 
             switch (id)
             {
+                case 0x00000005:
+                    ApplyVoicePatchParam(ctx, voiceHandle, offset);
+                    break;
                 case 0x00000002:
                     ApplyPortVolumeParam(ctx, voiceHandle, offset);
                     break;
@@ -365,6 +370,7 @@ public static class Ngs2Exports
                     voice.Paused = false;
                     voice.Stopped = false;
                     voice.Playing = true;
+                    voice.HasTransportCommand = true;
                     break;
                 case 0x0002: // Stop
                 case 0x0004: // Stop immediately
@@ -372,6 +378,7 @@ public static class Ngs2Exports
                     voice.Paused = false;
                     voice.Stopped = true;
                     voice.Position = 0;
+                    voice.HasTransportCommand = true;
                     break;
                 case 0x0008: // Kill
                     voice.Playing = false;
@@ -381,6 +388,7 @@ public static class Ngs2Exports
                     voice.Pcm = null;
                     voice.PcmRight = null;
                     voice.SourceAddr = 0;
+                    voice.HasTransportCommand = true;
                     break;
                 case 0x0010: // Pause
                     if (voice.Playing)
@@ -389,6 +397,7 @@ public static class Ngs2Exports
                         voice.Paused = true;
                         voice.Stopped = false;
                     }
+                    voice.HasTransportCommand = true;
                     break;
                 case 0x0020: // Resume
                     if (voice.Paused && voice.Pcm is not null)
@@ -397,6 +406,7 @@ public static class Ngs2Exports
                         voice.Stopped = false;
                         voice.Playing = true;
                     }
+                    voice.HasTransportCommand = true;
                     break;
             }
 
@@ -407,6 +417,47 @@ public static class Ngs2Exports
                     $"[LOADER][TRACE] ngs2.voice_event count={traceCount} " +
                     $"voice=0x{voiceHandle:X16} event=0x{eventId:X} " +
                     $"playing={voice.Playing} paused={voice.Paused} stopped={voice.Stopped}");
+            }
+        }
+    }
+
+    // SceNgs2VoicePatchParam: header, source port, destination input and the
+    // destination voice handle. Some M2 titles configure a waveform and route
+    // it directly into the mastering rack without sending a separate Play
+    // event. Treat that completed route as the implicit transport request, but
+    // never override an explicit stop/pause/kill event.
+    private static void ApplyVoicePatchParam(CpuContext ctx, ulong voiceHandle, ulong paramOffset)
+    {
+        if (!ctx.TryReadUInt64(paramOffset + 16, out var destinationVoiceHandle))
+        {
+            return;
+        }
+
+        lock (StateGate)
+        {
+            if (!Voices.TryGetValue(voiceHandle, out var voice))
+            {
+                return;
+            }
+
+            voice.DestinationVoiceHandle = destinationVoiceHandle;
+            if (destinationVoiceHandle == 0)
+            {
+                // A removed route must become silent immediately. Do not mark
+                // it as an explicit transport stop: reconnecting the same
+                // implicit voice is allowed to restart it.
+                voice.Playing = false;
+                voice.Paused = false;
+                voice.Position = 0;
+                return;
+            }
+
+            if (!voice.HasTransportCommand && voice.Pcm is { Length: > 0 })
+            {
+                voice.Position = 0;
+                voice.Paused = false;
+                voice.Stopped = false;
+                voice.Playing = true;
             }
         }
     }
@@ -470,10 +521,16 @@ public static class Ngs2Exports
                 voice.LoopEnd = waveform.LoopEnd > 0 ? waveform.LoopEnd : waveform.Samples.Length;
                 voice.Position = 0;
                 voice.Paused = false;
-                voice.Stopped = false;
                 // Loading/changing a waveform is configuration, not a play
                 // request. Auto-starting here revived stopped menu music when a
                 // later effect updated the same NGS2 command list.
+                // M2's implicit variant is started only after it is patched to
+                // a destination voice; explicit transport state still wins.
+                if (voice.DestinationVoiceHandle != 0 && !voice.HasTransportCommand)
+                {
+                    voice.Stopped = false;
+                    voice.Playing = true;
+                }
             }
 
             if (ShouldTrace())
