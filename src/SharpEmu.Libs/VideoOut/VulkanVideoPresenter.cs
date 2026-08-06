@@ -438,15 +438,17 @@ internal static unsafe class VulkanVideoPresenter
             ? renderBudgetMs
             : OperatingSystem.IsMacOS() ? 12L : 0L) *
         System.Diagnostics.Stopwatch.Frequency / 1000L;
-    // Coalesce short guest submission bursts before presenting. Two milliseconds
-    // preserves ordered multi-surface frames without consuming the 16.7 ms frame
-    // budget; diagnostics can still override or disable the wait explicitly.
+    // Coalesce short guest submission bursts before presenting. Dedicated
+    // Windows/Linux render threads should not idle here: the guest queue already
+    // preserves ordering, and repeated waits can consume an entire 16.7 ms frame
+    // while a producer backlog is present. Keep the bounded wait on macOS, where
+    // work arrives through the host event loop, and retain an explicit override.
     private static readonly int _guestWorkFollowupWaitMs =
         int.TryParse(
             Environment.GetEnvironmentVariable("SHARPEMU_RENDER_FOLLOWUP_WAIT_MS"),
             out var followupWaitMs) && followupWaitMs >= 0
             ? followupWaitMs
-            : 2;
+            : OperatingSystem.IsMacOS() ? 2 : 0;
     private static readonly long _guestWorkFollowupBudgetTicks =
         (long.TryParse(
              Environment.GetEnvironmentVariable("SHARPEMU_RENDER_FOLLOWUP_BUDGET_MS"),
@@ -4198,7 +4200,17 @@ internal static unsafe class VulkanVideoPresenter
         private readonly VulkanHostSurface? _hostSurface;
         private int _lastHostResizeGeneration;
         private bool _embeddedLoopClosed;
-        private const int MaxInFlightGuestSubmissions = 8;
+        // Keep guest submissions bounded to prevent slow compute from retaining
+        // command buffers and image snapshots indefinitely. Eight submissions
+        // under-filled dedicated GPUs in draw-heavy titles; Windows/Linux can
+        // safely keep a wider bounded window while macOS retains the conservative
+        // limit used by its main-thread renderer.
+        private static readonly int MaxInFlightGuestSubmissions =
+            int.TryParse(
+                Environment.GetEnvironmentVariable("SHARPEMU_MAX_IN_FLIGHT_SUBMISSIONS"),
+                out var maxInFlightGuestSubmissions) && maxInFlightGuestSubmissions >= 2
+                ? Math.Min(maxInFlightGuestSubmissions, 256)
+                : OperatingSystem.IsMacOS() ? 8 : 32;
         private Vk _vk = null!;
         private KhrSurface _surfaceApi = null!;
         private KhrSwapchain _swapchainApi = null!;
