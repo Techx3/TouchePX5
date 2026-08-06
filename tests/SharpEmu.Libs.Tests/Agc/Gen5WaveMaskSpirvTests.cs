@@ -149,6 +149,53 @@ public sealed class Gen5WaveMaskSpirvTests
             EnumerateInstructions(spirv).Select(static item => item.Op));
     }
 
+    [Fact]
+    public void PixelExitWithoutMappedExport_KillsInsteadOfWritingBlack()
+    {
+        var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Gen5ShaderAtomicDecodeTests.WriteProgram(memory, ShaderAddress, [0xBF81_0000u]);
+
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                ctx,
+                ShaderAddress,
+                out var program,
+                out var error),
+            error);
+
+        var state = new Gen5ShaderState(program!, new uint[16], Metadata: null);
+        var evaluation = new Gen5ShaderEvaluation(
+            new uint[128],
+            new uint[128],
+            Array.Empty<Gen5ImageBinding>(),
+            Array.Empty<Gen5GlobalMemoryBinding>());
+
+        Assert.True(
+            Gen5SpirvTranslator.TryCompilePixelShader(
+                state,
+                evaluation,
+                Gen5PixelOutputKind.Float,
+                out var shader,
+                out error),
+            error);
+
+        var instructions = EnumerateInstructions(shader.Spirv).ToArray();
+        var logicalAndResults = instructions
+            .Where(static instruction =>
+                instruction.Op == (ushort)SpirvOp.LogicalAnd &&
+                instruction.WordCount == 5)
+            .Select(instruction => ReadWord(shader.Spirv, instruction.Offset + 8))
+            .ToHashSet();
+
+        Assert.Contains(instructions, static instruction =>
+            instruction.Op == (ushort)SpirvOp.Kill);
+        Assert.Contains(instructions, instruction =>
+            instruction.Op == (ushort)SpirvOp.BranchConditional &&
+            instruction.WordCount >= 4 &&
+            logicalAndResults.Contains(ReadWord(shader.Spirv, instruction.Offset + 4)));
+    }
+
     // True when the module contains an OpBitwiseAnd whose operand is a 64-bit
     // constant of value 1 — the current-lane bit that IsCurrentLaneSet masks the
     // wave mask with before the non-zero test.
