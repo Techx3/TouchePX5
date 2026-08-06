@@ -91,7 +91,7 @@ public sealed class VulkanGuestImageCpuSyncPolicyTests
     }
 
     [Fact]
-    public void CpuBackedImageAlwaysRefreshes()
+    public void UntrackedCpuBackedImageRefreshes()
     {
         Assert.True(
             VulkanVideoPresenter.ShouldRefreshGuestImageFromCpu(
@@ -166,6 +166,77 @@ public sealed class VulkanGuestImageCpuSyncPolicyTests
                 textureWriteGeneration: 4,
                 hasUploadedGeneration: true,
                 uploadedGeneration: 4));
+    }
+
+    [Fact]
+    public void StaleQueuedGenerationDoesNotOverwriteNewerCpuUpload()
+    {
+        // The render queue retained generation 2 while the frame-boundary
+        // drain already uploaded generation 5 from live guest memory.
+        Assert.False(
+            VulkanVideoPresenter.ShouldRefreshGuestImageFromCpu(
+                isCpuBacked: true,
+                textureWriteGeneration: 2,
+                hasUploadedGeneration: true,
+                uploadedGeneration: 5));
+    }
+
+    [Fact]
+    public void InitialCpuBackedSnapshotStillUploadsBeforeGenerationIsRecorded()
+    {
+        Assert.True(
+            VulkanVideoPresenter.ShouldRefreshGuestImageFromCpu(
+                isCpuBacked: true,
+                textureWriteGeneration: 0,
+                hasUploadedGeneration: false,
+                uploadedGeneration: 0));
+    }
+
+    [Fact]
+    public void StaleQueuedContentsUseAStandaloneSnapshot()
+    {
+        Assert.True(
+            VulkanVideoPresenter.ShouldUseStandaloneCpuTextureSnapshot(
+                hasInputPixels: true,
+                textureWriteGeneration: 3,
+                hasUploadedGeneration: true,
+                uploadedGeneration: 7,
+                inputFingerprint: 0x1234,
+                uploadedFingerprint: 0x5678));
+    }
+
+    [Fact]
+    public void SameGenerationRaceUsesTheDrawsConcreteSnapshot()
+    {
+        Assert.True(
+            VulkanVideoPresenter.ShouldUseStandaloneCpuTextureSnapshot(
+                hasInputPixels: true,
+                textureWriteGeneration: 7,
+                hasUploadedGeneration: true,
+                uploadedGeneration: 7,
+                inputFingerprint: 0x1234,
+                uploadedFingerprint: 0x5678));
+    }
+
+    [Fact]
+    public void MatchingOrNewerContentsKeepTheSharedImagePath()
+    {
+        Assert.False(
+            VulkanVideoPresenter.ShouldUseStandaloneCpuTextureSnapshot(
+                hasInputPixels: true,
+                textureWriteGeneration: 3,
+                hasUploadedGeneration: true,
+                uploadedGeneration: 7,
+                inputFingerprint: 0x1234,
+                uploadedFingerprint: 0x1234));
+        Assert.False(
+            VulkanVideoPresenter.ShouldUseStandaloneCpuTextureSnapshot(
+                hasInputPixels: true,
+                textureWriteGeneration: 8,
+                hasUploadedGeneration: true,
+                uploadedGeneration: 7,
+                inputFingerprint: 0x1234,
+                uploadedFingerprint: 0x5678));
     }
 
     [Fact]

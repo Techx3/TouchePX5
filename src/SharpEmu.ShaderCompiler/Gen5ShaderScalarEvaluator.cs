@@ -86,6 +86,40 @@ public static class Gen5ShaderScalarEvaluator
         return writer is not null && Ir.Gen5ScalarSsa.WritesVccImplicitly(writer);
     }
 
+    /// <summary>
+    /// A descriptor assembled from registers that differ per incoming path is not a
+    /// descriptor; it is whichever path the linear walk happened to take last.
+    /// </summary>
+    private static bool IsDescriptorFromDivergentMerge(
+        Gen5ShaderState state,
+        uint pc,
+        uint scalarBase,
+        uint registerCount)
+    {
+        if (!_divergentDescriptorGuard)
+        {
+            return false;
+        }
+
+        var ssa = GetScalarSsa(state);
+        if (!ssa.Graph.HasControlFlow)
+        {
+            return false;
+        }
+
+        for (var offset = 0u; offset < registerCount; offset++)
+        {
+            var reaching = ssa.GetReachingDefinitionAt(pc, scalarBase + offset);
+            if (reaching.State == Ir.IrReachingState.Multiple ||
+                ssa.GetScalarAt(pc, scalarBase + offset).State == Ir.IrScalarState.Merged)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static void TraceDivergentDescriptor(
         Gen5ShaderState state,
         Gen5ShaderInstruction instruction,
@@ -166,7 +200,8 @@ public static class Gen5ShaderScalarEvaluator
         uint NumRecords,
         ulong SizeBytes,
         uint NumberFormat,
-        uint DataFormat);
+        uint DataFormat,
+        uint DestinationSelect);
 
     private readonly record struct ScalarPathState(
         uint StartPc,
@@ -876,10 +911,20 @@ public static class Gen5ShaderScalarEvaluator
         var bindingOffset = unchecked((uint)control.OffsetBytes + scalarOffset);
         var bindingDataFormat = descriptor.DataFormat;
         var bindingNumberFormat = descriptor.NumberFormat;
+        // The opcode width is the number of destination VGPRs, not necessarily
+        // the number of components stored by the descriptor.  For example,
+        // BUFFER_LOAD_FORMAT_XYZW with DATA_FORMAT_32_32_32 reads only three
+        // stored floats. The descriptor's dst_sel reconstructs the fourth
+        // destination lane. Describing it to Vulkan as four stored floats
+        // consumes the following attribute as W.
+        var storedComponents = GetBufferDataFormatComponentCount(bindingDataFormat);
+        var componentCount = storedComponents == 0
+            ? control.DwordCount
+            : Math.Min(control.DwordCount, storedComponents);
         binding = new Gen5VertexInputBinding(
             instruction.Pc,
             location,
-            control.DwordCount,
+            componentCount,
             bindingDataFormat,
             bindingNumberFormat,
             descriptor.BaseAddress,
@@ -887,9 +932,20 @@ public static class Gen5ShaderScalarEvaluator
             bindingOffset,
             Data: [],
             DataLength: desiredDataLength,
-            DataPooled: false);
+            DataPooled: false,
+            DestinationSelect: descriptor.DestinationSelect);
         return true;
     }
+
+    private static uint GetBufferDataFormatComponentCount(uint dataFormat) =>
+        dataFormat switch
+        {
+            1 or 2 or 4 => 1,
+            3 or 5 or 11 => 2,
+            6 or 7 or 13 => 3,
+            8 or 9 or 10 or 12 or 14 => 4,
+            _ => 0,
+        };
 
     private static bool TryCaptureVertexInputData(
         CpuContext ctx,
@@ -2063,12 +2119,11 @@ public static class Gen5ShaderScalarEvaluator
         var address = unchecked(
             baseAddress +
             byteOffset) & ~3UL;
-        // Multiple reaching definitions are normal for descriptors selected by
-        // guest control flow.  Until the scalar evaluator models the selected
-        // path, the concrete register contents remain a better approximation
-        // than unbinding every resource that crosses a merge.  Only reject an
-        // offset whose writer is provably unmodelled (for example vector VCC).
-        var descriptorDiverged =
+        var descriptorDiverged = IsDescriptorFromDivergentMerge(
+            state,
+            instruction.Pc,
+            scalarBase.Value,
+            isBufferLoad ? 4u : 2u) ||
             IsOffsetFromUnmodelledWriter(state, instruction, control);
         if (descriptorDiverged)
         {
@@ -2363,7 +2418,7 @@ public static class Gen5ShaderScalarEvaluator
             word2 == 0 &&
             word3 == 0)
         {
-            descriptor = new BufferDescriptor(0, 0, 0, 0, 0, 0);
+            descriptor = new BufferDescriptor(0, 0, 0, 0, 0, 0, 0xFAC);
             return true;
         }
 
@@ -2375,7 +2430,7 @@ public static class Gen5ShaderScalarEvaluator
                 return false;
             }
 
-            descriptor = new BufferDescriptor(0, 0, 0, 0, 0, 0);
+            descriptor = new BufferDescriptor(0, 0, 0, 0, 0, 0, 0xFAC);
             return true;
         }
 
@@ -2393,7 +2448,14 @@ public static class Gen5ShaderScalarEvaluator
         var sizeBytes = stride == 0
             ? word2
             : (ulong)stride * word2;
-        descriptor = new BufferDescriptor(baseAddress, stride, word2, sizeBytes, numberFormat, dataFormat);
+        descriptor = new BufferDescriptor(
+            baseAddress,
+            stride,
+            word2,
+            sizeBytes,
+            numberFormat,
+            dataFormat,
+            word3 & 0xFFFu);
         return true;
     }
 

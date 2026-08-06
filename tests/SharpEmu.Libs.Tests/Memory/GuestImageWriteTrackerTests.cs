@@ -209,13 +209,8 @@ public sealed unsafe class GuestImageWriteTrackerTests
     }
 
     [Fact]
-    public void WatchOnlyRangesAreExcludedFromManagedWriteSnapshot()
+    public void ManagedWriteDirtiesWatchOnlyRangeWithoutPageProtection()
     {
-        if (!GuestImageWriteTracker.Enabled)
-        {
-            return;
-        }
-
         var address = AllocateTrackedPages(out var allocation);
         try
         {
@@ -224,9 +219,25 @@ public sealed unsafe class GuestImageWriteTrackerTests
                 TrackedByteCount,
                 source: "test.watch-only",
                 protect: false);
-            // Watch-only must not widen the NotifyManagedWrite hot path.
+            Assert.True(
+                GuestImageWriteTracker.TryGetWriteGeneration(address, out var generation));
+            Assert.Equal(0, generation);
+
+            // Managed HLE copies must invalidate the host image even when
+            // native page-fault tracking is disabled.
             GuestImageWriteTracker.NotifyManagedWrite(address, sizeof(uint));
+            Assert.True(GuestImageWriteTracker.PeekDirty(address));
+            Assert.True(GuestImageWriteTracker.ConsumeDirty(address));
             Assert.False(GuestImageWriteTracker.ConsumeDirty(address));
+            Assert.True(
+                GuestImageWriteTracker.TryGetWriteGeneration(address, out generation));
+            Assert.Equal(1, generation);
+
+            GuestImageWriteTracker.NotifyManagedWrite(address + 32, sizeof(uint));
+            Assert.True(GuestImageWriteTracker.ConsumeDirty(address));
+            Assert.True(
+                GuestImageWriteTracker.TryGetWriteGeneration(address, out generation));
+            Assert.Equal(2, generation);
             Assert.True(
                 GuestImageWriteTracker.TryGetProtectionState(
                     address,
@@ -238,6 +249,38 @@ public sealed unsafe class GuestImageWriteTrackerTests
         finally
         {
             GuestImageWriteTracker.Untrack(address);
+            FreeTrackedPages(allocation);
+        }
+    }
+
+    [Fact]
+    public void ManagedWriteDoesNotDirtyNeighbourSharingHostPage()
+    {
+        var pageAddress = AllocateTrackedPages(out var allocation);
+        var firstAddress = pageAddress + 128;
+        var secondAddress = pageAddress + 512;
+        try
+        {
+            GuestImageWriteTracker.Track(
+                firstAddress,
+                64,
+                source: "test.first-suballocation",
+                protect: false);
+            GuestImageWriteTracker.Track(
+                secondAddress,
+                64,
+                source: "test.second-suballocation",
+                protect: false);
+
+            GuestImageWriteTracker.NotifyManagedWrite(firstAddress + 4, sizeof(uint));
+
+            Assert.True(GuestImageWriteTracker.ConsumeDirty(firstAddress));
+            Assert.False(GuestImageWriteTracker.ConsumeDirty(secondAddress));
+        }
+        finally
+        {
+            GuestImageWriteTracker.Untrack(firstAddress);
+            GuestImageWriteTracker.Untrack(secondAddress);
             FreeTrackedPages(allocation);
         }
     }

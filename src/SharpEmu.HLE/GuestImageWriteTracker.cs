@@ -70,23 +70,35 @@ public static unsafe class GuestImageWriteTracker
         public static readonly RangeSnapshot Empty = new([]);
 
         public readonly TrackedRange[] Ranges;
+        public readonly ulong[] PrefixMaxEnds;
         public readonly ulong Start;
         public readonly ulong End;
 
-        public RangeSnapshot(TrackedRange[] ranges)
+        public RangeSnapshot(TrackedRange[] ranges, bool usePageBounds = true)
         {
             Ranges = ranges;
+            PrefixMaxEnds = new ulong[ranges.Length];
             Start = ulong.MaxValue;
             End = 0;
-            foreach (var range in ranges)
+            for (var index = 0; index < ranges.Length; index++)
             {
-                Start = Math.Min(Start, range.Start);
-                End = Math.Max(End, range.End);
+                var range = ranges[index];
+                var start = usePageBounds ? range.Start : range.Address;
+                var end = usePageBounds
+                    ? range.End
+                    : range.Address > ulong.MaxValue - range.ByteCount
+                        ? ulong.MaxValue
+                        : range.Address + range.ByteCount;
+                Start = Math.Min(Start, start);
+                End = Math.Max(End, end);
+                PrefixMaxEnds[index] = End;
             }
         }
     }
 
     private static RangeSnapshot _rangeSnapshot = RangeSnapshot.Empty;
+    private static RangeSnapshot _managedRangeSnapshot = RangeSnapshot.Empty;
+    private static long _dirtyEpoch;
 
     // Windows defaults off: VirtualProtect fault sync still regresses titles
     // like Dead Cells / Demon's Souls. Opt in with SHARPEMU_GUEST_IMAGE_CPU_SYNC=1
@@ -145,6 +157,19 @@ public static unsafe class GuestImageWriteTracker
     public static bool Enabled => _enabled;
 
     /// <summary>
+    /// Managed HLE writes are observable without changing guest page
+    /// protection. Keep this path available even when native fault tracking is
+    /// disabled on Windows: libc memcpy/memmove commonly populate GPU images.
+    /// </summary>
+    public static bool ManagedWriteTrackingEnabled => true;
+
+    /// <summary>
+    /// Monotonic signal used by GPU backends to skip dirty-range scans when
+    /// no tracked guest image has received a new CPU write.
+    /// </summary>
+    public static long DirtyEpoch => Volatile.Read(ref _dirtyEpoch);
+
+    /// <summary>
     /// Test/diagnostics helper: whether <paramref name="address"/> is tracked
     /// with write protection armed (watch-only ranges report protect=false).
     /// </summary>
@@ -155,11 +180,6 @@ public static unsafe class GuestImageWriteTracker
     {
         protect = false;
         armed = false;
-        if (!_enabled)
-        {
-            return false;
-        }
-
         lock (_gate)
         {
             if (!_rangesByAddress.TryGetValue(address, out var range))
@@ -233,11 +253,15 @@ public static unsafe class GuestImageWriteTracker
         string source = "unspecified",
         bool protect = true)
     {
-        if (!_enabled || address == 0 || byteCount == 0)
+        if (address == 0 || byteCount == 0)
         {
             return;
         }
 
+        // Native page protection remains opt-in. When it is disabled, retain
+        // a watch-only range so managed TryWrite/TryCopy operations can still
+        // invalidate the corresponding host image without faulting.
+        protect &= _enabled;
         var (start, length) = PageAlign(address, byteCount);
         lock (_gate)
         {
@@ -293,6 +317,7 @@ public static unsafe class GuestImageWriteTracker
                 if (protect && !range.Protect)
                 {
                     range.Protect = true;
+                    RebuildSnapshotLocked();
                 }
             }
 
@@ -309,11 +334,6 @@ public static unsafe class GuestImageWriteTracker
 
     public static void Untrack(ulong address)
     {
-        if (!_enabled)
-        {
-            return;
-        }
-
         lock (_gate)
         {
             if (_rangesByAddress.TryGetValue(address, out var range))
@@ -332,11 +352,6 @@ public static unsafe class GuestImageWriteTracker
     /// </summary>
     public static bool ConsumeDirty(ulong address)
     {
-        if (!_enabled)
-        {
-            return false;
-        }
-
         lock (_gate)
         {
             if (!_rangesByAddress.TryGetValue(address, out var range))
@@ -356,11 +371,6 @@ public static unsafe class GuestImageWriteTracker
     /// </summary>
     public static bool PeekDirty(ulong address)
     {
-        if (!_enabled)
-        {
-            return false;
-        }
-
         lock (_gate)
         {
             if (!_rangesByAddress.TryGetValue(address, out var range))
@@ -375,11 +385,6 @@ public static unsafe class GuestImageWriteTracker
 
     public static void Rearm(ulong address)
     {
-        if (!_enabled)
-        {
-            return;
-        }
-
         lock (_gate)
         {
             if (_rangesByAddress.TryGetValue(address, out var range) &&
@@ -398,11 +403,6 @@ public static unsafe class GuestImageWriteTracker
     public static bool TryGetWriteGeneration(ulong address, out long generation)
     {
         generation = 0;
-        if (!_enabled)
-        {
-            return false;
-        }
-
         lock (_gate)
         {
             if (!_rangesByAddress.TryGetValue(address, out var range))
@@ -425,7 +425,7 @@ public static unsafe class GuestImageWriteTracker
     /// </summary>
     public static void NotifyManagedWrite(ulong address, ulong byteCount)
     {
-        if (!_enabled || address == 0 || byteCount == 0)
+        if (address == 0 || byteCount == 0)
         {
             return;
         }
@@ -438,22 +438,61 @@ public static unsafe class GuestImageWriteTracker
         // write, and almost none of them touch tracked texture pages. The
         // bounds live inside the snapshot so they are always consistent with
         // the ranges the per-page visit below would consult.
-        var snapshot = Volatile.Read(ref _rangeSnapshot);
+        var snapshot = Volatile.Read(ref _managedRangeSnapshot);
         if (snapshot.Ranges.Length == 0 || end <= snapshot.Start || address >= snapshot.End)
         {
             return;
         }
 
-        var candidate = address;
-        while (candidate < end)
+        // Ranges are sorted by start. Most writes overlap zero or one image,
+        // so this remains allocation-free and exits as soon as later ranges
+        // cannot intersect the write. Protected ranges still use the existing
+        // page-fault path to make their pages writable before the copy.
+        var ranges = snapshot.Ranges;
+        var prefixMaxEnds = snapshot.PrefixMaxEnds;
+        var lower = 0;
+        var upper = ranges.Length;
+        while (lower < upper)
         {
-            _ = TryHandleWriteFault(candidate);
-            var nextPage = (candidate & ~0xFFFUL) + 0x1000UL;
-            if (nextPage <= candidate)
+            var middle = lower + ((upper - lower) / 2);
+            if (prefixMaxEnds[middle] <= address)
+            {
+                lower = middle + 1;
+            }
+            else
+            {
+                upper = middle;
+            }
+        }
+
+        for (var index = lower; index < ranges.Length; index++)
+        {
+            var range = ranges[index];
+            var rangeEnd = range.Address > ulong.MaxValue - range.ByteCount
+                ? ulong.MaxValue
+                : range.Address + range.ByteCount;
+            if (range.Address >= end)
             {
                 break;
             }
-            candidate = nextPage;
+
+            if (rangeEnd <= address)
+            {
+                continue;
+            }
+
+            if (range.Protect)
+            {
+                _ = TryHandleWriteFault(Math.Max(address, range.Start));
+                continue;
+            }
+
+            var wasDirty = Interlocked.Exchange(ref range.Dirty, 1) != 0;
+            if (!wasDirty)
+            {
+                Interlocked.Increment(ref range.WriteGeneration);
+                Interlocked.Increment(ref _dirtyEpoch);
+            }
         }
     }
 
@@ -572,6 +611,7 @@ public static unsafe class GuestImageWriteTracker
             if (wasArmed || (!range.Protect && !wasDirty))
             {
                 Interlocked.Increment(ref range.WriteGeneration);
+                Interlocked.Increment(ref _dirtyEpoch);
             }
             if (wasArmed &&
                 range.TraceLifetime &&
@@ -634,13 +674,20 @@ public static unsafe class GuestImageWriteTracker
 
     private static void RebuildSnapshotLocked()
     {
-        // Fault / NotifyManagedWrite hot paths must only see protected ranges.
-        // Watch-only texture-cache registrations used to widen Start..End across
-        // nearly all GPU memory so every managed guest write walked this path.
+        // Signal handlers may only touch protected ranges. Managed HLE writes
+        // use a separate sorted snapshot which also contains watch-only render
+        // targets; this preserves CPU/GPU coherence without VirtualProtect.
         var protectedRanges = _rangesByAddress.Values
             .Where(static range => range.Protect)
+            .OrderBy(static range => range.Start)
+            .ToArray();
+        var managedRanges = _rangesByAddress.Values
+            .OrderBy(static range => range.Address)
             .ToArray();
         Volatile.Write(ref _rangeSnapshot, new RangeSnapshot(protectedRanges));
+        Volatile.Write(
+            ref _managedRangeSnapshot,
+            new RangeSnapshot(managedRanges, usePageBounds: false));
     }
 
     private static (ulong Start, ulong Length) PageAlign(ulong address, ulong byteCount)

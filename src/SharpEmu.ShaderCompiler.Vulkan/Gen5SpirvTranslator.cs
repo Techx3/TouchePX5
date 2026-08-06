@@ -351,7 +351,8 @@ public static partial class Gen5SpirvTranslator
             uint Type,
             uint ComponentType,
             uint ComponentCount,
-            VertexInputComponentKind ComponentKind);
+            VertexInputComponentKind ComponentKind,
+            uint DestinationSelect);
 
         private readonly record struct SpirvPixelOutput(
             uint Variable,
@@ -1458,7 +1459,8 @@ public static partial class Gen5SpirvTranslator
                     type,
                     componentType,
                     input.ComponentCount,
-                    componentKind);
+                    componentKind,
+                    input.DestinationSelect);
                 _vertexInputsByPc.TryAdd(input.Pc, vertexInput);
                 foreach (var aliasPc in input.AliasPcs ?? [])
                 {
@@ -3404,8 +3406,7 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
-            if (control.DwordCount == 0 ||
-                control.DwordCount > input.ComponentCount)
+            if (control.DwordCount == 0 || control.DwordCount > 4)
             {
                 error =
                     $"invalid vertex input fetch components={control.DwordCount} " +
@@ -3414,19 +3415,48 @@ public static partial class Gen5SpirvTranslator
             }
 
             var loaded = Load(input.Type, input.Variable);
-            for (uint component = 0; component < control.DwordCount; component++)
+            var one = UInt(input.ComponentKind == VertexInputComponentKind.Float
+                ? 0x3F800000u
+                : 1u);
+            var canonical = new uint[4];
+            for (uint component = 0; component < canonical.Length; component++)
             {
-                var value = input.ComponentCount == 1
-                    ? loaded
-                    : _module.AddInstruction(
-                        SpirvOp.CompositeExtract,
-                        input.ComponentType,
-                        loaded,
-                        component);
-                var raw = input.ComponentKind == VertexInputComponentKind.Uint
-                    ? value
-                    : Bitcast(_uintType, value);
-                StoreV(control.VectorData + component, raw);
+                if (component < input.ComponentCount)
+                {
+                    var value = input.ComponentCount == 1
+                        ? loaded
+                        : _module.AddInstruction(
+                            SpirvOp.CompositeExtract,
+                            input.ComponentType,
+                            loaded,
+                            component);
+                    canonical[component] = input.ComponentKind == VertexInputComponentKind.Uint
+                        ? value
+                        : Bitcast(_uintType, value);
+                }
+                else
+                {
+                    // Buffer format fetches complete absent channels as
+                    // (0, 0, 0, 1) before applying dst_sel.  This matters for
+                    // 32_32_32 position streams whose descriptor selects W:
+                    // W=0 drops every translation and breaks homogeneous
+                    // vertex transforms.
+                    canonical[component] = component == 3
+                        ? one
+                        : UInt(0);
+                }
+            }
+
+            for (uint destination = 0; destination < control.DwordCount; destination++)
+            {
+                var selector = (input.DestinationSelect >> checked((int)(destination * 3))) & 7u;
+                var raw = selector switch
+                {
+                    1 => one,
+                    >= 4 and <= 7 => canonical[selector - 4],
+                    _ => UInt(0),
+                };
+                StoreV(control.VectorData + destination, raw);
             }
 
             return true;
@@ -3661,13 +3691,24 @@ public static partial class Gen5SpirvTranslator
                         imageObject);
                     var coordinateComponentCount =
                         ImageCoordinateComponentCount(resource);
+                    Gen5ImageDescriptor? descriptor = null;
+                    if (Gen5ImageDescriptor.TryDecode(
+                            _evaluation.ImageBindings[bindingIndex].ResourceDescriptor,
+                            out var decodedDescriptor,
+                            out _))
+                    {
+                        descriptor = decodedDescriptor;
+                    }
                     // IMAGE_LOAD uses the guest integer texel coordinates as-is.
-                    // Clamping them changes GCN's lookup semantics and, notably,
-                    // corrupts indexed-texture palette fetches.
+                    // Clamping them changes GCN's lookup semantics. Unit-sized
+                    // descriptor axes are the exception: Vulkan texel fetches
+                    // are undefined for the guest's non-zero unused coordinate,
+                    // so canonicalize only those axes to zero.
                     var coordinates = BuildIntegerCoordinates(
                         image,
                         0,
-                        coordinateComponentCount);
+                        coordinateComponentCount,
+                        descriptor);
                     sampled = _module.AddInstruction(
                         SpirvOp.ImageFetch,
                         resource.VectorType,
@@ -4218,7 +4259,8 @@ public static partial class Gen5SpirvTranslator
         private uint BuildIntegerCoordinates(
             Gen5ImageControl image,
             int start,
-            uint componentCount)
+            uint componentCount,
+            Gen5ImageDescriptor? descriptor = null)
         {
             var components = new uint[checked((int)componentCount)];
             for (var component = 0; component < components.Length; component++)
@@ -4229,7 +4271,9 @@ public static partial class Gen5SpirvTranslator
                 // zero. Reading vaddr+1 here consumed an unrelated VGPR and
                 // made 256x1 palette IMAGE_LOAD operations intermittently
                 // return black.
-                components[component] = image.Dimension == 0 && component == 1
+                components[component] =
+                    (image.Dimension == 0 && component == 1) ||
+                    IsUnitExtentAxis(descriptor, component)
                     ? _module.Constant(_intType, 0)
                     : Bitcast(
                         _intType,
@@ -4241,6 +4285,17 @@ public static partial class Gen5SpirvTranslator
                 _module.TypeVector(_intType, componentCount),
                 components);
         }
+
+        private static bool IsUnitExtentAxis(
+            Gen5ImageDescriptor? descriptor,
+            int component) =>
+            descriptor is not null && component switch
+            {
+                0 => descriptor.Width == 1,
+                1 => descriptor.Height == 1,
+                2 => descriptor.Depth == 1,
+                _ => false,
+            };
 
         private uint BuildClampedIntegerCoordinates(
             Gen5ImageControl image,
