@@ -716,6 +716,21 @@ public static partial class Gen5SpirvTranslator
                     // requires the merge instruction to be immediately followed
                     // by its structured branch terminator.
                     var laneActive = Load(_boolType, _exec);
+                    if (_pixelOutputs.Count != 0)
+                    {
+                        // Some pixel shaders implement palette transparency by
+                        // branching directly to S_ENDPGM before their MRT export.
+                        // EXEC is still active on that path, but the guest did
+                        // not produce a color value. Treating the zero-initialized
+                        // host output as a real export turns transparent texels
+                        // into opaque black rectangles. A mapped color fragment
+                        // therefore survives only after reaching an MRT export.
+                        laneActive = _module.AddInstruction(
+                            SpirvOp.LogicalAnd,
+                            _boolType,
+                            laneActive,
+                            Load(_boolType, _reachedPixelExport));
+                    }
                     _module.AddStatement(
                         SpirvOp.SelectionMerge,
                         returnLabel,
