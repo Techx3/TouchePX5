@@ -47,4 +47,17 @@ public sealed class Ngs2PcmDecoderTests
     {
         Assert.False(Ngs2PcmDecoder.TryDecodeInterleaved([0, 0], channels, 0, out _, out _));
     }
+
+    [Fact]
+    public void StreamingTransitionAdvancesFromPreviousBlockToNewBlock()
+    {
+        var first = Ngs2Exports.GetStreamingTransitionWeight(96);
+        var middle = Ngs2Exports.GetStreamingTransitionWeight(48);
+        var last = Ngs2Exports.GetStreamingTransitionWeight(1);
+
+        Assert.InRange(first, 0.0104f, 0.0105f);
+        Assert.InRange(middle, 0.5104f, 0.5105f);
+        Assert.Equal(1f, last);
+        Assert.Equal(1f, Ngs2Exports.GetStreamingTransitionWeight(0));
+    }
 }

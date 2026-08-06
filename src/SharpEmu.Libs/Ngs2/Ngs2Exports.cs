@@ -36,6 +36,8 @@ public static class Ngs2Exports
     // buffers games copy it into) until the title overrides it.
     private const int DefaultGrainSamples = 256;
     private const double OutputSampleRate = 48000.0;
+    private const int StreamingTransitionFrames = 96;
+    private const long MaxVoiceParamTraceDumps = 4096;
 
     private sealed class SystemState
     {
@@ -83,6 +85,9 @@ public static class Ngs2Exports
         public int DirectPcmBufferBytes { get; set; }
         public ulong StreamingFingerprint { get; set; }
         public bool StreamingPending { get; set; }
+        public float LastOutputLeft { get; set; }
+        public float LastOutputRight { get; set; }
+        public int TransitionFramesRemaining { get; set; }
         public ulong DestinationVoiceHandle { get; set; }
         public int LoopStart { get; set; } = -1;
         public int LoopEnd { get; set; }
@@ -802,6 +807,15 @@ public static class Ngs2Exports
                 return;
             }
 
+            // M2 rotates guest-owned PCM blocks while a voice remains routed.
+            // Starting the replacement block at frame zero is correct, but an
+            // arbitrary boundary between the two blocks can otherwise create a
+            // full-scale discontinuity (heard as a click or corrupt burst on a
+            // screen transition). Preserve the last mixed sample and ease into
+            // the replacement over two milliseconds.
+            voice.TransitionFramesRemaining = voice.Playing && voice.Pcm is { Length: > 0 }
+                ? StreamingTransitionFrames
+                : 0;
             voice.Pcm = left;
             voice.PcmRight = right;
             voice.SourceAddr = dataAddress;
@@ -977,7 +991,8 @@ public static class Ngs2Exports
             peek.Clear();
             var readable = Math.Min((int)Math.Max((ushort)8, size), peek.Length);
             ctx.Memory.TryRead(offset, peek[..readable]);
-            if (ShouldTraceVoiceParam(voiceHandle, id, peek[..readable]))
+            if (ShouldTraceVoiceParam(voiceHandle, id, peek[..readable]) &&
+                Interlocked.Increment(ref _voiceParamTraceDumps) <= MaxVoiceParamTraceDumps)
             {
                 Console.Error.WriteLine(
                     $"[LOADER][TRACE] ngs2.voiceparam voice=0x{voiceHandle:X16} id=0x{id:X} size={size} next={unchecked((short)next)} bytes={Convert.ToHexString(peek[..readable])}");
@@ -1037,6 +1052,7 @@ public static class Ngs2Exports
 
     private static long _waveformDumps;
     private static long _renderInfoDumps;
+    private static long _voiceParamTraceDumps;
 
     [SysAbiExport(
         Nid = "AbYvTOZ8Pts",
@@ -1289,6 +1305,16 @@ public static class Ngs2Exports
             var right = pcmRight is null
                 ? left
                 : pcmRight[idx] + ((pcmRight[next] - pcmRight[idx]) * frac);
+            if (voice.TransitionFramesRemaining > 0)
+            {
+                var weight = GetStreamingTransitionWeight(voice.TransitionFramesRemaining);
+                left = voice.LastOutputLeft + ((left - voice.LastOutputLeft) * weight);
+                right = voice.LastOutputRight + ((right - voice.LastOutputRight) * weight);
+                voice.TransitionFramesRemaining--;
+            }
+
+            voice.LastOutputLeft = left;
+            voice.LastOutputRight = right;
             var baseIndex = f * channels;
             accum[baseIndex] += left * gain;
             if (channels > 1)
@@ -1300,6 +1326,17 @@ public static class Ngs2Exports
         }
 
         voice.Position = pos;
+    }
+
+    internal static float GetStreamingTransitionWeight(int framesRemaining)
+    {
+        if (framesRemaining <= 0)
+        {
+            return 1f;
+        }
+
+        var clamped = Math.Min(framesRemaining, StreamingTransitionFrames);
+        return (StreamingTransitionFrames - clamped + 1f) / StreamingTransitionFrames;
     }
 
     private static void WriteGrain(CpuContext ctx, ulong address, float[] accum, int count)
