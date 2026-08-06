@@ -155,6 +155,7 @@
   "Options.Env.DumpSpirv.Desc": "Volcar los shaders AGC y sus traducciones SPIR-V a la carpeta shader-dumps.\nÚsalo al informar de errores de shaders o de renderizado.",
   "Options.Env.DropStaleAliasedDepth.Desc": "Compatibilidad: conservar un búfer de profundidad aunque su dirección sea una superficie de color obsoleta.\nÚsalo solo si la detección automática causa problemas en un título.",
   "Options.Env.DisableRtCompSwap.Desc": "Compatibilidad: ignorar el orden de canales del render target (CB_COLOR_INFO.COMP_SWAP).\nSolo para títulos que se veían bien antes de respetarlo.",
+  "Options.Env.SingleChannelCompSwap.Desc": "Guardar el alfa del shader en los render targets de un canal que lo piden (COMP_SWAP=ALT_REV).\nNecesario para el logo del título de Castlevania Dominus Collection, cuya máscara se construye así.",
   "Options.Env.LogDirectMemory.Desc": "Registrar en la consola las asignaciones de memoria directa y sus fallos.\nÚsalo cuando un juego se aborte o se cierre durante el arranque.",
   "Options.Env.LogIo.Desc": "Registrar en la consola la apertura y lectura de archivos y la resolución de rutas.\nÚsalo cuando un juego no encuentre sus archivos de datos durante el arranque.",
   "Options.Env.LogNp.Desc": "Registrar en la consola las llamadas a la biblioteca NP (PlayStation Network).",

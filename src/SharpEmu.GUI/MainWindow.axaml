@@ -477,6 +477,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
 
+                      <local:SettingRow x:Name="EnvSingleChannelCompSwapRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_HONOR_SINGLE_CHANNEL_COMP_SWAP"
+                                        Description="Store the shader's alpha in single-channel render targets that ask for it (COMP_SWAP=ALT_REV).&#10;Needed by the Castlevania Dominus Collection title logo, whose mask is built this way.">
+                        <ToggleSwitch x:Name="EnvSingleChannelCompSwapToggle" OnContent="On" OffContent="Off"
+                                      VerticalAlignment="Center" />
+                      </local:SettingRow>
+
                       <local:SettingRow x:Name="EnvLogDirectMemoryRow" LabelFontFamily="Consolas,monospace" Label="TOUCHEPX5_LOG_DIRECT_MEMORY"
                                         Description="Log direct memory allocations and failures to the console.&#10;Use when a game aborts or exits during boot.">
                         <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" OnContent="On" OffContent="Off"
