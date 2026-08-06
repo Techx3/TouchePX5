@@ -1003,6 +1003,7 @@ internal static unsafe class VulkanVideoPresenter
         _lastOrderedGuestFlipVersions.Clear();
         _orderedGuestFlipVersionSequence = 0;
         _pendingGuestImageUploads.Clear();
+        _pendingTextureIdentities.Clear();
         _pendingGuestImageInitialData.Clear();
         _guestImageExtents.Clear();
         _pendingGuestColorClears.Reset();
@@ -2228,6 +2229,16 @@ internal static unsafe class VulkanVideoPresenter
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<
         TextureContentIdentity, byte> _cachedTextureIdentities = new();
 
+    // A texture upload becomes visible to the submit thread as soon as its
+    // first payload is queued, rather than only after the render thread has
+    // consumed that payload. Without this in-flight set, a producer running
+    // ahead of Vulkan copies the same multi-megabyte texture into every queued
+    // draw. The render thread still owns the real cache and later promotes the
+    // identity through MarkTextureContentCached; this set only suppresses
+    // redundant immutable payloads while that first upload is pending.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<
+        TextureContentIdentity, int> _pendingTextureIdentities = new();
+
     // Guest memory handle for render-thread self-healing: when a draw whose
     // texel copy was skipped misses the texture cache (eviction, cache
     // clear, or any other race), the presenter re-reads the texels itself
@@ -2258,16 +2269,146 @@ internal static unsafe class VulkanVideoPresenter
     }
 
     internal static bool IsTextureContentCached(in TextureContentIdentity identity) =>
-        _cachedTextureIdentities.ContainsKey(identity);
+        _cachedTextureIdentities.ContainsKey(identity) ||
+        _pendingTextureIdentities.ContainsKey(identity);
 
-    private static void MarkTextureContentCached(in TextureContentIdentity identity) =>
+    private static void MarkTextureContentCached(in TextureContentIdentity identity)
+    {
         _cachedTextureIdentities.TryAdd(identity, 0);
+        _pendingTextureIdentities.TryRemove(identity, out _);
+    }
 
     private static void UnmarkTextureContentCached(in TextureContentIdentity identity) =>
         _cachedTextureIdentities.TryRemove(identity, out _);
 
-    private static void ClearCachedTextureIdentities() =>
+    private static void ClearCachedTextureIdentities()
+    {
         _cachedTextureIdentities.Clear();
+        _pendingTextureIdentities.Clear();
+    }
+
+    internal static void ClearTextureContentTrackingForTests() =>
+        ClearCachedTextureIdentities();
+
+    private static TextureContentIdentity GetTextureContentIdentity(
+        GuestDrawTexture texture) => new(
+            texture.Address,
+            texture.Width,
+            texture.Height,
+            texture.Format,
+            texture.NumberType,
+            texture.DstSelect,
+            texture.TileMode,
+            texture.Pitch,
+            texture.Sampler,
+            texture.ArrayedView,
+            Math.Max(texture.ArrayLayers, 1),
+            Type: texture.Type,
+            Depth: GetGuestTextureDepth(texture.Type, texture.Depth));
+
+    private static void ReservePendingTextureUploads(object work)
+    {
+        IReadOnlyList<GuestDrawTexture> textures = work switch
+        {
+            VulkanOffscreenGuestDraw draw => draw.Draw.Textures,
+            VulkanComputeGuestDispatch compute => compute.Textures,
+            _ => Array.Empty<GuestDrawTexture>(),
+        };
+
+        ReservePendingTextureUploads(textures);
+    }
+
+    internal static void ReservePendingTextureUploadsForTests(
+        IReadOnlyList<GuestDrawTexture> textures) =>
+        ReservePendingTextureUploads(textures);
+
+    private static void ReservePendingTextureUploads(
+        IReadOnlyList<GuestDrawTexture> textures)
+    {
+
+        HashSet<TextureContentIdentity>? reserved = null;
+        foreach (var texture in textures)
+        {
+            if (texture.Address == 0 ||
+                texture.IsStorage ||
+                texture.IsFallback ||
+                (texture.RgbaPixels.Length == 0 &&
+                 texture.TiledSource is not { Length: > 0 }))
+            {
+                continue;
+            }
+
+            var identity = GetTextureContentIdentity(texture);
+            if (!(reserved ??= []).Add(identity))
+            {
+                continue;
+            }
+
+            _pendingTextureIdentities.AddOrUpdate(
+                identity,
+                1,
+                static (_, count) => count == int.MaxValue ? count : count + 1);
+        }
+    }
+
+    private static void ReleasePendingTextureUploads(object work)
+    {
+        IReadOnlyList<GuestDrawTexture> textures = work switch
+        {
+            VulkanOffscreenGuestDraw draw => draw.Draw.Textures,
+            VulkanComputeGuestDispatch compute => compute.Textures,
+            _ => Array.Empty<GuestDrawTexture>(),
+        };
+
+        ReleasePendingTextureUploads(textures);
+    }
+
+    internal static void ReleasePendingTextureUploadsForTests(
+        IReadOnlyList<GuestDrawTexture> textures) =>
+        ReleasePendingTextureUploads(textures);
+
+    private static void ReleasePendingTextureUploads(
+        IReadOnlyList<GuestDrawTexture> textures)
+    {
+
+        HashSet<TextureContentIdentity>? released = null;
+        foreach (var texture in textures)
+        {
+            if (texture.Address == 0 ||
+                texture.IsStorage ||
+                texture.IsFallback ||
+                (texture.RgbaPixels.Length == 0 &&
+                 texture.TiledSource is not { Length: > 0 }))
+            {
+                continue;
+            }
+
+            var identity = GetTextureContentIdentity(texture);
+            if (!(released ??= []).Add(identity))
+            {
+                continue;
+            }
+
+            while (_pendingTextureIdentities.TryGetValue(identity, out var count))
+            {
+                if (count <= 1)
+                {
+                    if (_pendingTextureIdentities.TryRemove(
+                            new KeyValuePair<TextureContentIdentity, int>(identity, count)))
+                    {
+                        break;
+                    }
+                }
+                else if (_pendingTextureIdentities.TryUpdate(
+                             identity,
+                             count - 1,
+                             count))
+                {
+                    break;
+                }
+            }
+        }
+    }
 
     internal static bool IsGuestImageAvailable(
         ulong address,
@@ -3224,6 +3365,7 @@ internal static unsafe class VulkanVideoPresenter
 
         var queue = _submittingGuestQueue ?? VulkanGuestQueueIdentity.Default;
         var sequence = ++_enqueuedGuestWorkSequence;
+        ReservePendingTextureUploads(work);
         _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
         var requiredSequences = GetGuestWorkDependenciesLocked(work);
         if (!_pendingGuestWorkByQueue.TryGetValue(queue.Name, out var pendingQueue))
@@ -3678,6 +3820,7 @@ internal static unsafe class VulkanVideoPresenter
             _pendingGuestWorkBytes = pending.PayloadBytes >= _pendingGuestWorkBytes
                 ? 0
                 : _pendingGuestWorkBytes - pending.PayloadBytes;
+            ReleasePendingTextureUploads(pending.Work);
             ReleasePendingGuestImageUploadsLocked(pending.Work);
             if (pending.Sequence == _completedGuestWorkSequence + 1)
             {
@@ -3767,6 +3910,10 @@ internal static unsafe class VulkanVideoPresenter
         return bytes;
     }
 
+    internal static ulong GetTexturePayloadBytesForTests(
+        IReadOnlyList<GuestDrawTexture> textures) =>
+        GetTexturePayloadBytes(textures);
+
     private static ulong GetTexturePayloadBytes(
         IReadOnlyList<GuestDrawTexture> textures)
     {
@@ -3774,6 +3921,11 @@ internal static unsafe class VulkanVideoPresenter
         foreach (var texture in textures)
         {
             bytes = SaturatingAdd(bytes, (ulong)texture.RgbaPixels.LongLength);
+            if (texture.TiledSource is { } tiledSource &&
+                !ReferenceEquals(tiledSource, texture.RgbaPixels))
+            {
+                bytes = SaturatingAdd(bytes, (ulong)tiledSource.LongLength);
+            }
         }
 
         return bytes;

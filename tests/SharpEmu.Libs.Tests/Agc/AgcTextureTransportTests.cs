@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.VideoOut;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -116,6 +117,63 @@ public sealed class AgcTextureTransportTests
 
         Assert.NotEqual(twoDimensional, threeDimensional);
         Assert.NotEqual(threeDimensional, deeperThreeDimensional);
+    }
+
+    [Fact]
+    public void PendingTextureUpload_IsVisibleUntilTheQueuedPayloadCompletes()
+    {
+        var texture = new GuestDrawTexture(
+            Address: 0x1234,
+            Width: 8,
+            Height: 6,
+            Format: 10,
+            NumberType: 0,
+            RgbaPixels: new byte[8 * 6 * 4],
+            IsFallback: false,
+            IsStorage: false,
+            Pitch: 8);
+        var identity = CreateIdentity(type: 9, depth: 1);
+
+        VulkanVideoPresenter.ClearTextureContentTrackingForTests();
+        try
+        {
+            Assert.False(VulkanVideoPresenter.IsTextureContentCached(identity));
+
+            VulkanVideoPresenter.ReservePendingTextureUploadsForTests([texture]);
+            Assert.True(VulkanVideoPresenter.IsTextureContentCached(identity));
+
+            VulkanVideoPresenter.ReleasePendingTextureUploadsForTests([texture]);
+            Assert.False(VulkanVideoPresenter.IsTextureContentCached(identity));
+        }
+        finally
+        {
+            VulkanVideoPresenter.ClearTextureContentTrackingForTests();
+        }
+    }
+
+    [Fact]
+    public void TexturePayloadAccounting_IncludesDistinctGpuDetileSource()
+    {
+        var rgba = new byte[17];
+        var tiled = new byte[29];
+        var texture = new GuestDrawTexture(
+            Address: 0x1234,
+            Width: 8,
+            Height: 6,
+            Format: 10,
+            NumberType: 0,
+            RgbaPixels: rgba,
+            IsFallback: false,
+            IsStorage: false,
+            TiledSource: tiled);
+        var sharedPayload = texture with { TiledSource = rgba };
+
+        Assert.Equal(
+            46UL,
+            VulkanVideoPresenter.GetTexturePayloadBytesForTests([texture]));
+        Assert.Equal(
+            17UL,
+            VulkanVideoPresenter.GetTexturePayloadBytesForTests([sharedPayload]));
     }
 
     [Fact]
