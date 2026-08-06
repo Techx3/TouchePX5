@@ -28,6 +28,8 @@ public static class Ngs2Exports
     private static long _unsupportedWaveformCount;
     private static long _unresolvedWaveformDumpCount;
     private static long _voiceEventTraceCount;
+    private static readonly Dictionary<(ulong VoiceHandle, uint ParamId), ulong> VoiceParamTraceFingerprints = new();
+    private static int _unreadableVoiceParamTraceCount;
 
     // NGS2 renders one grain of interleaved float32 per sceNgs2SystemRender.
     // The grain length defaults to 256 frames (matching the 8192-byte AudioOut
@@ -965,15 +967,21 @@ public static class Ngs2Exports
                 !ctx.TryReadUInt16(offset + 2, out var next) ||
                 !ctx.TryReadUInt32(offset + 4, out var id))
             {
-                Console.Error.WriteLine($"[LOADER][TRACE] ngs2.voiceparam voice=0x{voiceHandle:X16} @0x{offset:X}: unreadable header");
+                if (Interlocked.Increment(ref _unreadableVoiceParamTraceCount) <= 16)
+                {
+                    Console.Error.WriteLine($"[LOADER][TRACE] ngs2.voiceparam voice=0x{voiceHandle:X16} @0x{offset:X}: unreadable header");
+                }
                 return;
             }
 
             peek.Clear();
             var readable = Math.Min((int)Math.Max((ushort)8, size), peek.Length);
             ctx.Memory.TryRead(offset, peek[..readable]);
-            Console.Error.WriteLine(
-                $"[LOADER][TRACE] ngs2.voiceparam voice=0x{voiceHandle:X16} id=0x{id:X} size={size} next={unchecked((short)next)} bytes={Convert.ToHexString(peek[..readable])}");
+            if (ShouldTraceVoiceParam(voiceHandle, id, peek[..readable]))
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] ngs2.voiceparam voice=0x{voiceHandle:X16} id=0x{id:X} size={size} next={unchecked((short)next)} bytes={Convert.ToHexString(peek[..readable])}");
+            }
 
             // For the waveform-blocks param, follow the embedded pointers and
             // dump the pointed-to bytes so we can tell PCM16 from ATRAC9.
@@ -997,6 +1005,33 @@ public static class Ngs2Exports
             }
 
             offset += (ulong)advance;
+        }
+    }
+
+    // VoiceControl can submit an identical command list once per audio grain.
+    // Writing every submission made a short diagnostic run produce hundreds of
+    // thousands of synchronous console lines and could stall the emulator. Keep
+    // the trace useful by recording the first value and subsequent changes only.
+    private static bool ShouldTraceVoiceParam(ulong voiceHandle, uint paramId, ReadOnlySpan<byte> bytes)
+    {
+        const ulong fnvOffset = 14695981039346656037UL;
+        const ulong fnvPrime = 1099511628211UL;
+        var fingerprint = fnvOffset;
+        foreach (var value in bytes)
+        {
+            fingerprint = (fingerprint ^ value) * fnvPrime;
+        }
+
+        lock (StateGate)
+        {
+            var key = (voiceHandle, paramId);
+            if (VoiceParamTraceFingerprints.TryGetValue(key, out var previous) && previous == fingerprint)
+            {
+                return false;
+            }
+
+            VoiceParamTraceFingerprints[key] = fingerprint;
+            return true;
         }
     }
 
@@ -1488,6 +1523,12 @@ public static class Ngs2Exports
                      .ToArray())
         {
             Voices.Remove(voiceHandle);
+            foreach (var traceKey in VoiceParamTraceFingerprints.Keys
+                         .Where(key => key.VoiceHandle == voiceHandle)
+                         .ToArray())
+            {
+                VoiceParamTraceFingerprints.Remove(traceKey);
+            }
         }
     }
 
