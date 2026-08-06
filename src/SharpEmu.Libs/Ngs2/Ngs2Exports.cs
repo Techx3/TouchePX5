@@ -70,6 +70,8 @@ public static class Ngs2Exports
         public bool Paused { get; set; }
         public bool Stopped { get; set; }
         public bool HasTransportCommand { get; set; }
+        public bool CompactLifecycleArmed { get; set; }
+        public bool CompactLifecycleStopped { get; set; }
         public ulong DestinationVoiceHandle { get; set; }
         public int LoopStart { get; set; } = -1;
         public int LoopEnd { get; set; }
@@ -307,6 +309,17 @@ public static class Ngs2Exports
                 return;
             }
 
+            // M2's NGS2 client also emits an eight-byte lifecycle pulse encoded
+            // as { 2, 0x400 }. The first pulse follows waveform/patch setup and
+            // commits the voice; a later pulse for the same waveform retires it.
+            // Treating this as an invalid two-byte parameter left every previous
+            // music voice mixing across title, selection and gameplay screens.
+            if (IsCompactLifecyclePulse(size, nextRaw, id))
+            {
+                ApplyCompactLifecyclePulse(voiceHandle);
+                return;
+            }
+
             switch (id)
             {
                 case 0x00000005:
@@ -421,6 +434,40 @@ public static class Ngs2Exports
         }
     }
 
+    internal static bool IsCompactLifecyclePulse(ushort size, ushort next, uint id)
+        => size == 2 && next == 0 && id == 0x00000400;
+
+    private static void ApplyCompactLifecyclePulse(ulong voiceHandle)
+    {
+        lock (StateGate)
+        {
+            if (!Voices.TryGetValue(voiceHandle, out var voice))
+            {
+                return;
+            }
+
+            if (!voice.CompactLifecycleArmed)
+            {
+                voice.CompactLifecycleArmed = true;
+                return;
+            }
+
+            voice.Playing = false;
+            voice.Paused = false;
+            voice.Stopped = true;
+            voice.Position = 0;
+            voice.CompactLifecycleStopped = true;
+
+            var traceCount = Interlocked.Increment(ref _voiceEventTraceCount);
+            if (traceCount <= 16 || (traceCount & (traceCount - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] ngs2.voice_lifecycle_stop count={traceCount} " +
+                    $"voice=0x{voiceHandle:X16}");
+            }
+        }
+    }
+
     // SceNgs2VoicePatchParam: header, source port, destination input and the
     // destination voice handle. Some M2 titles configure a waveform and route
     // it directly into the mastering rack without sending a separate Play
@@ -452,7 +499,9 @@ public static class Ngs2Exports
                 return;
             }
 
-            if (!voice.HasTransportCommand && voice.Pcm is { Length: > 0 })
+            if (!voice.HasTransportCommand &&
+                !voice.CompactLifecycleStopped &&
+                voice.Pcm is { Length: > 0 })
             {
                 voice.Position = 0;
                 voice.Paused = false;
@@ -517,6 +566,8 @@ public static class Ngs2Exports
                 voice.PcmRight = waveform.RightSamples;
                 voice.SourceAddr = dataAddr;
                 voice.SourceRate = waveform.SampleRate;
+                voice.CompactLifecycleArmed = false;
+                voice.CompactLifecycleStopped = false;
                 voice.LoopStart = waveform.LoopStart;
                 voice.LoopEnd = waveform.LoopEnd > 0 ? waveform.LoopEnd : waveform.Samples.Length;
                 voice.Position = 0;
