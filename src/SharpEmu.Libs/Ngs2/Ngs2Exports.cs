@@ -69,9 +69,18 @@ public static class Ngs2Exports
         public bool Playing { get; set; }
         public bool Paused { get; set; }
         public bool Stopped { get; set; }
+        public bool ExplicitlyStopped { get; set; }
         public bool HasTransportCommand { get; set; }
         public bool CompactLifecycleArmed { get; set; }
         public bool CompactLifecycleStopped { get; set; }
+        public uint WaveformType { get; set; }
+        public int WaveformChannels { get; set; } = 1;
+        public ulong WaveformBlocksAddress { get; set; }
+        public int WaveformBlockCount { get; set; }
+        public ulong PreviousWaveformBlocksAddress { get; set; }
+        public int DirectPcmBufferBytes { get; set; }
+        public ulong StreamingFingerprint { get; set; }
+        public bool StreamingPending { get; set; }
         public ulong DestinationVoiceHandle { get; set; }
         public int LoopStart { get; set; } = -1;
         public int LoopEnd { get; set; }
@@ -331,6 +340,9 @@ public static class Ngs2Exports
                 case 0x10000001:
                     ApplyWaveformParam(ctx, voiceHandle, offset);
                     break;
+                case 0x10000000:
+                    ApplyWaveformFormatParam(ctx, voiceHandle, offset);
+                    break;
                 case 0x20010001:
                     ApplyPortMatrixParam(ctx, voiceHandle, offset);
                     break;
@@ -382,6 +394,7 @@ public static class Ngs2Exports
                     voice.Position = 0;
                     voice.Paused = false;
                     voice.Stopped = false;
+                    voice.ExplicitlyStopped = false;
                     voice.Playing = true;
                     voice.HasTransportCommand = true;
                     break;
@@ -390,6 +403,7 @@ public static class Ngs2Exports
                     voice.Playing = false;
                     voice.Paused = false;
                     voice.Stopped = true;
+                    voice.ExplicitlyStopped = true;
                     voice.Position = 0;
                     voice.HasTransportCommand = true;
                     break;
@@ -397,6 +411,7 @@ public static class Ngs2Exports
                     voice.Playing = false;
                     voice.Paused = false;
                     voice.Stopped = false;
+                    voice.ExplicitlyStopped = true;
                     voice.Position = 0;
                     voice.Pcm = null;
                     voice.PcmRight = null;
@@ -417,6 +432,7 @@ public static class Ngs2Exports
                     {
                         voice.Paused = false;
                         voice.Stopped = false;
+                        voice.ExplicitlyStopped = false;
                         voice.Playing = true;
                     }
                     voice.HasTransportCommand = true;
@@ -452,6 +468,19 @@ public static class Ngs2Exports
                 return;
             }
 
+            // Streaming sampler voices use this compact packet while rotating
+            // waveform blocks. Retiring those voices here silences all PCM
+            // gameplay audio after the menu transition. Their lifetime is
+            // instead controlled by route removal and explicit transport.
+            if (!ShouldRetireOnCompactLifecycle(
+                    voice.StreamingPending,
+                    voice.WaveformType,
+                    voice.Pcm is { Length: > 0 },
+                    voice.LoopStart))
+            {
+                return;
+            }
+
             voice.Playing = false;
             voice.Paused = false;
             voice.Stopped = true;
@@ -466,6 +495,22 @@ public static class Ngs2Exports
                     $"voice=0x{voiceHandle:X16}");
             }
         }
+    }
+
+    internal static bool ShouldRetireOnCompactLifecycle(
+        bool streamingPending, uint waveformType, bool hasPcm, int loopStart)
+    {
+        // PCM sampler voices rotate guest-owned buffers and use the compact
+        // packet as part of that update protocol. One-shot VAG voices use it
+        // while their effect is active and must be allowed to reach EOF. Only
+        // an armed looping VAG voice represents persistent music that needs to
+        // be retired when M2 moves to the next screen.
+        if (streamingPending || (waveformType != 0 && waveformType != 0x80))
+        {
+            return false;
+        }
+
+        return hasPcm && loopStart >= 0;
     }
 
     // SceNgs2VoicePatchParam: header, source port, destination input and the
@@ -511,26 +556,116 @@ public static class Ngs2Exports
         }
     }
 
-    // Waveform-blocks param: the guest pointer at +8 references a "VAGp"
-    // (PS-ADPCM) container. Decode it once and arm the voice for playback.
-    private static void ApplyWaveformParam(CpuContext ctx, ulong voiceHandle, ulong paramOffset)
+    private static void ApplyWaveformFormatParam(
+        CpuContext ctx, ulong voiceHandle, ulong paramOffset)
     {
-        if (!TryResolveVagDataAddress(ctx, paramOffset, out var dataAddr))
+        if (!ctx.TryReadUInt32(paramOffset + 8, out var waveformType) ||
+            !ctx.TryReadUInt32(paramOffset + 12, out var channelsRaw) ||
+            !ctx.TryReadUInt32(paramOffset + 16, out var sampleRateRaw))
         {
-            var failure = Interlocked.Increment(ref _unsupportedWaveformCount);
-            if (failure <= 8 || (failure & (failure - 1)) == 0)
-            {
-                Console.Error.WriteLine(
-                    $"[LOADER][WARN] ngs2.waveform_unresolved count={failure} " +
-                    $"voice=0x{voiceHandle:X16} param=0x{paramOffset:X}");
-            }
-            if (Interlocked.Increment(ref _unresolvedWaveformDumpCount) <= 4)
-            {
-                TraceUnresolvedWaveform(ctx, voiceHandle, paramOffset);
-            }
             return;
         }
 
+        var channels = channelsRaw is >= 1 and <= 8 ? (int)channelsRaw : 1;
+        var sampleRate = sampleRateRaw is >= 8_000 and <= 384_000
+            ? (int)sampleRateRaw
+            : (int)OutputSampleRate;
+        lock (StateGate)
+        {
+            if (!Voices.TryGetValue(voiceHandle, out var voice))
+            {
+                return;
+            }
+
+            voice.WaveformType = waveformType;
+            voice.WaveformChannels = channels;
+            voice.SourceRate = sampleRate;
+            if (waveformType != 0x80)
+            {
+                voice.StreamingPending = true;
+                voice.CompactLifecycleStopped = false;
+                if (!voice.ExplicitlyStopped)
+                {
+                    voice.Stopped = false;
+                }
+            }
+        }
+    }
+
+    // Waveform-blocks param. VAG voices usually reference a complete VAGp
+    // container; PCM sampler voices rotate guest-owned waveform blocks.
+    private static void ApplyWaveformParam(CpuContext ctx, ulong voiceHandle, ulong paramOffset)
+    {
+        if (!ctx.TryReadUInt64(paramOffset + 8, out var blocksAddress) ||
+            !ctx.TryReadUInt32(paramOffset + 16, out var blockCountRaw))
+        {
+            return;
+        }
+
+        var knownStreaming = false;
+        lock (StateGate)
+        {
+            knownStreaming = Voices.TryGetValue(voiceHandle, out var voice) &&
+                voice.WaveformType != 0 && voice.WaveformType != 0x80;
+        }
+
+        // The format command can follow the first block command. Resolve VAG
+        // whenever the type is still unknown so ordinary effects are not
+        // mistaken for PCM simply because their initial type is zero.
+        if (!knownStreaming && TryResolveVagDataAddress(ctx, paramOffset, out var vagAddress))
+        {
+            ArmVagVoice(ctx, voiceHandle, vagAddress);
+            return;
+        }
+
+        if (blocksAddress > 0x10000)
+        {
+            lock (StateGate)
+            {
+                if (Voices.TryGetValue(voiceHandle, out var voice))
+                {
+                    if (voice.WaveformBlocksAddress != 0 &&
+                        voice.WaveformBlocksAddress != blocksAddress)
+                    {
+                        voice.PreviousWaveformBlocksAddress = voice.WaveformBlocksAddress;
+                        var distance = voice.WaveformBlocksAddress > blocksAddress
+                            ? voice.WaveformBlocksAddress - blocksAddress
+                            : blocksAddress - voice.WaveformBlocksAddress;
+                        if (distance is >= 256 and <= 4 * 1024 * 1024 &&
+                            (distance & 3) == 0)
+                        {
+                            voice.DirectPcmBufferBytes = (int)distance;
+                        }
+                    }
+
+                    voice.WaveformBlocksAddress = blocksAddress;
+                    voice.WaveformBlockCount = (int)Math.Clamp(blockCountRaw, 1u, 64u);
+                    voice.StreamingPending = true;
+                    voice.CompactLifecycleStopped = false;
+                }
+            }
+        }
+
+        if (knownStreaming)
+        {
+            return;
+        }
+
+        var failure = Interlocked.Increment(ref _unsupportedWaveformCount);
+        if (failure <= 8 || (failure & (failure - 1)) == 0)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] ngs2.waveform_unresolved count={failure} " +
+                $"voice=0x{voiceHandle:X16} param=0x{paramOffset:X}");
+        }
+        if (Interlocked.Increment(ref _unresolvedWaveformDumpCount) <= 4)
+        {
+            TraceUnresolvedWaveform(ctx, voiceHandle, paramOffset);
+        }
+    }
+
+    private static void ArmVagVoice(CpuContext ctx, ulong voiceHandle, ulong dataAddr)
+    {
         lock (StateGate)
         {
             if (Voices.TryGetValue(voiceHandle, out var existing) &&
@@ -601,6 +736,102 @@ public static class Ngs2Exports
         {
             System.Buffers.ArrayPool<byte>.Shared.Return(raw);
         }
+    }
+
+    // Refresh a guest-owned PCM block only when its contents change. M2 uses
+    // alternating 48-kHz stereo buffers for continuous gameplay audio. Some
+    // clients pass a waveform-block descriptor, while others pass PCM directly.
+    private static void RefreshStreamingVoice(CpuContext ctx, VoiceState voice)
+    {
+        if (!voice.StreamingPending ||
+            voice.WaveformType != Ngs2PcmDecoder.Signed16LittleEndian ||
+            voice.WaveformBlocksAddress <= 0x10000 ||
+            voice.WaveformChannels is < 1 or > 8)
+        {
+            return;
+        }
+
+        var dataAddress = voice.WaveformBlocksAddress;
+        var byteCount = voice.DirectPcmBufferBytes;
+        var requestedFrames = 0;
+
+        Span<byte> descriptor = stackalloc byte[40];
+        if (ctx.Memory.TryRead(voice.WaveformBlocksAddress, descriptor))
+        {
+            var descriptorData = BinaryPrimitives.ReadUInt64LittleEndian(descriptor);
+            var descriptorBytes = BinaryPrimitives.ReadUInt64LittleEndian(descriptor[8..]);
+            var descriptorFrames = BinaryPrimitives.ReadUInt32LittleEndian(descriptor[24..]);
+            if (descriptorData > 0x10000 &&
+                descriptorBytes is >= 2 and <= MaximumRenderBufferSize &&
+                descriptorBytes % (ulong)(sizeof(short) * voice.WaveformChannels) == 0)
+            {
+                dataAddress = descriptorData;
+                byteCount = (int)descriptorBytes;
+                requestedFrames = descriptorFrames <= int.MaxValue
+                    ? (int)descriptorFrames
+                    : 0;
+            }
+        }
+
+        if (byteCount < sizeof(short) * voice.WaveformChannels ||
+            byteCount > (int)MaximumRenderBufferSize)
+        {
+            return;
+        }
+
+        var raw = ArrayPool<byte>.Shared.Rent(byteCount);
+        try
+        {
+            var payload = raw.AsSpan(0, byteCount);
+            if (!ctx.Memory.TryRead(dataAddress, payload))
+            {
+                return;
+            }
+
+            var fingerprint = ComputeStreamingFingerprint(dataAddress, payload);
+            if (fingerprint == voice.StreamingFingerprint && voice.Pcm is { Length: > 0 })
+            {
+                return;
+            }
+
+            if (!Ngs2PcmDecoder.TryDecodeInterleaved(
+                    payload, voice.WaveformChannels, requestedFrames, out var left, out var right))
+            {
+                return;
+            }
+
+            voice.Pcm = left;
+            voice.PcmRight = right;
+            voice.SourceAddr = dataAddress;
+            voice.StreamingFingerprint = fingerprint;
+            voice.LoopStart = -1;
+            voice.LoopEnd = left.Length;
+            voice.Position = 0;
+            voice.Paused = false;
+            if (!voice.ExplicitlyStopped && voice.DestinationVoiceHandle != 0)
+            {
+                voice.Stopped = false;
+                voice.Playing = true;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(raw);
+        }
+    }
+
+    private static ulong ComputeStreamingFingerprint(ulong address, ReadOnlySpan<byte> bytes)
+    {
+        const ulong offsetBasis = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        var hash = (offsetBasis ^ address) * prime;
+        hash = (hash ^ (uint)bytes.Length) * prime;
+        foreach (var value in bytes)
+        {
+            hash = (hash ^ value) * prime;
+        }
+
+        return hash;
     }
 
     private static void TraceUnresolvedWaveform(
@@ -890,6 +1121,7 @@ public static class Ngs2Exports
                 foreach (var pair in Voices)
                 {
                     var voice = pair.Value;
+                    RefreshStreamingVoice(ctx, voice);
                     if (voice.Pcm is not null && voice.Pcm.Length != 0)
                     {
                         armedVoices++;
@@ -1364,21 +1596,22 @@ public static class Ngs2Exports
             ? availableDataSize
             : declaredDataSize;
         var frameCount = payloadSize / 16u;
-        var samples = isVag ? (frameCount / channels) * 28u : payloadSize / 2u;
+        var samples = isVag ? (frameCount / channels) * 28u : payloadSize / (2u * channels);
         var dataOffset = isVag ? (uint)Ngs2VagDecoder.VagHeaderSize : 0u;
 
         // Ngs2WaveformFormat (24 bytes).
-        BinaryPrimitives.WriteUInt32LittleEndian(info, waveformTypeVag);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            info, isVag ? waveformTypeVag : Ngs2PcmDecoder.Signed16LittleEndian);
         BinaryPrimitives.WriteUInt32LittleEndian(info[4..], channels);
         BinaryPrimitives.WriteUInt32LittleEndian(info[8..], sampleRate);
         // Ngs2WaveformInfo scalar fields.
         BinaryPrimitives.WriteUInt32LittleEndian(info[24..], dataOffset);
         BinaryPrimitives.WriteUInt32LittleEndian(info[28..], payloadSize);
         BinaryPrimitives.WriteUInt32LittleEndian(info[40..], samples);
-        BinaryPrimitives.WriteUInt32LittleEndian(info[44..], isVag ? 16u : 2u);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[44..], isVag ? 16u : 2u * channels);
         BinaryPrimitives.WriteUInt32LittleEndian(info[48..], isVag ? 28u : 1u);
         BinaryPrimitives.WriteUInt32LittleEndian(info[52..], 1u);
-        BinaryPrimitives.WriteUInt32LittleEndian(info[56..], isVag ? 16u : 2u);
+        BinaryPrimitives.WriteUInt32LittleEndian(info[56..], isVag ? 16u : 2u * channels);
         BinaryPrimitives.WriteUInt32LittleEndian(info[60..], isVag ? 28u : 1u);
         BinaryPrimitives.WriteUInt32LittleEndian(info[68..], 1u);
         // First Ngs2WaveformBlock starts at +72 and is 40 bytes.
