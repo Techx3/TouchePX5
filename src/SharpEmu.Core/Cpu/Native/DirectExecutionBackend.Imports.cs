@@ -343,7 +343,7 @@ public sealed partial class DirectExecutionBackend
 		bool flag4 = !string.IsNullOrWhiteSpace(_importFilter);
 		bool flag5 = false;
 		ExportedFunction? matchedExport = importStubEntry.Export;
-		bool periodicTrace = num <= 128 ||
+		bool periodicTrace = _logPeriodicImports && (num <= 128 ||
 			(num >= 240 && num <= 400) ||
 			(num >= 900 && num <= 1300) ||
 			num % 100000 == 0L ||
@@ -351,7 +351,7 @@ public sealed partial class DirectExecutionBackend
 			(importStubEntry.Nid == "rTXw65xmLIA" && (num <= 256 || num % 128 == 0)) ||
 			flag ||
 			flag2 ||
-			flag3;
+			flag3);
 		if (matchedExport is not null)
 		{
 			if (flag4)
