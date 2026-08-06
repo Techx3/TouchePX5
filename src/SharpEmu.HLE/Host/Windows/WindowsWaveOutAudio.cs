@@ -18,6 +18,11 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
         private const uint CallbackEvent = 0x0005_0000;
         private const ushort WaveFormatPcm = 1;
         private const uint WaveHeaderDone = 0x0000_0001;
+        // A healthy queue holds at most a few hundred milliseconds of PCM. If
+        // winmm stops completing headers, do not park a guest audio thread for
+        // one second on every submission: reset the native queue and let the
+        // next guest buffer restart playback.
+        private static readonly TimeSpan QueueProgressTimeout = TimeSpan.FromMilliseconds(500);
 
         private readonly int _maximumQueuedPcmBytes;
         private readonly object _gate = new();
@@ -66,15 +71,22 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
                 while (_queuedPcmBytes != 0 &&
                        _queuedPcmBytes + stereoPcm16.Length > _maximumQueuedPcmBytes)
                 {
-                    if (!_completion.WaitOne(TimeSpan.FromSeconds(1)))
+                    if (!_completion.WaitOne(QueueProgressTimeout))
                     {
+                        RecoverStalledQueue();
                         return false;
                     }
 
                     ReapCompletedBuffers();
                 }
 
-                return QueueBuffer(stereoPcm16);
+                if (QueueBuffer(stereoPcm16))
+                {
+                    return true;
+                }
+
+                RecoverStalledQueue();
+                return false;
             }
         }
 
@@ -196,6 +208,25 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
 
                 _buffers.Dequeue();
                 ReleaseBuffer(buffer);
+            }
+        }
+
+        private void RecoverStalledQueue()
+        {
+            if (_device == IntPtr.Zero || WaveOutReset(_device) != 0)
+            {
+                return;
+            }
+
+            while (_buffers.TryDequeue(out var buffer))
+            {
+                ReleaseBuffer(buffer);
+            }
+
+            _queuedPcmBytes = 0;
+            while (_completion.WaitOne(0))
+            {
+                // Discard completion notifications belonging to reset headers.
             }
         }
 
