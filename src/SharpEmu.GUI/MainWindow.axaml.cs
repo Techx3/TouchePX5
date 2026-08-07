@@ -56,6 +56,9 @@ public partial class MainWindow : Window
     private readonly AvaloniaList<LogLine> _consoleLines = new();
     private readonly List<LogLine> _allConsoleLines = new();
     private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
+    // Set by F1 alongside the guest's performance overlay. Reset per launch so
+    // a session never starts with its controls already hidden.
+    private bool _sessionBarHiddenByKey;
     private readonly DispatcherTimer _consoleFlushTimer;
     private readonly DispatcherTimer _libraryBlurTimer;
     private readonly FirmwareManager _firmwareManager = new();
@@ -838,6 +841,14 @@ public partial class MainWindow : Window
         {
             case Key.F11:
                 OnWindowFullScreen(this, new RoutedEventArgs());
+                break;
+            case Key.F1:
+                // F1 hides the emulator's performance overlay inside the guest
+                // process. The session bar is launcher chrome in this process,
+                // so it has to be hidden here for the key to clear the screen
+                // the way it looks like it should.
+                _sessionBarHiddenByKey = !_sessionBarHiddenByKey;
+                UpdateSessionBarVisibility();
                 break;
             default:
                 args.Handled = false;
@@ -2182,6 +2193,8 @@ public partial class MainWindow : Window
             return;
         }
 
+        _sessionBarHiddenByKey = false;
+
         var resolvedTitleId = string.IsNullOrWhiteSpace(titleId)
             ? _allGames.FirstOrDefault(game => game.Path.Equals(ebootPath, FilePathComparison))?.TitleId
             : titleId;
@@ -2866,7 +2879,8 @@ public partial class MainWindow : Window
     private void UpdateSessionBarVisibility()
     {
         SessionBarPopup.IsOpen = _isRunning && !_isStopping && !_awaitingFirstFrame && GameView.IsVisible &&
-            !_gameFullscreen && WindowState != WindowState.FullScreen;
+            !_gameFullscreen && WindowState != WindowState.FullScreen &&
+            !_sessionBarHiddenByKey;
     }
 
     // ---- Console ----
