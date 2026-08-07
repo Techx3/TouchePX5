@@ -27,6 +27,21 @@ arm64/
 *.tmp_proj
 *.log
 
+# User-supplied console firmware must remain local.
+*.PUP
+*.pup
+
+# Firmware the launcher installs into its portable data root. artifacts/ is
+# already ignored, but the root moves with the executable, so match the
+# directory wherever it lands rather than relying on that.
+**/user/firmware/
+**/user/firmware-profiles/
+
+# User-supplied console backups and autoloader export bundles remain local.
+autoloaderY2jb_*/
+autoloaderY2jb_*.zip
+**/PS5/EXPORT/BACKUP/
+
 *.user
 *.suo
 *.userosscache
