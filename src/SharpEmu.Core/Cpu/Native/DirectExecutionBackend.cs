@@ -5353,8 +5353,27 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return ThreadPriority.Normal;
 	}
 
+	// Guest job-system workers spin in pure guest code without ever entering the
+	// kernel, so they never yield their host core voluntarily. Honouring a narrow
+	// guest mask can leave several such spinners and one thread with real work
+	// sharing two host CPUs, where the useful thread only runs once the scheduler
+	// preempts a spinner. This lets that mapping be turned off for comparison.
+	private static readonly bool _disableGuestAffinity = string.Equals(
+		Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_GUEST_AFFINITY"), "1", StringComparison.Ordinal);
+
+	// Opt-in: measured no benefit on Demon's Souls, and the run-to-run spread on
+	// this workload is far wider than any effect it produced. Kept for future
+	// investigation rather than made the default.
+	private static readonly bool _guestAffinityUsesSmtSibling = string.Equals(
+		Environment.GetEnvironmentVariable("SHARPEMU_GUEST_AFFINITY_SMT"), "1", StringComparison.Ordinal);
+
 	private void ApplyGuestThreadAffinity(ulong guestAffinityMask)
 	{
+		if (_disableGuestAffinity)
+		{
+			return;
+		}
+
 		var hostAffinityMask = MapGuestThreadAffinity(guestAffinityMask);
 		if (hostAffinityMask == 0)
 		{
@@ -5398,6 +5417,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			if (hostCpu < processorCount)
 			{
 				hostAffinityMask |= 1UL << hostCpu;
+
+				// guestCpu * 2 claims one logical CPU per physical core and
+				// leaves its SMT sibling idle. Guest job-system workers spin
+				// without ever yielding, so a narrow guest mask can leave the
+				// one thread holding real work waiting for preemption. Adding
+				// the sibling doubles the room on the same physical core, so
+				// cache locality is unchanged.
+				if (_guestAffinityUsesSmtSibling &&
+					processorCount >= 16 &&
+					hostCpu + 1 < processorCount)
+				{
+					hostAffinityMask |= 1UL << (hostCpu + 1);
+				}
 			}
 		}
 

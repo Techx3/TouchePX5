@@ -15,7 +15,10 @@ namespace SharpEmu.Libs.VideoOut;
 public static class PerfOverlay
 {
     public const int PanelWidth = 376;
-    public const int PanelHeight = 176;
+    // Grown by one line for the GPU name: the launcher embeds the guest window,
+    // so its title bar -- the only other place the device is reported -- is not
+    // visible while a game runs.
+    public const int PanelHeight = 194;
 
     private const int GlyphColumns = 5;
     private const int GlyphRows = 7;
@@ -59,6 +62,16 @@ public static class PerfOverlay
     private static string _line3 = string.Empty;
     private static string _line4 = string.Empty;
     private static string _line5 = string.Empty;
+    private static volatile string _gpuName = string.Empty;
+
+    /// <summary>Reported by the backend once its physical device is chosen.</summary>
+    public static void SetGpuName(string gpuName)
+    {
+        if (!string.IsNullOrWhiteSpace(gpuName))
+        {
+            _gpuName = gpuName.Trim();
+        }
+    }
 
     public static bool Enabled => _enabled;
 
@@ -116,6 +129,8 @@ public static class PerfOverlay
         DrawString(bgra, 8, y, _line4, 0xB0, 0xB0, 0xB0);
         y += LineHeight;
         DrawString(bgra, 8, y, _line5, 0xFF, 0xD0, 0x80);
+        y += LineHeight;
+        DrawString(bgra, 8, y, _gpuName, 0x90, 0xC0, 0xFF);
         y += LineHeight + 4;
         DrawFrameGraph(bgra, 8, y, PanelWidth - 16, PanelHeight - y - 6);
     }
@@ -181,8 +196,20 @@ public static class PerfOverlay
             var guestBufferMb = Interlocked.Read(ref _guestBufferCacheBytes) / (1024 * 1024);
             _line4 = $"MEM {heapMb}M BUF {guestBufferMb}M CPU {_cpuPercent:0}%";
             _line5 = $"TIME {elapsedHours:00}:{elapsedMinutes:00}:{elapsedRemainingSeconds:00}";
+
+            // Mirrors the on-screen panel to stderr so A/B runs can be compared
+            // from a log instead of by reading the overlay off the screen.
+            if (_logStats)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] perf.stats {_line1} | {_line2} | {_line3} | {_line4} | {_line5}");
+                Console.Error.Flush();
+            }
         }
     }
+
+    private static readonly bool _logStats = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_PERF"), "1", StringComparison.Ordinal);
 
     private static TimeSpan GetProcessCpuTime()
     {

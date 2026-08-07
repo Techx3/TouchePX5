@@ -31,11 +31,24 @@ public static class PadExports
     private static bool IsPrimaryPadHandle(int handle) => handle is 0 or PrimaryPadHandle;
     private static readonly long InputSampleIntervalTicks = Math.Max(1, Stopwatch.Frequency / 1000);
 
-    [ThreadStatic]
-    private static long _lastInputSampleTicks;
+    // Sampling is process-wide rather than per-thread: every GetAsyncKeyState
+    // enters the system-wide USER critical section, so a per-thread cache
+    // multiplies that contention by the number of guest threads polling the pad.
+    private sealed class PadSample
+    {
+        public PadSample(PadState state, long timestamp)
+        {
+            State = state;
+            Timestamp = timestamp;
+        }
 
-    [ThreadStatic]
-    private static PadState _cachedInputState;
+        public PadState State { get; }
+
+        public long Timestamp { get; }
+    }
+
+    private static readonly object InputSampleLock = new();
+    private static PadSample? _cachedInputSample;
 
     private static bool _initialized;
     private static int _controlsAnnouncementLogged;
@@ -531,12 +544,30 @@ public static class PadExports
 
     private static PadState ReadHostInputState()
     {
-        var now = Stopwatch.GetTimestamp();
-        if (_lastInputSampleTicks != 0 && now - _lastInputSampleTicks < InputSampleIntervalTicks)
+        var sample = Volatile.Read(ref _cachedInputSample);
+        if (sample is not null &&
+            Stopwatch.GetTimestamp() - sample.Timestamp < InputSampleIntervalTicks)
         {
-            return _cachedInputState;
+            return sample.State;
         }
 
+        lock (InputSampleLock)
+        {
+            // Another thread may have refreshed while this one waited.
+            sample = _cachedInputSample;
+            if (sample is not null &&
+                Stopwatch.GetTimestamp() - sample.Timestamp < InputSampleIntervalTicks)
+            {
+                return sample.State;
+            }
+
+            return SampleHostInputState();
+        }
+    }
+
+    private static PadState SampleHostInputState()
+    {
+        var now = Stopwatch.GetTimestamp();
         var input = HostPlatform.Current.Input;
         var acceptsKeyboardInput = input.IsHostWindowFocused();
         var buttons = acceptsKeyboardInput ? ReadKeyboardButtons(input) : 0;
@@ -573,7 +604,7 @@ public static class PadExports
             buttons |= OrbisPadButton.Down;
         }
 
-        _cachedInputState = new PadState(
+        var state = new PadState(
             Connected: true,
             Buttons: buttons,
             LeftX: leftX,
@@ -582,8 +613,8 @@ public static class PadExports
             RightY: rightY,
             L2: l2,
             R2: r2);
-        _lastInputSampleTicks = now;
-        return _cachedInputState;
+        Volatile.Write(ref _cachedInputSample, new PadSample(state, now));
+        return state;
     }
 
     private static readonly long PadStartTimestamp = Stopwatch.GetTimestamp();

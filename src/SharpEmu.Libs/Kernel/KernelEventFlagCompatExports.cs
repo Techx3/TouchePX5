@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Fiber;
@@ -29,6 +30,124 @@ public static class KernelEventFlagCompatExports
     // trace string (and FormatFrameChain/FormatGuestWaitObject) when disabled.
     private static readonly bool _traceEventFlag = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_EVENT_FLAG"), "1", StringComparison.Ordinal);
+
+    // Aggregate wait accounting. Per-call tracing is far too heavy on the hot
+    // pump path, so this only bumps counters and a reporter thread prints a
+    // summary periodically: which flag is waited on, for how long, and whether
+    // the wait ends because it was signalled or because it timed out.
+    private static readonly bool _statsEventFlag = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_EVENT_FLAG_STATS"), "1", StringComparison.Ordinal);
+
+    private sealed class EventFlagWaitStats
+    {
+        public long Waits;
+        public long PumpIterations;
+        public long Satisfied;
+        public long TimedOut;
+        public long BlockedTicks;
+        public long MaxBlockedTicks;
+        public long PumpTicks;
+        public long MonitorWaits;
+        public long MonitorPulsed;
+    }
+
+    private static readonly ConcurrentDictionary<ulong, EventFlagWaitStats> _waitStats = new();
+    private static int _waitStatsReporterStarted;
+
+    private static EventFlagWaitStats GetWaitStats(ulong handle)
+    {
+        EnsureWaitStatsReporter();
+        return _waitStats.GetOrAdd(handle, static _ => new EventFlagWaitStats());
+    }
+
+    private static void RecordWaitOutcome(
+        ulong handle,
+        long startTicks,
+        long iterations,
+        bool satisfied,
+        long pumpTicks,
+        long monitorWaits,
+        long monitorPulsed)
+    {
+        var stats = GetWaitStats(handle);
+        var elapsed = Stopwatch.GetTimestamp() - startTicks;
+        Interlocked.Increment(ref stats.Waits);
+        Interlocked.Add(ref stats.PumpIterations, iterations);
+        Interlocked.Add(ref stats.BlockedTicks, elapsed);
+        Interlocked.Add(ref stats.PumpTicks, pumpTicks);
+        Interlocked.Add(ref stats.MonitorWaits, monitorWaits);
+        Interlocked.Add(ref stats.MonitorPulsed, monitorPulsed);
+        if (satisfied)
+        {
+            Interlocked.Increment(ref stats.Satisfied);
+        }
+        else
+        {
+            Interlocked.Increment(ref stats.TimedOut);
+        }
+
+        long observed;
+        while (elapsed > (observed = Interlocked.Read(ref stats.MaxBlockedTicks)))
+        {
+            if (Interlocked.CompareExchange(ref stats.MaxBlockedTicks, elapsed, observed) == observed)
+            {
+                break;
+            }
+        }
+    }
+
+    private static void EnsureWaitStatsReporter()
+    {
+        if (Interlocked.CompareExchange(ref _waitStatsReporterStarted, 1, 0) != 0)
+        {
+            return;
+        }
+
+        var reporter = new Thread(static () =>
+        {
+            while (true)
+            {
+                Thread.Sleep(2000);
+                foreach (var pair in _waitStats)
+                {
+                    var s = pair.Value;
+                    var waits = Interlocked.Exchange(ref s.Waits, 0);
+                    if (waits == 0)
+                    {
+                        continue;
+                    }
+
+                    var iterations = Interlocked.Exchange(ref s.PumpIterations, 0);
+                    var satisfied = Interlocked.Exchange(ref s.Satisfied, 0);
+                    var timedOut = Interlocked.Exchange(ref s.TimedOut, 0);
+                    var ticks = Interlocked.Exchange(ref s.BlockedTicks, 0);
+                    var maxTicks = Interlocked.Exchange(ref s.MaxBlockedTicks, 0);
+                    var pumpTicks = Interlocked.Exchange(ref s.PumpTicks, 0);
+                    var monitorWaits = Interlocked.Exchange(ref s.MonitorWaits, 0);
+                    var monitorPulsed = Interlocked.Exchange(ref s.MonitorPulsed, 0);
+                    var name = _eventFlags.TryGetValue(pair.Key, out var state) ? state.Name : "?";
+                    var totalMs = ticks * 1000.0 / Stopwatch.Frequency;
+                    var pumpMs = pumpTicks * 1000.0 / Stopwatch.Frequency;
+                    Console.Error.WriteLine(
+                        $"[LOADER][INFO] event_flag.stats handle=0x{pair.Key:X} name='{name}' " +
+                        $"waits={waits} signalled={satisfied} timedout={timedOut} " +
+                        $"blocked_total_ms={totalMs:0.0} blocked_avg_ms={totalMs / waits:0.00} " +
+                        $"blocked_max_ms={maxTicks * 1000.0 / Stopwatch.Frequency:0.0} " +
+                        $"pumps_per_wait={(double)iterations / waits:0.0} " +
+                        $"pump_total_ms={pumpMs:0.0} pump_share={(totalMs > 0 ? pumpMs / totalMs : 0):P0} " +
+                        $"monitor_waits={monitorWaits} pulsed={monitorPulsed} " +
+                        $"expired={monitorWaits - monitorPulsed}");
+                }
+
+                Console.Error.Flush();
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "SharpEmu-EventFlagStats"
+        };
+        reporter.Start();
+    }
 
     private sealed class EventFlagState
     {
@@ -305,11 +424,18 @@ public static class KernelEventFlagCompatExports
                 state.WaitingThreads++;
                 if (_traceEventFlag) TraceEventFlag($"wait-pump handle=0x{handle:X16} pattern=0x{pattern:X16} waiters={state.WaitingThreads} guest_thread=0x{currentGuestThread:X16} fiber=0x{currentFiber:X16} managed={managedThread} ret=0x{returnRip:X16}");
                 var releaseWaiter = true;
+                var waitStartTicks = _statsEventFlag ? Stopwatch.GetTimestamp() : 0L;
+                var pumpIterations = 0L;
+                var pumpTicks = 0L;
+                var monitorWaits = 0L;
+                var monitorPulsed = 0L;
                 try
                 {
                     while (true)
                     {
+                        pumpIterations++;
                         Monitor.Exit(state.Gate);
+                        var pumpStart = _statsEventFlag ? Stopwatch.GetTimestamp() : 0L;
                         try
                         {
                             scheduler.Pump(ctx, "sceKernelWaitEventFlag");
@@ -317,6 +443,10 @@ public static class KernelEventFlagCompatExports
                         finally
                         {
                             Monitor.Enter(state.Gate);
+                            if (_statsEventFlag)
+                            {
+                                pumpTicks += Stopwatch.GetTimestamp() - pumpStart;
+                            }
                         }
 
                         if (TryCompleteSatisfiedWait(ctx, state, pattern, waitMode, resultAddress, out var pumpedWaitResult))
@@ -324,6 +454,7 @@ public static class KernelEventFlagCompatExports
                             state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
                             releaseWaiter = false;
                             if (_traceEventFlag) TraceEventFlag($"wait-wake handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} waiters={state.WaitingThreads} ret=0x{returnRip:X16}");
+                            if (_statsEventFlag) RecordWaitOutcome(handle, waitStartTicks, pumpIterations, true, pumpTicks, monitorWaits, monitorPulsed);
                             return SetReturn(ctx, pumpedWaitResult);
                         }
 
@@ -335,10 +466,20 @@ public static class KernelEventFlagCompatExports
                             _ = TryWriteUInt32(ctx, timeoutAddress, 0);
                             _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
                             if (_traceEventFlag) TraceEventFlag($"wait-timeout handle=0x{handle:X16} pattern=0x{pattern:X16} bits=0x{state.Bits:X16} ret=0x{returnRip:X16}");
+                            if (_statsEventFlag) RecordWaitOutcome(handle, waitStartTicks, pumpIterations, false, pumpTicks, monitorWaits, monitorPulsed);
                             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT);
                         }
 
-                        Monitor.Wait(state.Gate, (int)Math.Min(remaining, HostWaitPumpMilliseconds));
+                        var pulsed = Monitor.Wait(
+                            state.Gate, (int)Math.Min(remaining, HostWaitPumpMilliseconds));
+                        if (_statsEventFlag)
+                        {
+                            monitorWaits++;
+                            if (pulsed)
+                            {
+                                monitorPulsed++;
+                            }
+                        }
                     }
                 }
                 finally
