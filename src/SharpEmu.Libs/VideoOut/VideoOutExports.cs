@@ -159,6 +159,8 @@ public static class VideoOutExports
         {
             _windowTitle = $"{_windowTitle} · {gpuName.Trim()}{backendSuffix}";
         }
+
+        PerfOverlay.SetGpuName($"{gpuName.Trim()}{backendSuffix}");
     }
 
     public static void NotifyPresentationWindowClosed()
