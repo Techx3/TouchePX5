@@ -5361,12 +5361,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static readonly bool _disableGuestAffinity = string.Equals(
 		Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_GUEST_AFFINITY"), "1", StringComparison.Ordinal);
 
-	// Opt-in: measured no benefit on Demon's Souls, and the run-to-run spread on
-	// this workload is far wider than any effect it produced. Kept for future
-	// investigation rather than made the default.
-	private static readonly bool _guestAffinityUsesSmtSibling = string.Equals(
-		Environment.GetEnvironmentVariable("SHARPEMU_GUEST_AFFINITY_SMT"), "1", StringComparison.Ordinal);
-
 	private void ApplyGuestThreadAffinity(ulong guestAffinityMask)
 	{
 		if (_disableGuestAffinity)
@@ -5377,7 +5371,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var hostAffinityMask = MapGuestThreadAffinity(guestAffinityMask);
 		if (hostAffinityMask == 0)
 		{
+			if (_logGuestThreads)
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][WARN] guest thread affinity guest=0x{guestAffinityMask:X} mapped to empty host mask; thread runs unpinned");
+			}
+
 			return;
+		}
+
+		if (_logGuestThreads)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][INFO] guest thread affinity guest=0x{guestAffinityMask:X} -> host=0x{hostAffinityMask:X}");
 		}
 
 		if (SetThreadAffinityMask(GetCurrentThread(), (nuint)hostAffinityMask) == 0 && _logGuestThreads)
@@ -5409,6 +5415,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				continue;
 			}
 
+			// guestCpu*2 assumes one physical core per two logical guest CPUs and
+			// runs out of room once guestCpu reaches half the logical processor
+			// count. A title requesting more distinct guest CPU indices than that
+			// (Demon's Souls' BPE job system asks for CPU0..CPU12, i.e. 13
+			// distinct indices on a 24-logical-processor host) pushes hostCpu
+			// past processorCount for the overflow indices, and this is left
+			// deliberately unmapped: that guest thread runs unpinned rather than
+			// pinned. Two measured alternatives -- wrapping the overflow onto an
+			// already-claimed logical CPU, and onto that CPU's idle SMT sibling
+			// -- were both ~9% slower on Demon's Souls than leaving it unpinned.
+			// With this host's core count exceeding what the guest actually
+			// keeps busy, an unpinned thread lets Windows' own scheduler place
+			// it on whichever core is free at the moment, which beats any static
+			// choice made here. ApplyGuestThreadAffinity logs when this happens.
 			var hostCpu = processorCount < 8
 				? guestCpu % processorCount
 				: processorCount >= 16
@@ -5417,19 +5437,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			if (hostCpu < processorCount)
 			{
 				hostAffinityMask |= 1UL << hostCpu;
-
-				// guestCpu * 2 claims one logical CPU per physical core and
-				// leaves its SMT sibling idle. Guest job-system workers spin
-				// without ever yielding, so a narrow guest mask can leave the
-				// one thread holding real work waiting for preemption. Adding
-				// the sibling doubles the room on the same physical core, so
-				// cache locality is unchanged.
-				if (_guestAffinityUsesSmtSibling &&
-					processorCount >= 16 &&
-					hostCpu + 1 < processorCount)
-				{
-					hostAffinityMask |= 1UL << (hostCpu + 1);
-				}
 			}
 		}
 
