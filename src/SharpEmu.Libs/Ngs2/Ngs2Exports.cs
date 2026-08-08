@@ -1618,9 +1618,17 @@ public static class Ngs2Exports
     }
 
     private static uint GetVoiceStateFlags(VoiceState voice) =>
-        voice.Playing ? 0x3u :
-        voice.Paused ? 0x5u :
-        voice.Stopped ? 0xBu : 0u;
+        GetVoiceStateFlags(voice.Playing, voice.Paused, voice.Stopped);
+
+    internal static uint GetVoiceStateFlags(bool playing, bool paused, bool stopped)
+    {
+        // A completed/stopped voice is reusable and must be reported as idle.
+        // Returning 0xB here left M2's 32 guest voice slots permanently busy;
+        // once all slots had played, its allocator spun forever polling the
+        // state byte behind sceNgs2VoiceGetState.
+        _ = stopped;
+        return playing ? 0x3u : paused ? 0x5u : 0u;
+    }
 
     private static int ValidateSystem(CpuContext ctx)
     {
