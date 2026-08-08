@@ -2230,6 +2230,11 @@ internal static unsafe class VulkanVideoPresenter
         Format viewFormat) =>
         Presenter.IsCompatibleViewFormat(imageFormat, viewFormat);
 
+    internal static ImageUsageFlags GetGuestImageViewUsage(
+        ImageUsageFlags imageUsage,
+        bool storageUsage) =>
+        Presenter.GetGuestImageViewUsage(imageUsage, storageUsage);
+
     // A tile mode is part of a guest image's storage identity. Reusing the
     // same VkImage after the guest rebinds an address with another layout can
     // expose stale or incorrectly detiled texels.
@@ -4773,11 +4778,12 @@ internal static unsafe class VulkanVideoPresenter
             public Format Format;
             public uint TileMode;
             public Image Image;
+            public ImageUsageFlags Usage;
             public DeviceMemory Memory;
             public ImageView View;
             public ImageView[] MipViews = [];
             public Dictionary<(uint MipLevel, uint ArrayLayer), ImageView> AttachmentViews { get; } = new();
-            public Dictionary<(Format Format, uint MipLevel, uint LevelCount, uint DstSelect), ImageView> FormatViews { get; } = new();
+            public Dictionary<(Format Format, uint MipLevel, uint LevelCount, uint DstSelect, bool StorageUsage), ImageView> FormatViews { get; } = new();
             public RenderPass RenderPass;
             public RenderPass InitialRenderPass;
             public Framebuffer Framebuffer;
@@ -7693,6 +7699,7 @@ internal static unsafe class VulkanVideoPresenter
                 GuestFormat = source.GuestFormat,
                 Format = source.Format,
                 Image = image,
+                Usage = imageInfo.Usage,
                 Memory = memory,
             };
         }
@@ -10975,7 +10982,8 @@ internal static unsafe class VulkanVideoPresenter
                 guestImage,
                 vkFormat,
                 selectedMipLevel,
-                levelCount: 1);
+                levelCount: 1,
+                storageUsage: true);
             var resource = new TextureResource
             {
                 Address = texture.Address,
@@ -11132,6 +11140,7 @@ internal static unsafe class VulkanVideoPresenter
                 GuestFormat = GetGuestTextureFormat(texture.Format, texture.NumberType),
                 Format = vkFormat,
                 Image = image,
+                Usage = imageInfo.Usage,
                 Memory = memory,
                 View = view,
                 SupportsStorageUsage = true,
@@ -11384,6 +11393,12 @@ internal static unsafe class VulkanVideoPresenter
                 Components = ToVkComponentMapping(texture.DstSelect),
                 SubresourceRange = ColorSubresourceRange(layerCount: layers),
             };
+            var viewUsage = new ImageViewUsageCreateInfo
+            {
+                SType = StructureType.ImageViewUsageCreateInfo,
+                Usage = GetGuestImageViewUsage(imageInfo.Usage, storageUsage: false),
+            };
+            viewInfo.PNext = &viewUsage;
             Check(_vk.CreateImageView(_device, &viewInfo, null, out var view), "vkCreateImageView(texture)");
             var debugName = TextureDebugName(texture, vkFormat);
             SetDebugName(ObjectType.Image, image.Handle, $"{debugName} image");
@@ -11512,6 +11527,7 @@ internal static unsafe class VulkanVideoPresenter
                     Format = vkFormat,
                     TileMode = texture.TileMode,
                     Image = image,
+                    Usage = imageInfo.Usage,
                     Memory = imageMemory,
                     View = view,
                     InitialUploadPending = true,
@@ -13469,6 +13485,13 @@ internal static unsafe class VulkanVideoPresenter
                 Format.BC7SrgbBlock => Format.BC7UnormBlock,
                 _ => format,
             };
+
+        internal static ImageUsageFlags GetGuestImageViewUsage(
+            ImageUsageFlags imageUsage,
+            bool storageUsage) =>
+            storageUsage
+                ? imageUsage
+                : imageUsage & ~ImageUsageFlags.StorageBit;
 
         private static Format GetRenderTargetFormat(uint format, uint numberType) =>
             (format, numberType) switch
@@ -16433,6 +16456,12 @@ internal static unsafe class VulkanVideoPresenter
                     layerCount: 1,
                     baseArrayLayer: arrayLayer),
             };
+            var viewUsage = new ImageViewUsageCreateInfo
+            {
+                SType = StructureType.ImageViewUsageCreateInfo,
+                Usage = GetGuestImageViewUsage(resource.Usage, storageUsage: false),
+            };
+            viewInfo.PNext = &viewUsage;
 
             Check(
                 _vk.CreateImageView(_device, &viewInfo, null, out var view),
@@ -16808,6 +16837,12 @@ internal static unsafe class VulkanVideoPresenter
                     ComponentSwizzle.Identity),
                 SubresourceRange = ColorSubresourceRange(0, mipLevels, arrayLayers),
             };
+            var viewUsage = new ImageViewUsageCreateInfo
+            {
+                SType = StructureType.ImageViewUsageCreateInfo,
+                Usage = GetGuestImageViewUsage(imageInfo.Usage, storageUsage: false),
+            };
+            viewInfo.PNext = &viewUsage;
             Check(
                 _vk.CreateImageView(_device, &viewInfo, null, out var view),
                 "vkCreateImageView(offscreen)");
@@ -16857,6 +16892,7 @@ internal static unsafe class VulkanVideoPresenter
                 Format = format,
                 TileMode = target.TileMode,
                 Image = image,
+                Usage = imageInfo.Usage,
                 Memory = memory,
                 View = view,
                 MipViews = mipViews,
@@ -17754,6 +17790,12 @@ internal static unsafe class VulkanVideoPresenter
                     ComponentSwizzle.Identity),
                 SubresourceRange = ColorSubresourceRange(0, resource.MipLevels),
             };
+            var viewUsage = new ImageViewUsageCreateInfo
+            {
+                SType = StructureType.ImageViewUsageCreateInfo,
+                Usage = GetGuestImageViewUsage(resource.Usage, storageUsage: false),
+            };
+            viewInfo.PNext = &viewUsage;
             Check(
                 _vk.CreateImageView(_device, &viewInfo, null, out var newView),
                 "vkCreateImageView(guest reinterpret)");
@@ -17952,11 +17994,19 @@ internal static unsafe class VulkanVideoPresenter
             uint levelCount,
             uint dstSelect,
             out ImageView view,
-            bool arrayedView = false)
+            bool arrayedView = false,
+            bool storageUsage = false)
         {
             try
             {
-                view = GetOrCreateGuestImageView(resource, format, mipLevel, levelCount, dstSelect, arrayedView);
+                view = GetOrCreateGuestImageView(
+                    resource,
+                    format,
+                    mipLevel,
+                    levelCount,
+                    dstSelect,
+                    arrayedView,
+                    storageUsage);
                 return true;
             }
             catch (Exception exception)
@@ -17975,7 +18025,8 @@ internal static unsafe class VulkanVideoPresenter
             uint mipLevel,
             uint levelCount,
             uint dstSelect = 0xFAC,
-            bool arrayedView = false)
+            bool arrayedView = false,
+            bool storageUsage = false)
         {
             if (mipLevel >= resource.MipLevels)
             {
@@ -17985,7 +18036,10 @@ internal static unsafe class VulkanVideoPresenter
 
             levelCount = Math.Max(levelCount, 1);
             levelCount = Math.Min(levelCount, resource.MipLevels - mipLevel);
-            if (format == resource.Format && dstSelect == 0xFAC && !arrayedView)
+            if (!storageUsage &&
+                format == resource.Format &&
+                dstSelect == 0xFAC &&
+                !arrayedView)
             {
                 if (mipLevel == 0 && levelCount == resource.MipLevels)
                 {
@@ -18004,7 +18058,12 @@ internal static unsafe class VulkanVideoPresenter
                     $"Incompatible image view format {format} for image {resource.Format}.");
             }
 
-            var key = (format, mipLevel + (arrayedView ? 0x100u : 0), levelCount, dstSelect);
+            var key = (
+                format,
+                mipLevel + (arrayedView ? 0x100u : 0),
+                levelCount,
+                dstSelect,
+                storageUsage);
             if (resource.FormatViews.TryGetValue(key, out var existing))
             {
                 return existing;
@@ -18022,6 +18081,12 @@ internal static unsafe class VulkanVideoPresenter
                     levelCount,
                     arrayedView ? resource.ArrayLayers : 1),
             };
+            var viewUsage = new ImageViewUsageCreateInfo
+            {
+                SType = StructureType.ImageViewUsageCreateInfo,
+                Usage = GetGuestImageViewUsage(resource.Usage, storageUsage),
+            };
+            viewInfo.PNext = &viewUsage;
             ImageView view;
             Check(
                 _vk.CreateImageView(_device, &viewInfo, null, out view),
@@ -18042,13 +18107,15 @@ internal static unsafe class VulkanVideoPresenter
             GuestImageResource resource,
             Format format,
             uint mipLevel,
-            uint levelCount) =>
+            uint levelCount,
+            bool storageUsage = false) =>
             GetOrCreateGuestImageView(
                 resource,
                 format,
                 mipLevel,
                 levelCount,
-                dstSelect: 0xFAC);
+                dstSelect: 0xFAC,
+                storageUsage: storageUsage);
 
         internal static bool IsCompatibleViewFormat(Format imageFormat, Format viewFormat)
         {

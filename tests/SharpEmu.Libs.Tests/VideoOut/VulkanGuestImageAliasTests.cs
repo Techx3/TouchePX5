@@ -9,6 +9,37 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed class VulkanGuestImageAliasTests
 {
+    private const ImageUsageFlags SharedImageUsage =
+        ImageUsageFlags.SampledBit |
+        ImageUsageFlags.StorageBit |
+        ImageUsageFlags.ColorAttachmentBit |
+        ImageUsageFlags.TransferSrcBit |
+        ImageUsageFlags.TransferDstBit;
+
+    [Fact]
+    public void SampledGuestViewDoesNotInheritStorageUsage()
+    {
+        var usage = VulkanVideoPresenter.GetGuestImageViewUsage(
+            SharedImageUsage,
+            storageUsage: false);
+
+        Assert.False(usage.HasFlag(ImageUsageFlags.StorageBit));
+        Assert.True(usage.HasFlag(ImageUsageFlags.SampledBit));
+        Assert.True(usage.HasFlag(ImageUsageFlags.ColorAttachmentBit));
+        Assert.True(usage.HasFlag(ImageUsageFlags.TransferSrcBit));
+        Assert.True(usage.HasFlag(ImageUsageFlags.TransferDstBit));
+    }
+
+    [Fact]
+    public void StorageGuestViewRetainsFullImageUsage()
+    {
+        var usage = VulkanVideoPresenter.GetGuestImageViewUsage(
+            SharedImageUsage,
+            storageUsage: true);
+
+        Assert.Equal(SharedImageUsage, usage);
+    }
+
     [Theory]
     [InlineData(Format.R8G8B8A8Srgb, Format.R8G8B8A8Unorm)]
     [InlineData(Format.R8G8B8A8Unorm, Format.R8G8B8A8Srgb)]
