@@ -31,6 +31,39 @@ public sealed class PadExportsTests
         Assert.Equal(expected, PadExports.PadSetTiltCorrectionState(_ctx));
     }
 
+    [Fact]
+    public void GetTriggerEffectStateWritesEightBytesWithoutTouchingGuard()
+    {
+        const ulong stateAddress = Base + 0x100;
+        const ulong guardAddress = stateAddress + 8;
+        const ulong guard = 0xC0DE_C0DE_CAFE_BA00UL;
+        Assert.True(_memory.TryWrite(stateAddress, Enumerable.Repeat((byte)0xEE, 8).ToArray()));
+        Assert.True(_memory.TryWrite(guardAddress, BitConverter.GetBytes(guard)));
+
+        _ctx[CpuRegister.Rdi] = 0;
+        _ctx[CpuRegister.Rsi] = stateAddress;
+
+        Assert.Equal(0, PadExports.PadGetTriggerEffectState(_ctx));
+
+        Span<byte> state = stackalloc byte[8];
+        Span<byte> preservedGuard = stackalloc byte[8];
+        Assert.True(_memory.TryRead(stateAddress, state));
+        Assert.True(_memory.TryRead(guardAddress, preservedGuard));
+        Assert.True(state.SequenceEqual(new byte[8]));
+        Assert.Equal(guard, BitConverter.ToUInt64(preservedGuard));
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(-1)]
+    public void GetTriggerEffectStateRejectsForeignHandles(int handle)
+    {
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        _ctx[CpuRegister.Rsi] = Base + 0x100;
+
+        Assert.Equal(InvalidHandle, PadExports.PadGetTriggerEffectState(_ctx));
+    }
+
     [Theory]
     [InlineData(Generation.Gen5, false, 0, true)]
     [InlineData(Generation.Gen5, false, 1, true)]

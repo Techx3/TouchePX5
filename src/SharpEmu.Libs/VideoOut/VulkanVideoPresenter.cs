@@ -12240,7 +12240,12 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             var size = (ulong)Math.Max(guestBuffer.Length, sizeof(uint));
-            var endAddress = checked(guestBuffer.BaseAddress + size);
+            if (guestBuffer.BaseAddress > ulong.MaxValue - size)
+            {
+                return CreateTransientGlobalBufferResource(guestBuffer);
+            }
+
+            var endAddress = guestBuffer.BaseAddress + size;
             GuestBufferAllocation? allocation = null;
             foreach (var candidate in _guestBufferAllocations)
             {
@@ -12473,9 +12478,14 @@ internal static unsafe class VulkanVideoPresenter
                 }
 
                 var size = (ulong)Math.Max(buffer.Length, sizeof(uint));
+                if (buffer.BaseAddress > ulong.MaxValue - size - 3)
+                {
+                    continue;
+                }
+
                 var alignedStart = buffer.BaseAddress &
                     ~(GuestStorageBufferOffsetAlignment - 1);
-                var paddedEnd = checked(buffer.BaseAddress + size + 3) & ~3UL;
+                var paddedEnd = (buffer.BaseAddress + size + 3) & ~3UL;
                 ranges.Add((
                     alignedStart,
                     paddedEnd));

@@ -580,7 +580,7 @@ internal static partial class MetalVideoPresenter
         if (writeBackBuffers.Count > 0)
         {
             var committed = FlushBatchedGuestCommands();
-            MetalNative.SendVoid(committed, MetalNative.Selector("waitUntilCompleted"));
+            WaitForCommittedCommandBuffer(committed);
             WriteBuffersBackToGuest(writeBackBuffers);
         }
 
@@ -668,7 +668,7 @@ internal static partial class MetalVideoPresenter
         TagSnapshotResources(commandBuffer);
         if (writeBackBuffers.Count > 0)
         {
-            MetalNative.SendVoid(commandBuffer, MetalNative.Selector("waitUntilCompleted"));
+            WaitForCommittedCommandBuffer(commandBuffer);
             WriteBuffersBackToGuest(writeBackBuffers);
         }
 
@@ -2079,6 +2079,22 @@ internal static partial class MetalVideoPresenter
                     guest.BaseAddress,
                     new ReadOnlySpan<byte>((void*)pointer, guest.Length));
             }
+        }
+    }
+
+    private static void WaitForCommittedCommandBuffer(nint commandBuffer)
+    {
+        if (commandBuffer == 0)
+        {
+            return;
+        }
+
+        // MTLCommandBufferStatusCompleted = 4. Tiny label/writeback batches
+        // commonly finish before this point, so avoid a redundant ObjC wait.
+        const nint completed = 4;
+        if (MetalNative.Send(commandBuffer, MetalNative.Selector("status")) < completed)
+        {
+            MetalNative.SendVoid(commandBuffer, MetalNative.Selector("waitUntilCompleted"));
         }
     }
 
