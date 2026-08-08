@@ -10,6 +10,47 @@ namespace SharpEmu.Libs.Tests.Pthread;
 public sealed class PthreadMutexSemanticsTests
 {
     [Fact]
+    public void CondInitDestroy_ReleasesOpaqueGuestAllocation()
+    {
+        const ulong memoryBase = 0x1_0020_0000;
+        const ulong condAddress = memoryBase + 0x100;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = condAddress;
+
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadCondInit(context));
+        Assert.Equal(1, memory.AllocationCount);
+        Assert.Equal(0, memory.FreeCount);
+
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadCondDestroy(context));
+        Assert.Equal(1, memory.FreeCount);
+        Assert.True(context.TryReadUInt64(condAddress, out var handle));
+        Assert.Equal(0ul, handle);
+    }
+
+    [Fact]
+    public void MutexAndAttributeDestroy_ReleaseOpaqueGuestAllocations()
+    {
+        const ulong memoryBase = 0x1_0021_0000;
+        const ulong attrAddress = memoryBase + 0x100;
+        const ulong mutexAddress = memoryBase + 0x200;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        context[CpuRegister.Rdi] = attrAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexattrInit(context));
+        context[CpuRegister.Rsi] = attrAddress;
+        context[CpuRegister.Rdi] = mutexAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexInit(context));
+        Assert.Equal(2, memory.AllocationCount);
+
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexDestroy(context));
+        context[CpuRegister.Rdi] = attrAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexattrDestroy(context));
+        Assert.Equal(2, memory.FreeCount);
+    }
+
+    [Fact]
     public void AdaptiveMutex_SelfLockIsIdempotent()
     {
         const ulong memoryBase = 0x1_0000_0000;
@@ -273,7 +314,11 @@ public sealed class PthreadMutexSemanticsTests
     {
         private readonly ulong _baseAddress;
         private readonly byte[] _storage;
+        private readonly HashSet<ulong> _allocations = new();
         private ulong _nextAllocation;
+
+        public int AllocationCount { get; private set; }
+        public int FreeCount { get; private set; }
 
         public AllocatingCpuMemory(ulong baseAddress, int size)
         {
@@ -316,11 +361,21 @@ public sealed class PthreadMutexSemanticsTests
 
             address = aligned;
             _nextAllocation = aligned + size;
+            _allocations.Add(address);
+            AllocationCount++;
             return true;
         }
 
-        public bool TryFreeGuestMemory(ulong address) =>
-            address >= _baseAddress && address < _baseAddress + (ulong)_storage.Length;
+        public bool TryFreeGuestMemory(ulong address)
+        {
+            if (!_allocations.Remove(address))
+            {
+                return false;
+            }
+
+            FreeCount++;
+            return true;
+        }
 
         private bool TryResolve(ulong virtualAddress, int length, out int offset)
         {

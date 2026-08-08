@@ -31,6 +31,7 @@ public static class SaveDataExports
     private const uint MountModeReadOnly = 1u << 0;
     private const uint MountModeCreate = 1u << 2;
     private const uint MountModeCreate2 = 1u << 5;
+    private const uint UmountModeBackupAsync = 1u << 16;
     private const int MountResultSize = 0x40;
     private const int MaxMountSlots = 16;
     // Emulator guard against corrupt or misread sizes, not a platform limit.
@@ -181,7 +182,8 @@ public static class SaveDataExports
     public static int SaveDataMount5(CpuContext ctx) => SaveDataMount3(ctx);
 
     [SysAbiExport(Nid = "BMR4F-Uek3E", ExportName = "sceSaveDataUmount", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
-    public static int SaveDataUmount(CpuContext ctx) => SaveDataUmount2(ctx);
+    public static int SaveDataUmount(CpuContext ctx) =>
+        SaveDataUmountCore(ctx, ctx[CpuRegister.Rdi], mode: 0);
 
     [SysAbiExport(Nid = "ieP6jP138Qo", ExportName = "sceSaveDataIsMounted", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
     public static int SaveDataIsMounted(CpuContext ctx)
@@ -977,18 +979,37 @@ public static class SaveDataExports
         LibraryName = "libSceSaveData")]
     public static int SaveDataUmount2(CpuContext ctx)
     {
-        // rdi: SceSaveDataMountPoint* (16-byte mount point string) for umount2.
-        var mountPointAddress = ctx[CpuRegister.Rdi];
+        // PS5 ABI: rdi = mode, rsi = SceSaveDataMountPoint*.
+        // Retain the previous one-argument form as a compatibility fallback.
+        var mode = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var mountPointAddress = ctx[CpuRegister.Rsi];
+        if (mountPointAddress == 0 && ctx[CpuRegister.Rdi] > uint.MaxValue)
+        {
+            mountPointAddress = ctx[CpuRegister.Rdi];
+            mode = 0;
+        }
+
+        return SaveDataUmountCore(ctx, mountPointAddress, mode);
+    }
+
+    private static int SaveDataUmountCore(CpuContext ctx, ulong mountPointAddress, uint mode)
+    {
         if (mountPointAddress != 0 && TryReadFixedAscii(ctx, mountPointAddress, 16, out var mountPoint) &&
             !string.IsNullOrEmpty(mountPoint))
         {
+            MountEntry? removed;
             lock (_mountGate)
             {
-                _mounts.Remove(mountPoint);
+                _mounts.Remove(mountPoint, out removed);
             }
 
             KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
-            TraceSaveData($"umount2 mount='{mountPoint}'");
+            if (removed is not null && (mode & UmountModeBackupAsync) != 0)
+            {
+                EnqueueEvent(EventTypeUmountBackupEnd, removed.UserId, removed.DirName);
+            }
+
+            TraceSaveData($"umount mode=0x{mode:X} mount='{mountPoint}' removed={removed is not null}");
         }
 
         return SetReturn(ctx, 0);

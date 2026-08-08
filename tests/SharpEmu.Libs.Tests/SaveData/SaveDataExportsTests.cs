@@ -148,11 +148,43 @@ public sealed class SaveDataExportsTests : IDisposable
     {
         Assert.Equal(0, Mount());
         WriteAscii(MountPointStr, MountPoint);
-        Assert.Equal(0, SaveDataExports.SaveDataUmount2(Reg(rdi: MountPointStr)));
+        Assert.Equal(0, SaveDataExports.SaveDataUmount2(Reg(rdi: 0, rsi: MountPointStr)));
 
         Assert.Equal(0, SaveDataExports.SaveDataIsMounted(Reg(rsi: EventOut)));
         Assert.True(_ctx.TryReadUInt32(EventOut, out var mounted));
         Assert.Equal(0u, mounted);
+    }
+
+    [Fact]
+    public void Umount2_UsesPs5ModeAndMountPointAbi_ThenAllowsRemount()
+    {
+        Assert.Equal(0, Mount());
+        WriteAscii(MountPointStr, MountPoint);
+
+        Assert.Equal(0, SaveDataExports.SaveDataUmount2(Reg(rdi: 0, rsi: MountPointStr)));
+        Assert.Equal(0, Mount(mountMode: 1));
+    }
+
+    [Fact]
+    public void Umount_UsesLegacySingleMountPointArgument()
+    {
+        Assert.Equal(0, Mount());
+        WriteAscii(MountPointStr, MountPoint);
+
+        Assert.Equal(0, SaveDataExports.SaveDataUmount(Reg(rdi: MountPointStr)));
+        Assert.Equal(0, Mount(mountMode: 1));
+    }
+
+    [Fact]
+    public void Umount2_BackupAsyncPostsCompletionEvent()
+    {
+        Assert.Equal(0, Mount());
+        WriteAscii(MountPointStr, MountPoint);
+
+        Assert.Equal(0, SaveDataExports.SaveDataUmount2(Reg(rdi: 1u << 16, rsi: MountPointStr)));
+        Assert.Equal(0, SaveDataExports.SaveDataGetEventResult(Reg(rsi: EventOut)));
+        Assert.True(_ctx.TryReadUInt32(EventOut, out var type));
+        Assert.Equal(1u, type);
     }
 
     [Fact]

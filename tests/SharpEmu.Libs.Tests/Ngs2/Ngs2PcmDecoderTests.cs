@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Ngs2;
+using System.Buffers.Binary;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Ngs2;
@@ -59,6 +60,28 @@ public sealed class Ngs2PcmDecoderTests
                 stopped,
                 explicitlyStopped,
                 compactLifecycleStopped));
+    }
+
+    [Theory]
+    [InlineData(true, false, false, false, true)]
+    [InlineData(true, true, false, false, false)]
+    [InlineData(true, false, true, false, false)]
+    [InlineData(true, false, false, true, false)]
+    [InlineData(false, false, false, false, false)]
+    public void RouteRemovalClearsOnlyUnstoppedTransportLatch(
+        bool hasTransportCommand,
+        bool stopped,
+        bool paused,
+        bool explicitlyStopped,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            Ngs2Exports.ShouldClearTransportOnRouteRemoval(
+                hasTransportCommand,
+                stopped,
+                paused,
+                explicitlyStopped));
     }
 
     [Fact]
@@ -144,6 +167,50 @@ public sealed class Ngs2PcmDecoderTests
     {
         Assert.True(Ngs2Exports.StreamingSnapshotsMatch([1, 2, 3], [1, 2, 3]));
         Assert.False(Ngs2Exports.StreamingSnapshotsMatch([1, 2, 3], [1, 9, 3]));
+    }
+
+    [Fact]
+    public void ResolvesPs5StreamingDescriptorRelativeToWaveformData()
+    {
+        Span<byte> descriptor = stackalloc byte[40];
+        BinaryPrimitives.WriteUInt64LittleEndian(descriptor, 0x100);
+        BinaryPrimitives.WriteUInt64LittleEndian(descriptor[8..], 0x4000);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[24..], 0x1000);
+
+        Assert.True(Ngs2Exports.TryResolveStreamingBlockDescriptor(
+            0x100000, 2, descriptor, out var address, out var bytes, out var frames));
+        Assert.Equal(0x100100UL, address);
+        Assert.Equal(0x4000, bytes);
+        Assert.Equal(0x1000, frames);
+    }
+
+    [Fact]
+    public void StreamingDescriptorAppliesSkippedPcmFrames()
+    {
+        Span<byte> descriptor = stackalloc byte[40];
+        BinaryPrimitives.WriteUInt64LittleEndian(descriptor[8..], 0x1000);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[20..], 16);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[24..], 32);
+
+        Assert.True(Ngs2Exports.TryResolveStreamingBlockDescriptor(
+            0x200000, 2, descriptor, out var address, out var bytes, out var frames));
+        Assert.Equal(0x200040UL, address);
+        Assert.Equal(128, bytes);
+        Assert.Equal(32, frames);
+    }
+
+    [Theory]
+    [InlineData(0x10001UL, 3UL, 2)]
+    [InlineData(0x10001UL, 0x1000001UL, 2)]
+    [InlineData(0x1000UL, 0x4000UL, 2)]
+    public void StreamingDescriptorRejectsInvalidSourceOrSize(
+        ulong sourceAddress, ulong dataSize, int channels)
+    {
+        Span<byte> descriptor = stackalloc byte[40];
+        BinaryPrimitives.WriteUInt64LittleEndian(descriptor[8..], dataSize);
+
+        Assert.False(Ngs2Exports.TryResolveStreamingBlockDescriptor(
+            sourceAddress, channels, descriptor, out _, out _, out _));
     }
 
     [Fact]
