@@ -35,6 +35,9 @@ public sealed partial class DirectExecutionBackend
 	// in-flight Runs are separate knobs.
 	private static readonly int NativeWorkerMaxConcurrent = ReadNativeWorkerMaxConcurrent();
 
+	private static readonly int NativeWorkerBurstMaxConcurrent =
+		Math.Min(64, NativeWorkerMaxConcurrent + 1);
+
 	private static int ReadNativeWorkerMaxConcurrent()
 	{
 		if (int.TryParse(
@@ -51,7 +54,10 @@ public sealed partial class DirectExecutionBackend
 	private readonly object _nativeWorkerGate = new();
 	private readonly List<NativeGuestExecutor> _allNativeWorkers = new();
 	private readonly Stack<NativeGuestExecutor> _idleNativeWorkers = new();
-	private readonly SemaphoreSlim _nativeWorkerRunLimiter = new(NativeWorkerMaxConcurrent);
+	private readonly SemaphoreSlim _nativeWorkerRunLimiter = new(
+		NativeWorkerMaxConcurrent,
+		NativeWorkerBurstMaxConcurrent);
+	private int _nativeWorkerBurstEnabled;
 	private bool _nativeWorkersDisposed;
 	private int _nativeWorkerCreationFailedLogged;
 
@@ -177,6 +183,22 @@ public sealed partial class DirectExecutionBackend
 	private static int _tbbNativeRunEnterCount;
 	private static int _tbbNativeWorkerRefuseCount;
 	internal static int _tbbWorkerPrologueFaultCount;
+
+	private void TryEnableNativeWorkerBurst(string nid, ulong returnRip)
+	{
+		if (NativeWorkerBurstMaxConcurrent <= NativeWorkerMaxConcurrent ||
+			Interlocked.CompareExchange(ref _nativeWorkerBurstEnabled, 1, 0) != 0)
+		{
+			return;
+		}
+
+		_nativeWorkerRunLimiter.Release();
+		Console.Error.WriteLine(
+			$"[LOADER][WARN] native_worker.adaptive_burst " +
+			$"base={NativeWorkerMaxConcurrent} active={NativeWorkerBurstMaxConcurrent} " +
+			$"nid={nid} ret=0x{returnRip:X16}");
+		Console.Error.Flush();
+	}
 
 	private void PrewarmNativeGuestWorkers(int count)
 	{
