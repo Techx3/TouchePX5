@@ -8,6 +8,20 @@ namespace SharpEmu.Libs.Tests.Ngs2;
 
 public sealed class Ngs2PcmDecoderTests
 {
+    [Theory]
+    [InlineData(true, false, false, 0x3u)]
+    [InlineData(false, true, false, 0x5u)]
+    [InlineData(false, false, true, 0u)]
+    [InlineData(false, false, false, 0u)]
+    public void VoiceStateFlagsReleaseCompletedVoices(
+        bool playing,
+        bool paused,
+        bool stopped,
+        uint expected)
+    {
+        Assert.Equal(expected, Ngs2Exports.GetVoiceStateFlags(playing, paused, stopped));
+    }
+
     [Fact]
     public void CompactLifecycleRetiresOnlyLoopingVagVoices()
     {
