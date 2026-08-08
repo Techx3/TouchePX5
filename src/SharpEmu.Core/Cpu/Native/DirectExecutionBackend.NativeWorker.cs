@@ -89,7 +89,7 @@ public sealed partial class DirectExecutionBackend
 	{
 		// Limit in-flight native Runs before renting so the idle pool is not
 		// drained by threads blocked on the concurrency gate.
-		_nativeWorkerRunLimiter.Wait();
+		WaitForNativeWorkerRunPermit();
 		NativeGuestExecutor? worker = null;
 		try
 		{
@@ -183,6 +183,33 @@ public sealed partial class DirectExecutionBackend
 	private static int _tbbNativeRunEnterCount;
 	private static int _tbbNativeWorkerRefuseCount;
 	internal static int _tbbWorkerPrologueFaultCount;
+	private const int LatencySensitiveWorkerWaitMilliseconds = 25;
+
+	private void WaitForNativeWorkerRunPermit()
+	{
+		var threadName = _activeGuestThreadState?.Name;
+		if (!IsLatencySensitiveNativeWorker(threadName) ||
+			_nativeWorkerRunLimiter.Wait(LatencySensitiveWorkerWaitMilliseconds))
+		{
+			if (!IsLatencySensitiveNativeWorker(threadName))
+			{
+				_nativeWorkerRunLimiter.Wait();
+			}
+			return;
+		}
+
+		// Castlevania creates one MAudioOutput for the M2 shell and another for
+		// gameplay. With the base cap occupied by main + shell audio, the second
+		// audio producer cannot reach an import and therefore cannot trigger the
+		// import-loop burst. Escalate only after it actually misses an audio-sized
+		// scheduling window; the default concurrency remains unchanged otherwise.
+		TryEnableNativeWorkerBurst("audio_worker_wait", 0);
+		_nativeWorkerRunLimiter.Wait();
+	}
+
+	internal static bool IsLatencySensitiveNativeWorker(string? threadName) =>
+		string.Equals(threadName, "MAudioOutput", StringComparison.OrdinalIgnoreCase) ||
+		string.Equals(threadName, "audio_output_thread", StringComparison.OrdinalIgnoreCase);
 
 	private void TryEnableNativeWorkerBurst(string nid, ulong returnRip)
 	{
