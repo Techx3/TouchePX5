@@ -1863,14 +1863,29 @@ public sealed partial class DirectExecutionBackend
 			_importLoopPatternStartTimestamp = Stopwatch.GetTimestamp();
 		}
 		_importLoopPatternHits++;
+		var elapsedTicks = Stopwatch.GetTimestamp() - _importLoopPatternStartTimestamp;
+		if (ShouldEnableNativeWorkerBurst(
+				_importLoopPatternHits,
+				elapsedTicks,
+				Stopwatch.Frequency))
+		{
+			TryEnableNativeWorkerBurst(entry.Nid, returnRip);
+		}
 		if (_importLoopPatternHits < 6)
 		{
 			return false;
 		}
 
-		var elapsedTicks = Stopwatch.GetTimestamp() - _importLoopPatternStartTimestamp;
 		return elapsedTicks >= (long)(_importLoopGuardSeconds * Stopwatch.Frequency);
 	}
+
+	internal static bool ShouldEnableNativeWorkerBurst(
+		int patternHits,
+		long elapsedTicks,
+		long timestampFrequency) =>
+		patternHits >= 6 &&
+		timestampFrequency > 0 &&
+		elapsedTicks >= Math.Max(1, timestampFrequency / 10);
 
 	private static bool IsImportLoopGuardBoundary(string nid) =>
 		nid is
