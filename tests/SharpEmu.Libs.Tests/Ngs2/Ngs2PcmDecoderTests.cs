@@ -60,4 +60,53 @@ public sealed class Ngs2PcmDecoderTests
         Assert.Equal(1f, last);
         Assert.Equal(1f, Ngs2Exports.GetStreamingTransitionWeight(0));
     }
+
+    [Fact]
+    public void DirectPcmSizeIsLearnedOnceAcrossBufferRotations()
+    {
+        var learned = Ngs2Exports.LearnDirectPcmBufferBytes(
+            currentBytes: 0,
+            previousAddress: 0x10000,
+            nextAddress: 0x10400);
+        var preserved = Ngs2Exports.LearnDirectPcmBufferBytes(
+            currentBytes: learned,
+            previousAddress: 0x10400,
+            nextAddress: 0x18000);
+
+        Assert.Equal(1024, learned);
+        Assert.Equal(1024, preserved);
+    }
+
+    [Theory]
+    [InlineData(0x10000UL, 0x10040UL)]
+    [InlineData(0x10000UL, 0x500004UL)]
+    [InlineData(0x10001UL, 0x10402UL)]
+    public void DirectPcmSizeRejectsImplausibleFirstStride(ulong first, ulong second)
+    {
+        Assert.Equal(0, Ngs2Exports.LearnDirectPcmBufferBytes(0, first, second));
+    }
+
+    [Fact]
+    public void StreamingSnapshotMustRemainStableBeforeDecode()
+    {
+        Assert.True(Ngs2Exports.StreamingSnapshotsMatch([1, 2, 3], [1, 2, 3]));
+        Assert.False(Ngs2Exports.StreamingSnapshotsMatch([1, 2, 3], [1, 9, 3]));
+    }
+
+    [Fact]
+    public void OutputLimiterAttacksImmediatelyBeforeClipping()
+    {
+        var gain = Ngs2Exports.GetNextLimiterGain(currentGain: 1f, peak: 2f);
+
+        Assert.InRange(gain, 0.489f, 0.491f);
+        Assert.True(2f * gain <= 0.98f);
+    }
+
+    [Fact]
+    public void OutputLimiterReleasesGraduallyAfterPeakPasses()
+    {
+        var gain = Ngs2Exports.GetNextLimiterGain(currentGain: 0.5f, peak: 0.4f);
+
+        Assert.InRange(gain, 0.504f, 0.506f);
+    }
 }
