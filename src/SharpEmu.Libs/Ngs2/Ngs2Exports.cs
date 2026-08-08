@@ -1163,10 +1163,12 @@ public static class Ngs2Exports
 
                 if (ShouldTrace() && Interlocked.Increment(ref _renderInfoDumps) <= 4)
                 {
-                    Span<byte> rbi = stackalloc byte[RenderBufferInfoSize];
-                    ctx.Memory.TryRead(entryAddress, rbi);
-                    Console.Error.WriteLine(
-                        $"[LOADER][TRACE] ngs2.renderbufinfo addr=0x{bufferAddress:X} size={bufferSize} ch={channels} raw={Convert.ToHexString(rbi)}");
+                    TraceRenderBufferInfo(
+                        ctx,
+                        entryAddress,
+                        bufferAddress,
+                        bufferSize,
+                        channels);
                 }
             }
         }
@@ -1179,6 +1181,21 @@ public static class Ngs2Exports
         }
 
         return SetReturn(ctx, 0);
+    }
+
+    private static void TraceRenderBufferInfo(
+        CpuContext ctx,
+        ulong entryAddress,
+        ulong bufferAddress,
+        ulong bufferSize,
+        int channels)
+    {
+        Span<byte> renderBufferInfo = stackalloc byte[RenderBufferInfoSize];
+        renderBufferInfo.Clear();
+        _ = ctx.Memory.TryRead(entryAddress, renderBufferInfo);
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] ngs2.renderbufinfo addr=0x{bufferAddress:X} " +
+            $"size={bufferSize} ch={channels} raw={Convert.ToHexString(renderBufferInfo)}");
     }
 
     // Sum every armed voice belonging to this system into the leading grain of
