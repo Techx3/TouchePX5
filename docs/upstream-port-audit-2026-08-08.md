@@ -102,6 +102,25 @@ wholesale. Any substantial code reuse must preserve its MIT copyright/license
 notice; this batch only reuses Touche code and independently implements a
 three-dword packet confirmed by the NID catalog.
 
+## Local branch audit
+
+The remaining local-only commits were inspected individually after the firmware
+changes were consolidated. None should be merged into this branch now:
+
+- `castlevania-flip-fix` (`2e85f97`, `785f12a`): its four boot exports already
+  exist under maintained implementations. Its older direct flip-memory capture
+  predates Touche's ordered flip snapshots, surface lineage and tracked
+  `cpu-write-drain` uploads; importing it would duplicate ownership and bypass
+  the current synchronization model.
+- `my-changes` (`545e6f6`): an 8,000-line monolithic WIP snapshot. Its useful
+  Touche branding, exception, guest-write and runtime foundations have since
+  been superseded by the current firmware architecture. It is not safe or
+  meaningful to cherry-pick as one patch.
+- `perf/demons-souls-ccd-affinity` (seven commits): intentionally remains an
+  isolated hardware-affinity experiment. It includes an explicitly negative SMT
+  sibling result and is being developed separately, so no part is imported into
+  firmware without its own benchmark and regression gate.
+
 ## Validation gate
 
 Before this batch is committed:
