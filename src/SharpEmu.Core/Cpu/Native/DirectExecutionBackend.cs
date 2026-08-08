@@ -37,6 +37,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const int DefaultImportLoopGuardSeconds = 5;
 
+	private const int DefaultGuestThreadImportQuantum = 4096;
+
 	private readonly struct ImportStubEntry
 	{
 		public ulong Address { get; }
@@ -376,6 +378,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private int _importLoopGuardSeconds;
 
+	private int _guestThreadImportQuantum;
+
 	private readonly HashSet<ulong> _patchedResolverReturnSites = new HashSet<ulong>();
 
 	private readonly HashSet<ulong> _patchedTlsImmediateThunkTargets = new HashSet<ulong>();
@@ -476,6 +480,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		public long BlockDeadlineTimestamp { get; set; }
 
 		public long ImportCount;
+
+		public long ImportSliceStart;
+
+		public long TimesliceCount;
 
 		public string? LastImportNid;
 
@@ -1188,6 +1196,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			"1",
 			StringComparison.Ordinal);
 		_importLoopGuardSeconds = GetImportLoopGuardSeconds();
+		_guestThreadImportQuantum = ReadGuestThreadImportQuantum();
 		_entryReturnSentinelRip = 0uL;
 		_forcedGuestExit = false;
 		HostSessionControl.SetShutdownHandler(RequestHostShutdown);
@@ -5525,6 +5534,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		try
 		{
 			LastError = null;
+			Volatile.Write(
+				ref thread.ImportSliceStart,
+				Interlocked.Read(ref thread.ImportCount));
 			GuestCpuContinuation continuation = default;
 			IGuestThreadBlockWaiter? blockWaiter = null;
 			var resumeContinuation = false;
@@ -5576,6 +5588,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						thread.State = GuestThreadRunState.Blocked;
 						thread.BlockReason = blockReason;
 						if (thread.HasBlockedContinuation &&
+							string.Equals(
+								blockReason,
+								GuestThreadExecution.CooperativeTimesliceReason,
+								StringComparison.Ordinal))
+						{
+							thread.State = GuestThreadRunState.Ready;
+							thread.BlockReason = null;
+							thread.BlockDeadlineTimestamp = 0;
+							_readyGuestThreads.Enqueue(thread);
+							Interlocked.Increment(ref _readyGuestThreadCount);
+						}
+						else if (thread.HasBlockedContinuation &&
 							thread.BlockWaiter is not null &&
 							thread.BlockWaiter.TryWake())
 						{
