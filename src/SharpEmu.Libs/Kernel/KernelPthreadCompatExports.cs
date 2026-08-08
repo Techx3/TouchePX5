@@ -1240,17 +1240,23 @@ public static class KernelPthreadCompatExports
             return 0;
         }
 
-        if (_mutexStates.ContainsKey(mutexAddress))
+        var hasPointedHandle =
+            KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle) &&
+            pointedHandle != 0 &&
+            pointedHandle != mutexAddress;
+
+        if (_mutexStates.TryGetValue(mutexAddress, out var cachedState))
         {
-            return mutexAddress;
+            return hasPointedHandle &&
+                   _mutexStates.TryGetValue(pointedHandle, out var pointedState) &&
+                   !ReferenceEquals(pointedState, cachedState)
+                ? pointedHandle
+                : mutexAddress;
         }
 
-        if (KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle) && pointedHandle != 0)
+        if (hasPointedHandle && _mutexStates.ContainsKey(pointedHandle))
         {
-            if (_mutexStates.ContainsKey(pointedHandle))
-            {
-                return pointedHandle;
-            }
+            return pointedHandle;
         }
 
         return mutexAddress;
@@ -1265,13 +1271,32 @@ public static class KernelPthreadCompatExports
             return false;
         }
 
+        var hasPointedHandle =
+            KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle);
+
         if (_mutexStates.TryGetValue(mutexAddress, out state))
         {
+            // A guest ScePthreadMutex variable is reusable storage. If the slot
+            // now names another registered handle, its current value outranks a
+            // state cached under the slot address. Keeping the stale alias would
+            // unlock the old mutex and leave the real mutex owned forever.
+            if (hasPointedHandle &&
+                pointedHandle != 0 &&
+                pointedHandle != mutexAddress &&
+                _mutexStates.TryGetValue(pointedHandle, out var pointedState) &&
+                !ReferenceEquals(pointedState, state))
+            {
+                _mutexStates[mutexAddress] = pointedState;
+                resolvedAddress = pointedHandle;
+                state = pointedState;
+                return true;
+            }
+
             resolvedAddress = mutexAddress;
             return true;
         }
 
-        if (!KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle))
+        if (!hasPointedHandle)
         {
             return false;
         }
