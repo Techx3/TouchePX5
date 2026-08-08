@@ -28,6 +28,7 @@ public static class Ngs2Exports
     private static long _unsupportedWaveformCount;
     private static long _unresolvedWaveformDumpCount;
     private static long _voiceEventTraceCount;
+    private static long _voiceReuseTraceCount;
     private static readonly Dictionary<(ulong VoiceHandle, uint ParamId), ulong> VoiceParamTraceFingerprints = new();
     private static int _unreadableVoiceParamTraceCount;
 
@@ -81,6 +82,7 @@ public static class Ngs2Exports
         public bool HasTransportCommand { get; set; }
         public bool CompactLifecycleArmed { get; set; }
         public bool CompactLifecycleStopped { get; set; }
+        public bool ReusableObserved { get; set; }
         public uint WaveformType { get; set; }
         public int WaveformChannels { get; set; } = 1;
         public ulong WaveformBlocksAddress { get; set; }
@@ -340,6 +342,11 @@ public static class Ngs2Exports
                 return;
             }
 
+            if (ShouldPrepareVoiceForReuse(voiceHandle, id))
+            {
+                PrepareVoiceForReuse(voiceHandle);
+            }
+
             switch (id)
             {
                 case 0x00000005:
@@ -379,6 +386,67 @@ public static class Ngs2Exports
             }
 
             offset += unchecked((ulong)next);
+        }
+    }
+
+    private static bool ShouldPrepareVoiceForReuse(ulong voiceHandle, uint paramId)
+    {
+        lock (StateGate)
+        {
+            return Voices.TryGetValue(voiceHandle, out var voice) &&
+                ShouldPrepareVoiceForReuse(voice.ReusableObserved, paramId);
+        }
+    }
+
+    internal static bool ShouldPrepareVoiceForReuse(bool reusableObserved, uint paramId) =>
+        reusableObserved && paramId is
+            0x00000005 or // Patch/route
+            0x10000000 or // Waveform format
+            0x10000001;   // Waveform blocks
+
+    private static void PrepareVoiceForReuse(ulong voiceHandle)
+    {
+        lock (StateGate)
+        {
+            if (!Voices.TryGetValue(voiceHandle, out var voice) || !voice.ReusableObserved)
+            {
+                return;
+            }
+
+            // The guest has observed this slot as idle and is configuring it
+            // again. Retire all transport state from the previous sound while
+            // preserving its stable rack route and learned PCM stride. Without
+            // this reset, an old Stop/EOF latch keeps the reused gameplay voice
+            // armed but permanently non-playing.
+            voice.Pcm = null;
+            voice.PcmRight = null;
+            voice.SourceAddr = 0;
+            voice.Position = 0;
+            voice.Playing = false;
+            voice.Paused = false;
+            voice.Stopped = false;
+            voice.ExplicitlyStopped = false;
+            voice.HasTransportCommand = false;
+            voice.CompactLifecycleArmed = false;
+            voice.CompactLifecycleStopped = false;
+            voice.ReusableObserved = false;
+            voice.WaveformBlocksAddress = 0;
+            voice.PreviousWaveformBlocksAddress = 0;
+            voice.StreamingFingerprint = 0;
+            voice.StreamingPending = false;
+            voice.LastOutputLeft = 0;
+            voice.LastOutputRight = 0;
+            voice.TransitionFramesRemaining = 0;
+            voice.LoopStart = -1;
+            voice.LoopEnd = 0;
+
+            var traceCount = Interlocked.Increment(ref _voiceReuseTraceCount);
+            if (traceCount <= 16 || (traceCount & (traceCount - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] ngs2.voice_reused count={traceCount} " +
+                    $"voice=0x{voiceHandle:X16}");
+            }
         }
     }
 
@@ -1571,6 +1639,14 @@ public static class Ngs2Exports
                 return SetReturn(ctx, OrbisNgs2ErrorInvalidVoiceHandle);
             }
             stateFlags = GetVoiceStateFlags(voice);
+            if (ShouldMarkVoiceReusable(
+                    stateFlags,
+                    voice.Stopped,
+                    voice.ExplicitlyStopped,
+                    voice.CompactLifecycleStopped))
+            {
+                voice.ReusableObserved = true;
+            }
         }
 
         if (stateAddress != 0 && stateSize > 0)
@@ -1605,6 +1681,14 @@ public static class Ngs2Exports
                 return SetReturn(ctx, OrbisNgs2ErrorInvalidVoiceHandle);
             }
             stateFlags = GetVoiceStateFlags(voice);
+            if (ShouldMarkVoiceReusable(
+                    stateFlags,
+                    voice.Stopped,
+                    voice.ExplicitlyStopped,
+                    voice.CompactLifecycleStopped))
+            {
+                voice.ReusableObserved = true;
+            }
         }
 
         // The ABI uses a uint32_t output. Writing eight bytes here overwrote
@@ -1619,6 +1703,13 @@ public static class Ngs2Exports
 
     private static uint GetVoiceStateFlags(VoiceState voice) =>
         GetVoiceStateFlags(voice.Playing, voice.Paused, voice.Stopped);
+
+    internal static bool ShouldMarkVoiceReusable(
+        uint stateFlags,
+        bool stopped,
+        bool explicitlyStopped,
+        bool compactLifecycleStopped) =>
+        stateFlags == 0 && (stopped || explicitlyStopped || compactLifecycleStopped);
 
     internal static uint GetVoiceStateFlags(bool playing, bool paused, bool stopped)
     {

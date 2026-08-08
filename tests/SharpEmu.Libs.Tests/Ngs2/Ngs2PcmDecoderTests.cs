@@ -22,6 +22,45 @@ public sealed class Ngs2PcmDecoderTests
         Assert.Equal(expected, Ngs2Exports.GetVoiceStateFlags(playing, paused, stopped));
     }
 
+    [Theory]
+    [InlineData(true, 0x00000005u, true)]
+    [InlineData(true, 0x10000000u, true)]
+    [InlineData(true, 0x10000001u, true)]
+    [InlineData(true, 0x00000002u, false)]
+    [InlineData(true, 0x00000006u, false)]
+    [InlineData(false, 0x10000001u, false)]
+    public void ReusedVoiceResetsOnlyForFreshAudioConfiguration(
+        bool reusableObserved,
+        uint paramId,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            Ngs2Exports.ShouldPrepareVoiceForReuse(reusableObserved, paramId));
+    }
+
+    [Theory]
+    [InlineData(0u, true, false, false, true)]
+    [InlineData(0u, false, true, false, true)]
+    [InlineData(0u, false, false, true, true)]
+    [InlineData(0u, false, false, false, false)]
+    [InlineData(3u, true, true, true, false)]
+    public void OnlyCompletedOrKilledIdleVoicesBecomeReusable(
+        uint stateFlags,
+        bool stopped,
+        bool explicitlyStopped,
+        bool compactLifecycleStopped,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            Ngs2Exports.ShouldMarkVoiceReusable(
+                stateFlags,
+                stopped,
+                explicitlyStopped,
+                compactLifecycleStopped));
+    }
+
     [Fact]
     public void CompactLifecycleRetiresOnlyLoopingVagVoices()
     {
