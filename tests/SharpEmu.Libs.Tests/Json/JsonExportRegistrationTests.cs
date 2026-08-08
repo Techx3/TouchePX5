@@ -22,6 +22,7 @@ public sealed class JsonExportRegistrationTests
         ("BSmWDIkV4w4", "_ZN3sce4Json5Value3setEd"),
         ("IKQimvG9Wqs", "_ZN3sce4Json5Value3setENS0_9ValueTypeE"),
         ("6l3Bv2gysNc", "_ZN3sce4Json5Value3setERKNS0_6StringE"),
+        ("wLsJlmgEIaI", "_ZN3sce4Json5Value10referValueERKNS0_6StringE"),
         ("9KUZFjI1IxA", "_ZN3sce4Json6StringC1EPKc"),
         ("cG1VE2HMl6c", "_ZN3sce4Json6StringD1Ev"),
         ("+drDFyAS6u4", "_ZN3sce4Json11Initializer27setGlobalNullAccessCallbackEPFRKNS0_5ValueENS0_9ValueTypeEPS3_PvES7_"),
@@ -76,5 +77,45 @@ public sealed class JsonExportRegistrationTests
         Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, result);
         Assert.Equal(0x1_0000_0000UL, ctx[CpuRegister.Rax]);
         Assert.Equal(JsonValueKind.Null, JsonObjectHeap.Values[0x1_0000_0000].Kind);
+    }
+
+    [Fact]
+    public void ReferValue_UsesStringConstructedByCompleteObjectExport()
+    {
+        JsonObjectHeap.ResetForTests();
+        const ulong baseAddress = 0x1_0000_0000;
+        const ulong valueAddress = baseAddress + 0x100;
+        const ulong keyStringAddress = baseAddress + 0x200;
+        const ulong keyTextAddress = baseAddress + 0x300;
+        const ulong jsonAddress = baseAddress + 0x400;
+        var memory = new FakeCpuMemory(baseAddress, 0x4000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var json = System.Text.Encoding.UTF8.GetBytes("{\"answer\":42}");
+        Assert.True(memory.TryWrite(jsonAddress, json));
+
+        ctx[CpuRegister.Rdi] = valueAddress;
+        ctx[CpuRegister.Rsi] = jsonAddress;
+        ctx[CpuRegister.Rdx] = (ulong)json.Length;
+        Assert.Equal(0, JsonExports.ParserParseBuffer(ctx));
+
+        memory.WriteCString(keyTextAddress, "answer");
+        ctx[CpuRegister.Rdi] = keyStringAddress;
+        ctx[CpuRegister.Rsi] = keyTextAddress;
+        Assert.Equal(0, JsonValueExports.StringCStringConstructor(ctx));
+
+        ctx[CpuRegister.Rdi] = valueAddress;
+        ctx[CpuRegister.Rsi] = keyStringAddress;
+        Assert.Equal(0, JsonExports.ValueReferValue(ctx));
+        var childAddress = ctx[CpuRegister.Rax];
+        Assert.NotEqual(0UL, childAddress);
+
+        ctx[CpuRegister.Rdi] = childAddress;
+        Assert.Equal(0, JsonExports.ValueGetType(ctx));
+        Assert.Equal(2UL, ctx[CpuRegister.Rax]);
+
+        ctx[CpuRegister.Rdi] = childAddress;
+        Assert.Equal(0, JsonExports.ValueGetInteger(ctx));
+        Assert.True(ctx.TryReadUInt64(ctx[CpuRegister.Rax], out var value));
+        Assert.Equal(42UL, value);
     }
 }

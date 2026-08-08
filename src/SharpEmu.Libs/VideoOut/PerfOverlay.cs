@@ -32,7 +32,7 @@ public static class PerfOverlay
         "0",
         StringComparison.Ordinal);
 
-    private static long _lastPresentTimestamp;
+    private static long _lastSubmitTimestamp;
     private static long _sessionStartTimestamp;
     private static readonly double[] _frameMilliseconds = new double[FrameHistorySize];
     private static int _frameHistoryIndex;
@@ -44,7 +44,7 @@ public static class PerfOverlay
     // Refreshed once per second so per-frame fills never allocate.
     private static long _statsWindowStart = Stopwatch.GetTimestamp();
     private static double _fps;
-    private static double _submittedFps;
+    private static double _presentFps;
     private static double _drawsPerSecond;
     private static double _averageFrameMs;
     private static double _allocatedMbPerSecond;
@@ -77,24 +77,29 @@ public static class PerfOverlay
 
     public static void Toggle() => _enabled = !_enabled;
 
-    /// <summary>Called by the presenter after each successful present.</summary>
+    /// <summary>Called by the presenter after each successful host present.</summary>
     public static void RecordPresent()
     {
         var now = Stopwatch.GetTimestamp();
         Interlocked.CompareExchange(ref _sessionStartTimestamp, now, 0);
-        var last = _lastPresentTimestamp;
-        _lastPresentTimestamp = now;
         Interlocked.Increment(ref _presentedInWindow);
-        if (last != 0)
-        {
-            var milliseconds = (now - last) * 1000.0 / Stopwatch.Frequency;
-            _frameMilliseconds[_frameHistoryIndex] = milliseconds;
-            _frameHistoryIndex = (_frameHistoryIndex + 1) % FrameHistorySize;
-        }
     }
 
     /// <summary>Called on every guest flip submission.</summary>
-    public static void RecordSubmit() => Interlocked.Increment(ref _submittedInWindow);
+    public static void RecordSubmit()
+    {
+        var now = Stopwatch.GetTimestamp();
+        Interlocked.CompareExchange(ref _sessionStartTimestamp, now, 0);
+        Interlocked.Increment(ref _submittedInWindow);
+        var last = Interlocked.Exchange(ref _lastSubmitTimestamp, now);
+        if (last != 0)
+        {
+            var milliseconds = (now - last) * 1000.0 / Stopwatch.Frequency;
+            var index = _frameHistoryIndex;
+            _frameMilliseconds[index] = milliseconds;
+            Volatile.Write(ref _frameHistoryIndex, (index + 1) % FrameHistorySize);
+        }
+    }
 
     /// <summary>Called per translated draw/dispatch executed.</summary>
     public static void RecordDraw() => Interlocked.Increment(ref _drawsInWindow);
@@ -143,26 +148,40 @@ public static class PerfOverlay
         {
             var seconds = (double)elapsedTicks / Stopwatch.Frequency;
             _statsWindowStart = now;
-            _fps = Interlocked.Exchange(ref _presentedInWindow, 0) / seconds;
-            _submittedFps = Interlocked.Exchange(ref _submittedInWindow, 0) / seconds;
+            _fps = Interlocked.Exchange(ref _submittedInWindow, 0) / seconds;
+            _presentFps = Interlocked.Exchange(ref _presentedInWindow, 0) / seconds;
             _drawsPerSecond = Interlocked.Exchange(ref _drawsInWindow, 0) / seconds;
-
-            double totalMs = 0;
-            var samples = 0;
-            foreach (var ms in _frameMilliseconds)
-            {
-                if (ms > 0)
-                {
-                    totalMs += ms;
-                    samples++;
-                }
-            }
-
-            _averageFrameMs = samples > 0 ? totalMs / samples : 0;
 
             var allocated = GC.GetTotalAllocatedBytes(precise: false);
             _allocatedMbPerSecond = (allocated - _lastAllocatedBytes) / seconds / (1024.0 * 1024.0);
             _lastAllocatedBytes = allocated;
+
+            var lastSubmit = Interlocked.Read(ref _lastSubmitTimestamp);
+            string cadenceLabel;
+            if (_fps > 0)
+            {
+                var lastIndex = (Volatile.Read(ref _frameHistoryIndex) - 1 + FrameHistorySize) % FrameHistorySize;
+                var lastInterval = _frameMilliseconds[lastIndex];
+                _averageFrameMs = lastInterval > 0 ? lastInterval : 1000.0 / _fps;
+                cadenceLabel = $"{_averageFrameMs:0.0} MS";
+            }
+            else if (lastSubmit != 0)
+            {
+                _averageFrameMs = (now - lastSubmit) * 1000.0 / Stopwatch.Frequency;
+                cadenceLabel = _allocatedMbPerSecond > 50.0
+                    ? $"LOAD {_averageFrameMs / 1000.0:0.0}S"
+                    : $"STALL {_averageFrameMs / 1000.0:0.0}S";
+            }
+            else if (_presentFps > 0)
+            {
+                _averageFrameMs = 1000.0 / _presentFps;
+                cadenceLabel = $"{_averageFrameMs:0.0} MS";
+            }
+            else
+            {
+                _averageFrameMs = 0;
+                cadenceLabel = "0.0 MS";
+            }
 
             var gen0 = GC.CollectionCount(0);
             var gen1 = GC.CollectionCount(1);
@@ -189,7 +208,7 @@ public static class PerfOverlay
             var elapsedHours = elapsedSeconds / 3600;
             var elapsedMinutes = elapsedSeconds / 60 % 60;
             var elapsedRemainingSeconds = elapsedSeconds % 60;
-            _line1 = $"FPS {_fps:0.0}  FLIP {_submittedFps:0.0}  {_averageFrameMs:0.0} MS";
+            _line1 = $"FPS {_fps:0.0}  PRES {_presentFps:0.0}  {cadenceLabel}";
             _line2 = $"DRAWS {_drawsPerSecond:0}/S  {drawsPerFrame:0}/F  Q {pendingWork}+{inFlightSubmissions}";
             _line3 = $"ALLOC {_allocatedMbPerSecond:0.0} MB/S  GC {_gen0PerWindow}/{_gen1PerWindow}/{_gen2PerWindow}";
             var heapMb = GC.GetTotalMemory(false) / (1024 * 1024);

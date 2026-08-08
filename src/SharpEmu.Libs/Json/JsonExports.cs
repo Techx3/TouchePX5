@@ -324,6 +324,34 @@ public static class JsonExports
     }
 
     [SysAbiExport(
+        Nid = "wLsJlmgEIaI",
+        ExportName = "_ZN3sce4Json5Value10referValueERKNS0_6StringE",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceJson")]
+    public static int ValueReferValue(CpuContext ctx)
+    {
+        var valueAddress = ctx[CpuRegister.Rdi];
+        var keyStringAddress = ctx[CpuRegister.Rsi];
+        if (valueAddress == 0 ||
+            !TryGetStringValue(keyStringAddress, out var key) ||
+            !TryAllocateGuestObject(ctx, ValueObjectSize, out var childAddress))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return 0;
+        }
+
+        var parent = GetValue(valueAddress);
+        var child = parent.ValueKind == System.Text.Json.JsonValueKind.Object &&
+            parent.TryGetProperty(key, out var property)
+                ? property.Clone()
+                : _nullElement;
+        StoreValue(ctx, childAddress, child);
+        ctx[CpuRegister.Rax] = childAddress;
+        TraceJsonText("Value.referValue", valueAddress, key);
+        return 0;
+    }
+
+    [SysAbiExport(
         Nid = "zTwZdI8AZ5Y",
         ExportName = "_ZNK3sce4Json5Value10getBooleanEv",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -589,6 +617,24 @@ public static class JsonExports
         address != 0 && _values.TryGetValue(address, out var state)
             ? state.Element
             : _nullElement;
+
+    private static bool TryGetStringValue(ulong address, out string value)
+    {
+        if (_strings.TryGetValue(address, out var state))
+        {
+            value = state.Value;
+            return true;
+        }
+
+        if (JsonObjectHeap.Strings.TryGetValue(address, out var heapValue))
+        {
+            value = heapValue;
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
 
     private static void StoreValue(CpuContext ctx, ulong address, JsonElement element)
     {

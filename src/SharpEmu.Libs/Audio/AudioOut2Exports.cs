@@ -51,6 +51,7 @@ public static class AudioOut2Exports
     private static int _nextPortId;
     private static long _pushTraceCount;
     private static long _submitTraceCount;
+    private static long _submitSkipTraceCount;
     private static long _attributePcmTraceCount;
     private static long _pcmUpdateSequence;
 
@@ -886,6 +887,7 @@ public static class AudioOut2Exports
 
                 if (mixedPorts == 0)
                 {
+                    TraceSubmitSkipped(context, frames, "no-ports");
                     return false;
                 }
 
@@ -925,6 +927,7 @@ public static class AudioOut2Exports
                 var backend = ResolveContextBackend(context, out var backendName);
                 if (backend is null)
                 {
+                    TraceSubmitSkipped(context, frames, "no-backend");
                     return false;
                 }
 
@@ -1269,6 +1272,17 @@ public static class AudioOut2Exports
         if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AUDIO_OUT2"), "1", StringComparison.Ordinal))
         {
             Console.Error.WriteLine($"[LOADER][TRACE] audio_out2.{message}");
+        }
+    }
+
+    private static void TraceSubmitSkipped(ContextState context, int frames, string reason)
+    {
+        var count = Interlocked.Increment(ref _submitSkipTraceCount);
+        if (count <= 8 || count % 500 == 0)
+        {
+            TraceAudioOut2(
+                $"context-submit-skip#{count} handle=0x{context.Handle:X} " +
+                $"frames={frames} reason={reason}");
         }
     }
 }
