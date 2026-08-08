@@ -8,6 +8,25 @@ namespace SharpEmu.Libs.Tests.Cpu;
 
 public sealed class NativeWorkerAdaptiveBurstTests
 {
+	[Theory]
+	[InlineData("MAudioOutput")]
+	[InlineData("maudiooutput")]
+	[InlineData("audio_output_thread")]
+	public void RecognizesLatencySensitiveAudioWorkers(string threadName)
+	{
+		Assert.True(DirectExecutionBackend.IsLatencySensitiveNativeWorker(threadName));
+	}
+
+	[Theory]
+	[InlineData(null)]
+	[InlineData("")]
+	[InlineData("Main Thread")]
+	[InlineData("BgTaskManager")]
+	public void DoesNotEscalateOrdinaryWorkers(string? threadName)
+	{
+		Assert.False(DirectExecutionBackend.IsLatencySensitiveNativeWorker(threadName));
+	}
+
     private const long Frequency = 10_000_000;
 
     [Theory]
