@@ -34,11 +34,6 @@ public sealed record InputSessionSettings
     public string ProfileId { get; init; } = "dual-sense-default";
 }
 
-public sealed record FirmwareSessionSettings
-{
-    public required string ProfileId { get; init; }
-}
-
 public sealed record DiagnosticSessionSettings
 {
     public string LogLevel { get; init; } = "info";

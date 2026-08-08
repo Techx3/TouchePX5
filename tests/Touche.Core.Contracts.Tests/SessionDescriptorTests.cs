@@ -34,7 +34,6 @@ public sealed class SessionDescriptorTests
                 FpsLimit = 60,
                 SurfaceMode = SessionSurfaceMode.SeparateWindow,
             },
-            Firmware = new FirmwareSessionSettings { ProfileId = "ps5-fw-local" },
         };
 
         var json = JsonSerializer.Serialize(descriptor);

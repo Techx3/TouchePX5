@@ -29,7 +29,6 @@ public enum EmulatorExitReason
     RuntimeCrash,
     HostTerminated,
     ValidationFailure,
-    IncompatibleFirmware,
     Unknown,
 }
 

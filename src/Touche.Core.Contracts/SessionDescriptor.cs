@@ -25,7 +25,5 @@ public sealed record SessionDescriptor
 
     public InputSessionSettings Input { get; init; } = new();
 
-    public FirmwareSessionSettings? Firmware { get; init; }
-
     public DiagnosticSessionSettings Diagnostics { get; init; } = new();
 }

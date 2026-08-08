@@ -54,7 +54,6 @@ internal sealed class TouchePs5Adapter : IEmulatorAdapter
             SupportsSeparateWindow = true,
             SupportsHeadless = false,
             SupportsInternalResolution = false,
-            SupportsFirmware = true,
             SupportsPerGameSettings = true,
             SupportedFormats = ["eboot.bin", ".elf", ".self"],
         });

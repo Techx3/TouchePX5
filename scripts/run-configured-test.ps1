@@ -49,7 +49,7 @@ function Set-ToucheEnvironmentVariable {
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($LauncherDirectory)) {
-    $LauncherDirectory = Join-Path $repositoryRoot 'artifacts\publish\firmware-support\win-x64'
+    $LauncherDirectory = Join-Path $repositoryRoot 'artifacts\publish\main\win-x64'
 }
 
 $LauncherDirectory = [System.IO.Path]::GetFullPath($LauncherDirectory)
@@ -144,19 +144,6 @@ if ($traceLimit -gt 0) {
     $arguments.Add("--trace-imports=$traceLimit")
 }
 
-$firmwareStore = Join-Path $LauncherDirectory 'user\firmware-profiles'
-$profileId = [string] $settings.ActiveFirmwareProfileId
-if ($settings.EnableExperimentalFirmwareLle -eq $true -and -not [string]::IsNullOrWhiteSpace($profileId)) {
-    $profileManifest = Join-Path $firmwareStore "profiles\$profileId\manifest.json"
-    if (-not (Test-Path -LiteralPath $profileManifest -PathType Leaf)) {
-        throw "The configured firmware profile is missing: $profileId"
-    }
-
-    $arguments.Add('--firmware-lle')
-    $arguments.Add("--firmware-store=$firmwareStore")
-    $arguments.Add("--firmware-profile=$profileId")
-}
-
 foreach ($argument in $AdditionalArgument) {
     if (-not [string]::IsNullOrWhiteSpace($argument)) {
         $arguments.Add($argument)
@@ -166,8 +153,6 @@ $arguments.Add([System.IO.Path]::GetFullPath($GamePath))
 
 Write-Output "Emulator: $emulatorPath"
 Write-Output "Settings: $settingsPath"
-Write-Output "Firmware LLE: $($settings.EnableExperimentalFirmwareLle -eq $true)"
-Write-Output "Firmware profile: $profileId"
 Write-Output "GPU: $($settings.VulkanDevice)"
 Write-Output "Log: $LogFile"
 Write-Output ('Arguments: ' + ($arguments -join ' '))

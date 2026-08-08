@@ -17,8 +17,6 @@ public sealed record CoreCapabilities
 
     public bool SupportsInternalResolution { get; init; }
 
-    public bool SupportsFirmware { get; init; }
-
     public bool SupportsPerGameSettings { get; init; }
 
     public IReadOnlyList<string> SupportedFormats { get; init; } = [];

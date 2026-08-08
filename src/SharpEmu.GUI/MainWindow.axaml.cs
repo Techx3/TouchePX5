@@ -2113,8 +2113,6 @@ public partial class MainWindow : Window
 
     private SessionDescriptor BuildSessionDescriptor(PendingLaunch launch)
     {
-        var activeFirmware = _firmwareManager.GetInstalled().FirstOrDefault(firmware =>
-            string.Equals(firmware.Sha256, _settings.ActiveFirmwareSha256, StringComparison.OrdinalIgnoreCase));
         return new SessionDescriptor
         {
             SessionId = Guid.NewGuid(),
@@ -2130,9 +2128,6 @@ public partial class MainWindow : Window
                 AdapterId = _settings.VulkanDevice,
                 SurfaceMode = SessionSurfaceMode.Embedded,
             },
-            Firmware = activeFirmware is null
-                ? null
-                : new FirmwareSessionSettings { ProfileId = activeFirmware.Sha256 },
             Diagnostics = new DiagnosticSessionSettings { LogLevel = launch.LogLevel },
         };
     }
