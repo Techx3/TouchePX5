@@ -37,6 +37,8 @@ public static class Ngs2Exports
     private const int DefaultGrainSamples = 256;
     private const double OutputSampleRate = 48000.0;
     private const int StreamingTransitionFrames = 96;
+    private const float LimiterCeiling = 0.98f;
+    private const float LimiterReleasePerGrain = 0.005f;
     private const long MaxVoiceParamTraceDumps = 4096;
 
     private sealed class SystemState
@@ -46,6 +48,8 @@ public static class Ngs2Exports
         public uint Uid { get; }
         public int GrainSamples { get; set; } = DefaultGrainSamples;
         public long ConsecutiveSilentRenders { get; set; }
+        public float LimiterGain { get; set; } = 1f;
+        public long LimitedGrainCount { get; set; }
     }
 
     private sealed record RackState(ulong SystemHandle, uint RackId);
@@ -635,14 +639,10 @@ public static class Ngs2Exports
                         voice.WaveformBlocksAddress != blocksAddress)
                     {
                         voice.PreviousWaveformBlocksAddress = voice.WaveformBlocksAddress;
-                        var distance = voice.WaveformBlocksAddress > blocksAddress
-                            ? voice.WaveformBlocksAddress - blocksAddress
-                            : blocksAddress - voice.WaveformBlocksAddress;
-                        if (distance is >= 256 and <= 4 * 1024 * 1024 &&
-                            (distance & 3) == 0)
-                        {
-                            voice.DirectPcmBufferBytes = (int)distance;
-                        }
+                        voice.DirectPcmBufferBytes = LearnDirectPcmBufferBytes(
+                            voice.DirectPcmBufferBytes,
+                            voice.WaveformBlocksAddress,
+                            blocksAddress);
                     }
 
                     voice.WaveformBlocksAddress = blocksAddress;
@@ -801,6 +801,26 @@ public static class Ngs2Exports
                 return;
             }
 
+            // The guest can rotate or refill this block concurrently with the
+            // audio render thread. Do not decode a torn snapshot: that produces
+            // intermittent full-scale noise during screen transitions. A changed
+            // block is accepted only after two consecutive reads agree; otherwise
+            // the next render retries it.
+            var verification = ArrayPool<byte>.Shared.Rent(byteCount);
+            try
+            {
+                var verifiedPayload = verification.AsSpan(0, byteCount);
+                if (!ctx.Memory.TryRead(dataAddress, verifiedPayload) ||
+                    !StreamingSnapshotsMatch(payload, verifiedPayload))
+                {
+                    return;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(verification);
+            }
+
             if (!Ngs2PcmDecoder.TryDecodeInterleaved(
                     payload, voice.WaveformChannels, requestedFrames, out var left, out var right))
             {
@@ -849,6 +869,31 @@ public static class Ngs2Exports
 
         return hash;
     }
+
+    internal static int LearnDirectPcmBufferBytes(
+        int currentBytes,
+        ulong previousAddress,
+        ulong nextAddress)
+    {
+        // Alternating direct-PCM buffers reveal their length through their
+        // allocation stride. Once learned, keep it: unrelated allocations on a
+        // screen transition can also be nearby and must not redefine the size.
+        if (currentBytes > 0 || previousAddress == 0 || previousAddress == nextAddress)
+        {
+            return currentBytes;
+        }
+
+        var distance = previousAddress > nextAddress
+            ? previousAddress - nextAddress
+            : nextAddress - previousAddress;
+        return distance is >= 256 and <= 4 * 1024 * 1024 && (distance & 3) == 0
+            ? (int)distance
+            : currentBytes;
+    }
+
+    internal static bool StreamingSnapshotsMatch(
+        ReadOnlySpan<byte> first,
+        ReadOnlySpan<byte> second) => first.SequenceEqual(second);
 
     private static void TraceUnresolvedWaveform(
         CpuContext ctx, ulong voiceHandle, ulong paramOffset)
@@ -1143,13 +1188,15 @@ public static class Ngs2Exports
         CpuContext ctx, ulong systemHandle, ulong bufferAddress, ulong bufferSize, int channels)
     {
         int grain;
+        SystemState system;
         lock (StateGate)
         {
-            if (!Systems.TryGetValue(systemHandle, out var system))
+            if (!Systems.TryGetValue(systemHandle, out var foundSystem))
             {
                 return;
             }
 
+            system = foundSystem;
             grain = system.GrainSamples;
         }
 
@@ -1199,6 +1246,7 @@ public static class Ngs2Exports
 
             if (mixedAnything)
             {
+                ApplyOutputLimiter(accum, floatCount, systemHandle, system);
                 WriteGrain(ctx, bufferAddress, accum, floatCount);
             }
 
@@ -1337,6 +1385,57 @@ public static class Ngs2Exports
 
         var clamped = Math.Min(framesRemaining, StreamingTransitionFrames);
         return (StreamingTransitionFrames - clamped + 1f) / StreamingTransitionFrames;
+    }
+
+    private static void ApplyOutputLimiter(
+        float[] samples,
+        int count,
+        ulong systemHandle,
+        SystemState system)
+    {
+        var peak = 0f;
+        for (var i = 0; i < count; i++)
+        {
+            peak = Math.Max(peak, Math.Abs(samples[i]));
+        }
+
+        system.LimiterGain = GetNextLimiterGain(system.LimiterGain, peak);
+        if (system.LimiterGain < 1f)
+        {
+            for (var i = 0; i < count; i++)
+            {
+                samples[i] *= system.LimiterGain;
+            }
+        }
+
+        if (peak <= LimiterCeiling)
+        {
+            return;
+        }
+
+        var limited = ++system.LimitedGrainCount;
+        if (limited <= 8 || (limited & (limited - 1)) == 0)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] ngs2.output_limited system=0x{systemHandle:X16} " +
+                $"count={limited} peak={peak:F3} gain={system.LimiterGain:F3}");
+        }
+    }
+
+    internal static float GetNextLimiterGain(float currentGain, float peak)
+    {
+        currentGain = Math.Clamp(currentGain, 0f, 1f);
+        if (!float.IsFinite(peak) || peak <= 0f)
+        {
+            return Math.Min(1f, currentGain + LimiterReleasePerGrain);
+        }
+
+        var requiredGain = peak > LimiterCeiling
+            ? LimiterCeiling / peak
+            : 1f;
+        return requiredGain < currentGain
+            ? requiredGain
+            : Math.Min(requiredGain, currentGain + LimiterReleasePerGrain);
     }
 
     private static void WriteGrain(CpuContext ctx, ulong address, float[] accum, int count)
