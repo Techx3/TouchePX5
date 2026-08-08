@@ -1452,6 +1452,9 @@ public static partial class KernelMemoryCompatExports
     // Boot-time compatibility init the title calls before its main setup; a plain
     // success is all the guest expects. Missing this leaves the import unresolved.
     // (sceKernelCheckReachability is now provided upstream, so ours was dropped.)
+    // The true symbol is not public; keep the captured NID authoritative and the
+    // synthetic label local instead of polluting ps5_names.txt.
+#pragma warning disable SHEM006
     [SysAbiExport(
         Nid = "n3kSX62fgNo",
         ExportName = "sceCompatInitializeN3kSX62fgNo",
@@ -1462,6 +1465,7 @@ public static partial class KernelMemoryCompatExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+#pragma warning restore SHEM006
 
     [SysAbiExport(
         Nid = "6c3rCVE-fTU",
