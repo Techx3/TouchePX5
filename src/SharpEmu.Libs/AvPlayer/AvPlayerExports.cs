@@ -914,6 +914,12 @@ public static class AvPlayerExports
         {
             player.EndOfStream = true;
             player.PlaybackClock.Stop();
+
+            // AVPlayer owns the host output while its audio session is active.
+            // Reaching video EOF must release that ownership even when the guest
+            // keeps the player object open; otherwise every normal AudioOut port
+            // remains suppressed throughout gameplay after the movie finishes.
+            InvalidateAudioSession(player);
         }
         return SetReturn(ctx, 0);
     }
