@@ -29,6 +29,10 @@ public static class Ngs2Exports
     private static long _unresolvedWaveformDumpCount;
     private static long _voiceEventTraceCount;
     private static long _voiceReuseTraceCount;
+    private static long _waveformFormatTraceCount;
+    private static long _waveformBlockTraceCount;
+    private static long _streamingWaitTraceCount;
+    private static long _streamingArmTraceCount;
     private static readonly Dictionary<(ulong VoiceHandle, uint ParamId), ulong> VoiceParamTraceFingerprints = new();
     private static int _unreadableVoiceParamTraceCount;
 
@@ -89,6 +93,9 @@ public static class Ngs2Exports
         public int WaveformBlockCount { get; set; }
         public ulong PreviousWaveformBlocksAddress { get; set; }
         public int DirectPcmBufferBytes { get; set; }
+        public ulong StreamingDataAddress { get; set; }
+        public int StreamingByteCount { get; set; }
+        public int StreamingRequestedFrames { get; set; }
         public ulong StreamingFingerprint { get; set; }
         public bool StreamingPending { get; set; }
         public float LastOutputLeft { get; set; }
@@ -432,6 +439,9 @@ public static class Ngs2Exports
             voice.ReusableObserved = false;
             voice.WaveformBlocksAddress = 0;
             voice.PreviousWaveformBlocksAddress = 0;
+            voice.StreamingDataAddress = 0;
+            voice.StreamingByteCount = 0;
+            voice.StreamingRequestedFrames = 0;
             voice.StreamingFingerprint = 0;
             voice.StreamingPending = false;
             voice.LastOutputLeft = 0;
@@ -617,9 +627,18 @@ public static class Ngs2Exports
                 // A removed route must become silent immediately. Do not mark
                 // it as an explicit transport stop: reconnecting the same
                 // implicit voice is allowed to restart it.
+                var clearTransportLatch = ShouldClearTransportOnRouteRemoval(
+                    voice.HasTransportCommand,
+                    voice.Stopped,
+                    voice.Paused,
+                    voice.ExplicitlyStopped);
                 voice.Playing = false;
                 voice.Paused = false;
                 voice.Position = 0;
+                if (clearTransportLatch)
+                {
+                    voice.HasTransportCommand = false;
+                }
                 return;
             }
 
@@ -634,6 +653,13 @@ public static class Ngs2Exports
             }
         }
     }
+
+    internal static bool ShouldClearTransportOnRouteRemoval(
+        bool hasTransportCommand,
+        bool stopped,
+        bool paused,
+        bool explicitlyStopped) =>
+        hasTransportCommand && !stopped && !paused && !explicitlyStopped;
 
     private static void ApplyWaveformFormatParam(
         CpuContext ctx, ulong voiceHandle, ulong paramOffset)
@@ -668,6 +694,15 @@ public static class Ngs2Exports
                     voice.Stopped = false;
                 }
             }
+
+            var traceCount = Interlocked.Increment(ref _waveformFormatTraceCount);
+            if (traceCount <= 16 || (traceCount & (traceCount - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] ngs2.waveform_format count={traceCount} " +
+                    $"voice=0x{voiceHandle:X16} type=0x{waveformType:X} " +
+                    $"channels={channels} rate={sampleRate}");
+            }
         }
     }
 
@@ -682,11 +717,38 @@ public static class Ngs2Exports
         }
 
         var knownStreaming = false;
+        var streamingChannels = 0;
         lock (StateGate)
         {
-            knownStreaming = Voices.TryGetValue(voiceHandle, out var voice) &&
-                voice.WaveformType != 0 && voice.WaveformType != 0x80;
+            if (Voices.TryGetValue(voiceHandle, out var voice))
+            {
+                knownStreaming = voice.WaveformType != 0 && voice.WaveformType != 0x80;
+                streamingChannels = voice.WaveformChannels;
+            }
+
+            var traceCount = Interlocked.Increment(ref _waveformBlockTraceCount);
+            if (traceCount <= 16 || (traceCount & (traceCount - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] ngs2.waveform_block count={traceCount} " +
+                    $"voice=0x{voiceHandle:X16} type=0x{voice?.WaveformType ?? 0:X} " +
+                    $"blocks=0x{blocksAddress:X} block_count={blockCountRaw} " +
+                    $"known_streaming={knownStreaming}");
+            }
         }
+
+        var streamingDataAddress = 0UL;
+        var streamingByteCount = 0;
+        var streamingRequestedFrames = 0;
+        var resolvedStreamingBlock = knownStreaming &&
+            TryReadStreamingBlockParameter(
+                ctx,
+                paramOffset,
+                blocksAddress,
+                streamingChannels,
+                out streamingDataAddress,
+                out streamingByteCount,
+                out streamingRequestedFrames);
 
         // The format command can follow the first block command. Resolve VAG
         // whenever the type is still unknown so ordinary effects are not
@@ -717,6 +779,12 @@ public static class Ngs2Exports
                     voice.WaveformBlockCount = (int)Math.Clamp(blockCountRaw, 1u, 64u);
                     voice.StreamingPending = true;
                     voice.CompactLifecycleStopped = false;
+                    if (resolvedStreamingBlock)
+                    {
+                        voice.StreamingDataAddress = streamingDataAddress;
+                        voice.StreamingByteCount = streamingByteCount;
+                        voice.StreamingRequestedFrames = streamingRequestedFrames;
+                    }
                 }
             }
         }
@@ -737,6 +805,88 @@ public static class Ngs2Exports
         {
             TraceUnresolvedWaveform(ctx, voiceHandle, paramOffset);
         }
+    }
+
+    private static bool TryReadStreamingBlockParameter(
+        CpuContext ctx,
+        ulong paramOffset,
+        ulong waveformDataAddress,
+        int channels,
+        out ulong dataAddress,
+        out int byteCount,
+        out int requestedFrames)
+    {
+        dataAddress = 0;
+        byteCount = 0;
+        requestedFrames = 0;
+        if (!ctx.TryReadUInt16(paramOffset, out var paramSize) ||
+            paramSize < 32 ||
+            !ctx.TryReadUInt64(paramOffset + 24, out var descriptorAddress) ||
+            descriptorAddress <= 0x10000)
+        {
+            return false;
+        }
+
+        Span<byte> descriptor = stackalloc byte[40];
+        return ctx.Memory.TryRead(descriptorAddress, descriptor) &&
+            TryResolveStreamingBlockDescriptor(
+                waveformDataAddress,
+                channels,
+                descriptor,
+                out dataAddress,
+                out byteCount,
+                out requestedFrames);
+    }
+
+    internal static bool TryResolveStreamingBlockDescriptor(
+        ulong waveformDataAddress,
+        int channels,
+        ReadOnlySpan<byte> descriptor,
+        out ulong dataAddress,
+        out int byteCount,
+        out int requestedFrames)
+    {
+        dataAddress = 0;
+        byteCount = 0;
+        requestedFrames = 0;
+        if (waveformDataAddress <= 0x10000 ||
+            channels is < 1 or > 8 ||
+            descriptor.Length < 40)
+        {
+            return false;
+        }
+
+        var dataOffset = BinaryPrimitives.ReadUInt64LittleEndian(descriptor);
+        var dataSize = BinaryPrimitives.ReadUInt64LittleEndian(descriptor[8..]);
+        var skipSamples = BinaryPrimitives.ReadUInt32LittleEndian(descriptor[20..]);
+        var sampleCount = BinaryPrimitives.ReadUInt32LittleEndian(descriptor[24..]);
+        var frameBytes = (ulong)(sizeof(short) * channels);
+        var skipBytes = (ulong)skipSamples * frameBytes;
+        if (dataSize < frameBytes ||
+            dataSize > MaximumRenderBufferSize ||
+            dataSize % frameBytes != 0 ||
+            skipBytes >= dataSize ||
+            dataOffset > ulong.MaxValue - waveformDataAddress ||
+            skipBytes > ulong.MaxValue - (waveformDataAddress + dataOffset))
+        {
+            return false;
+        }
+
+        var resolvedAddress = waveformDataAddress + dataOffset + skipBytes;
+        var usableBytes = dataSize - skipBytes;
+        var availableFrames = usableBytes / frameBytes;
+        var frames = sampleCount > 0
+            ? Math.Min((ulong)sampleCount, availableFrames)
+            : availableFrames;
+        if (resolvedAddress <= 0x10000 || frames == 0 || frames > int.MaxValue)
+        {
+            return false;
+        }
+
+        dataAddress = resolvedAddress;
+        byteCount = checked((int)(frames * frameBytes));
+        requestedFrames = (int)frames;
+        return true;
     }
 
     private static void ArmVagVoice(CpuContext ctx, ulong voiceHandle, ulong dataAddr)
@@ -816,22 +966,41 @@ public static class Ngs2Exports
     // Refresh a guest-owned PCM block only when its contents change. M2 uses
     // alternating 48-kHz stereo buffers for continuous gameplay audio. Some
     // clients pass a waveform-block descriptor, while others pass PCM directly.
-    private static void RefreshStreamingVoice(CpuContext ctx, VoiceState voice)
+    private static void RefreshStreamingVoice(CpuContext ctx, ulong voiceHandle, VoiceState voice)
     {
-        if (!voice.StreamingPending ||
-            voice.WaveformType != Ngs2PcmDecoder.Signed16LittleEndian ||
-            voice.WaveformBlocksAddress <= 0x10000 ||
-            voice.WaveformChannels is < 1 or > 8)
+        if (!voice.StreamingPending)
         {
             return;
         }
 
-        var dataAddress = voice.WaveformBlocksAddress;
-        var byteCount = voice.DirectPcmBufferBytes;
-        var requestedFrames = 0;
+        if (voice.WaveformType != Ngs2PcmDecoder.Signed16LittleEndian)
+        {
+            TraceStreamingWait(voiceHandle, voice, "unsupported_format");
+            return;
+        }
+
+        if (voice.WaveformBlocksAddress <= 0x10000 ||
+            voice.WaveformChannels is < 1 or > 8)
+        {
+            TraceStreamingWait(voiceHandle, voice, "invalid_source");
+            return;
+        }
+
+        var hasResolvedBlock = voice.StreamingDataAddress > 0x10000 &&
+            voice.StreamingByteCount > 0;
+        var dataAddress = hasResolvedBlock
+            ? voice.StreamingDataAddress
+            : voice.WaveformBlocksAddress;
+        var byteCount = hasResolvedBlock
+            ? voice.StreamingByteCount
+            : voice.DirectPcmBufferBytes;
+        var requestedFrames = hasResolvedBlock
+            ? voice.StreamingRequestedFrames
+            : 0;
 
         Span<byte> descriptor = stackalloc byte[40];
-        if (ctx.Memory.TryRead(voice.WaveformBlocksAddress, descriptor))
+        if (!hasResolvedBlock &&
+            ctx.Memory.TryRead(voice.WaveformBlocksAddress, descriptor))
         {
             var descriptorData = BinaryPrimitives.ReadUInt64LittleEndian(descriptor);
             var descriptorBytes = BinaryPrimitives.ReadUInt64LittleEndian(descriptor[8..]);
@@ -851,6 +1020,7 @@ public static class Ngs2Exports
         if (byteCount < sizeof(short) * voice.WaveformChannels ||
             byteCount > (int)MaximumRenderBufferSize)
         {
+            TraceStreamingWait(voiceHandle, voice, "invalid_size", dataAddress, byteCount);
             return;
         }
 
@@ -860,6 +1030,7 @@ public static class Ngs2Exports
             var payload = raw.AsSpan(0, byteCount);
             if (!ctx.Memory.TryRead(dataAddress, payload))
             {
+                TraceStreamingWait(voiceHandle, voice, "unreadable_payload", dataAddress, byteCount);
                 return;
             }
 
@@ -881,6 +1052,7 @@ public static class Ngs2Exports
                 if (!ctx.Memory.TryRead(dataAddress, verifiedPayload) ||
                     !StreamingSnapshotsMatch(payload, verifiedPayload))
                 {
+                    TraceStreamingWait(voiceHandle, voice, "unstable_payload", dataAddress, byteCount);
                     return;
                 }
             }
@@ -892,6 +1064,7 @@ public static class Ngs2Exports
             if (!Ngs2PcmDecoder.TryDecodeInterleaved(
                     payload, voice.WaveformChannels, requestedFrames, out var left, out var right))
             {
+                TraceStreamingWait(voiceHandle, voice, "decode_failed", dataAddress, byteCount);
                 return;
             }
 
@@ -917,11 +1090,41 @@ public static class Ngs2Exports
                 voice.Stopped = false;
                 voice.Playing = true;
             }
+
+            var traceCount = Interlocked.Increment(ref _streamingArmTraceCount);
+            if (traceCount <= 16 || (traceCount & (traceCount - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][TRACE] ngs2.streaming_armed count={traceCount} " +
+                    $"voice=0x{voiceHandle:X16} data=0x{dataAddress:X} bytes={byteCount} " +
+                    $"frames={left.Length} channels={voice.WaveformChannels} " +
+                    $"playing={voice.Playing}");
+            }
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(raw);
         }
+    }
+
+    private static void TraceStreamingWait(
+        ulong voiceHandle,
+        VoiceState voice,
+        string reason,
+        ulong dataAddress = 0,
+        int byteCount = 0)
+    {
+        var traceCount = Interlocked.Increment(ref _streamingWaitTraceCount);
+        if (traceCount > 16 && (traceCount & (traceCount - 1)) != 0)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] ngs2.streaming_wait count={traceCount} reason={reason} " +
+            $"voice=0x{voiceHandle:X16} type=0x{voice.WaveformType:X} " +
+            $"blocks=0x{voice.WaveformBlocksAddress:X} data=0x{dataAddress:X} " +
+            $"bytes={byteCount} channels={voice.WaveformChannels} rate={voice.SourceRate}");
     }
 
     private static ulong ComputeStreamingFingerprint(ulong address, ReadOnlySpan<byte> bytes)
@@ -1296,6 +1499,10 @@ public static class Ngs2Exports
         var mixedAnything = false;
         var armedVoices = 0;
         var playingVoices = 0;
+        var routedVoices = 0;
+        var transportBlockedVoices = 0;
+        var streamingVoices = 0;
+        var stoppedVoices = 0;
         try
         {
             Array.Clear(accum, 0, floatCount);
@@ -1304,10 +1511,32 @@ public static class Ngs2Exports
                 foreach (var pair in Voices)
                 {
                     var voice = pair.Value;
-                    RefreshStreamingVoice(ctx, voice);
-                    if (voice.Pcm is not null && voice.Pcm.Length != 0)
+                    RefreshStreamingVoice(ctx, pair.Key, voice);
+                    var armed = voice.Pcm is not null && voice.Pcm.Length != 0;
+                    if (armed)
                     {
                         armedVoices++;
+                        if (voice.DestinationVoiceHandle != 0)
+                        {
+                            routedVoices++;
+                            if (!voice.Playing &&
+                                voice.HasTransportCommand &&
+                                !voice.Paused &&
+                                !voice.Stopped &&
+                                !voice.ExplicitlyStopped &&
+                                !voice.CompactLifecycleStopped)
+                            {
+                                transportBlockedVoices++;
+                            }
+                        }
+                        if (voice.StreamingPending)
+                        {
+                            streamingVoices++;
+                        }
+                        if (voice.Stopped || voice.ExplicitlyStopped || voice.CompactLifecycleStopped)
+                        {
+                            stoppedVoices++;
+                        }
                     }
                     if (voice.Playing)
                     {
@@ -1335,7 +1564,15 @@ public static class Ngs2Exports
                 WriteGrain(ctx, bufferAddress, accum, floatCount);
             }
 
-            TraceMixerHealth(systemHandle, mixedAnything, armedVoices, playingVoices);
+            TraceMixerHealth(
+                systemHandle,
+                mixedAnything,
+                armedVoices,
+                playingVoices,
+                routedVoices,
+                transportBlockedVoices,
+                streamingVoices,
+                stoppedVoices);
         }
         finally
         {
@@ -1344,7 +1581,14 @@ public static class Ngs2Exports
     }
 
     private static void TraceMixerHealth(
-        ulong systemHandle, bool mixedAnything, int armedVoices, int playingVoices)
+        ulong systemHandle,
+        bool mixedAnything,
+        int armedVoices,
+        int playingVoices,
+        int routedVoices,
+        int transportBlockedVoices,
+        int streamingVoices,
+        int stoppedVoices)
     {
         lock (StateGate)
         {
@@ -1361,7 +1605,9 @@ public static class Ngs2Exports
                 {
                     Console.Error.WriteLine(
                         $"[LOADER][INFO] ngs2.mix_recovered system=0x{systemHandle:X16} " +
-                        $"silent_renders={previous} armed={armedVoices} playing={playingVoices}");
+                        $"silent_renders={previous} armed={armedVoices} playing={playingVoices} " +
+                        $"routed={routedVoices} transport_blocked={transportBlockedVoices} " +
+                        $"streaming={streamingVoices} stopped={stoppedVoices}");
                 }
                 return;
             }
@@ -1371,7 +1617,9 @@ public static class Ngs2Exports
             {
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] ngs2.silent_mix system=0x{systemHandle:X16} " +
-                    $"renders={count} armed={armedVoices} playing={playingVoices}");
+                    $"renders={count} armed={armedVoices} playing={playingVoices} " +
+                    $"routed={routedVoices} transport_blocked={transportBlockedVoices} " +
+                    $"streaming={streamingVoices} stopped={stoppedVoices}");
             }
         }
     }

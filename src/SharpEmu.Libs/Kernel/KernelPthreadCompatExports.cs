@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Diagnostics.CodeAnalysis;
 
@@ -30,6 +31,7 @@ public static class KernelPthreadCompatExports
     private static readonly ConcurrentDictionary<ulong, PthreadMutexState> _mutexStates = new();
     private static readonly Dictionary<ulong, PthreadMutexAttrState> _mutexAttrStates = new();
     private static readonly Dictionary<ulong, PthreadCondState> _condStates = new();
+    private static readonly ConditionalWeakTable<IGuestMemoryAllocator, HashSet<ulong>> _ownedOpaqueObjects = new();
     private static readonly Dictionary<ulong, object> _onceGates = new();
     private static readonly HashSet<ulong> _condAttrStates = new();
     private static readonly bool _tracePthreads =
@@ -799,6 +801,7 @@ public static class KernelPthreadCompatExports
         }
         if (!InitializeMutexObject(ctx, handle, state))
         {
+            TryFreeOpaqueObject(ctx, handle);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
@@ -809,6 +812,7 @@ public static class KernelPthreadCompatExports
         {
             _mutexStates.TryRemove(mutexAddress, out _);
             _mutexStates.TryRemove(handle, out _);
+            TryFreeOpaqueObject(ctx, handle);
 
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -836,14 +840,17 @@ public static class KernelPthreadCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
             }
 
-            _mutexStates.TryRemove(resolvedAddress, out _);
-            if (resolvedAddress != mutexAddress)
+            foreach (var entry in _mutexStates)
             {
-                _mutexStates.TryRemove(mutexAddress, out _);
+                if (ReferenceEquals(entry.Value, state))
+                {
+                    _mutexStates.TryRemove(entry.Key, out _);
+                }
             }
         }
 
         _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, mutexAddress, 0);
+        TryFreeOpaqueObject(ctx, resolvedAddress);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1132,6 +1139,7 @@ public static class KernelPthreadCompatExports
         var initialState = new PthreadMutexAttrState(MutexTypeErrorCheck, 0);
         if (!WriteMutexAttrObject(ctx, handle, initialState))
         {
+            TryFreeOpaqueObject(ctx, handle);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
@@ -1148,6 +1156,7 @@ public static class KernelPthreadCompatExports
                 _mutexAttrStates.Remove(attrAddress);
                 _mutexAttrStates.Remove(handle);
             }
+            TryFreeOpaqueObject(ctx, handle);
 
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1172,6 +1181,8 @@ public static class KernelPthreadCompatExports
             }
         }
 
+        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, attrAddress, 0);
+        TryFreeOpaqueObject(ctx, resolvedAddress);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1245,18 +1256,14 @@ public static class KernelPthreadCompatExports
             pointedHandle != 0 &&
             pointedHandle != mutexAddress;
 
-        if (_mutexStates.TryGetValue(mutexAddress, out var cachedState))
-        {
-            return hasPointedHandle &&
-                   _mutexStates.TryGetValue(pointedHandle, out var pointedState) &&
-                   !ReferenceEquals(pointedState, cachedState)
-                ? pointedHandle
-                : mutexAddress;
-        }
-
         if (hasPointedHandle && _mutexStates.ContainsKey(pointedHandle))
         {
             return pointedHandle;
+        }
+
+        if (_mutexStates.ContainsKey(mutexAddress))
+        {
+            return mutexAddress;
         }
 
         return mutexAddress;
@@ -1380,14 +1387,6 @@ public static class KernelPthreadCompatExports
             return 0;
         }
 
-        lock (_stateGate)
-        {
-            if (_condStates.ContainsKey(condAddress))
-            {
-                return condAddress;
-            }
-        }
-
         if (KernelMemoryCompatExports.TryReadUInt64Compat(ctx, condAddress, out var pointedHandle) && pointedHandle != 0)
         {
             lock (_stateGate)
@@ -1466,6 +1465,7 @@ public static class KernelPthreadCompatExports
                 _condStates.Remove(condAddress);
                 _condStates.Remove(handle);
             }
+            TryFreeOpaqueObject(ctx, handle);
 
             return false;
         }
@@ -1486,7 +1486,43 @@ public static class KernelPthreadCompatExports
 
         Span<byte> initialData = stackalloc byte[size];
         initialData.Clear();
-        return ctx.Memory.TryWrite(address, initialData);
+        if (!ctx.Memory.TryWrite(address, initialData))
+        {
+            _ = allocator.TryFreeGuestMemory(address);
+            address = 0;
+            return false;
+        }
+
+        lock (_stateGate)
+        {
+            _ownedOpaqueObjects.GetOrCreateValue(allocator).Add(address);
+        }
+
+        return true;
+    }
+
+    private static void TryFreeOpaqueObject(CpuContext ctx, ulong address)
+    {
+        if (address == 0 || ctx.Memory is not IGuestMemoryAllocator allocator)
+        {
+            return;
+        }
+
+        lock (_stateGate)
+        {
+            if (!_ownedOpaqueObjects.TryGetValue(allocator, out var owned) || !owned.Remove(address))
+            {
+                return;
+            }
+        }
+
+        if (!allocator.TryFreeGuestMemory(address))
+        {
+            lock (_stateGate)
+            {
+                _ownedOpaqueObjects.GetOrCreateValue(allocator).Add(address);
+            }
+        }
     }
 
     private static bool InitializeMutexObject(CpuContext ctx, ulong address, PthreadMutexState state) =>
@@ -1530,6 +1566,7 @@ public static class KernelPthreadCompatExports
                 _condStates.Remove(condAddress);
                 _condStates.Remove(handle);
             }
+            TryFreeOpaqueObject(ctx, handle);
 
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1560,14 +1597,17 @@ public static class KernelPthreadCompatExports
                 }
             }
 
-            _condStates.Remove(resolvedAddress);
-            if (resolvedAddress != condAddress)
+            foreach (var alias in _condStates
+                         .Where(entry => ReferenceEquals(entry.Value, state))
+                         .Select(entry => entry.Key)
+                         .ToArray())
             {
-                _condStates.Remove(condAddress);
+                _condStates.Remove(alias);
             }
         }
 
         _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, condAddress, 0);
+        TryFreeOpaqueObject(ctx, resolvedAddress);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -2297,6 +2337,7 @@ public static class KernelPthreadCompatExports
         }
         if (!InitializeMutexObject(ctx, handle, createdState))
         {
+            TryFreeOpaqueObject(ctx, handle);
             resolvedAddress = 0;
             state = null;
             return false;
@@ -2306,12 +2347,14 @@ public static class KernelPthreadCompatExports
         {
             if (_mutexStates.TryGetValue(mutexAddress, out state))
             {
+                TryFreeOpaqueObject(ctx, handle);
                 resolvedAddress = mutexAddress;
                 return true;
             }
 
             if (_mutexStates.TryGetValue(handle, out state))
             {
+                TryFreeOpaqueObject(ctx, handle);
                 resolvedAddress = handle;
                 return true;
             }
@@ -2324,6 +2367,7 @@ public static class KernelPthreadCompatExports
         {
             _mutexStates.TryRemove(mutexAddress, out _);
             _mutexStates.TryRemove(handle, out _);
+            TryFreeOpaqueObject(ctx, handle);
 
             resolvedAddress = 0;
             state = null;
