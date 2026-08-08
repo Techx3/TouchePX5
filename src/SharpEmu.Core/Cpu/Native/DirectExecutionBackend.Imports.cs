@@ -330,7 +330,13 @@ public sealed partial class DirectExecutionBackend
 		{
 			// Break before the forced exit so the loop state is still live.
 			NotifyDebuggerStall(CpuStallKind.ImportLoop, in importStubEntry, num7, num, value, value2);
-			if (TryForceGuestExitToHostStub(argPackPtr, num, num7, importStubEntry.Nid))
+			if (TryForceGuestExitToHostStub(
+					argPackPtr,
+					num,
+					num7,
+					importStubEntry.Nid,
+					value,
+					value2))
 			{
 				cpuContext[CpuRegister.Rax] = 1uL;
 				return 1uL;
@@ -546,6 +552,7 @@ public sealed partial class DirectExecutionBackend
 					CaptureImportBoundaryContinuation(cpuContext, argPackPtr, num7));
 			}
 			StoreImportVectorReturn(cpuContext, argPackPtr);
+			RequestGuestThreadTimesliceIfDue(cpuContext, argPackPtr, num7, num, importStubEntry.Nid);
 			if (dispatchResolved &&
 				orbisGen2Result == OrbisGen2Result.ORBIS_GEN2_OK &&
 				string.Equals(importStubEntry.Nid, "BohYr-F7-is", StringComparison.Ordinal))
@@ -1345,6 +1352,7 @@ public sealed partial class DirectExecutionBackend
 				CaptureImportBoundaryContinuation(cpuContext, argPackPtr, returnRip));
 		}
 		StoreImportVectorReturn(cpuContext, argPackPtr);
+		RequestGuestThreadTimesliceIfDue(cpuContext, argPackPtr, returnRip, dispatchIndex, importStubEntry.Nid);
 
 		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK)
 		{
@@ -1435,6 +1443,60 @@ public sealed partial class DirectExecutionBackend
 			"yH17Q6NWtVg" or // sceUserServiceGetEvent
 			"D-CzAxQL0XI" or // sceUserServiceGetPlatformPrivacySetting
 			"K-jXhbt2gn4";   // scePthreadMutexTrylock
+
+	private void RequestGuestThreadTimesliceIfDue(
+		CpuContext context,
+		nint argPackPtr,
+		ulong returnRip,
+		long dispatchIndex,
+		string nid)
+	{
+		var thread = _activeGuestThreadState;
+		var quantum = _guestThreadImportQuantum;
+		if (thread is null || quantum <= 0)
+		{
+			return;
+		}
+
+		var imports = Interlocked.Read(ref thread.ImportCount);
+		var sliceStart = Volatile.Read(ref thread.ImportSliceStart);
+		if (imports - sliceStart < quantum)
+		{
+			return;
+		}
+
+		var continuation = CaptureImportBoundaryContinuation(context, argPackPtr, returnRip) with
+		{
+			ReturnSlotAddress = ActiveGuestReturnSlotAddress,
+		};
+		if (!GuestThreadExecution.RequestCurrentThreadTimeslice(continuation))
+		{
+			return;
+		}
+
+		var timeslices = Interlocked.Increment(ref thread.TimesliceCount);
+		if (_logGuestThreads &&
+			(timeslices <= 4 || (timeslices & (timeslices - 1)) == 0))
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][TRACE] guest_thread.timeslice " +
+				$"handle=0x{thread.ThreadHandle:X16} name='{thread.Name}' " +
+				$"count={timeslices} imports={imports} quantum={quantum} " +
+				$"nid={nid} ret=0x{returnRip:X16} dispatch={dispatchIndex}");
+		}
+	}
+
+	private static int ReadGuestThreadImportQuantum()
+	{
+		if (int.TryParse(
+				Environment.GetEnvironmentVariable("SHARPEMU_GUEST_THREAD_IMPORT_QUANTUM"),
+				out var quantum))
+		{
+			return Math.Clamp(quantum, 0, 1_000_000);
+		}
+
+		return DefaultGuestThreadImportQuantum;
+	}
 
 	private bool ShouldLogImportResult(string nid, OrbisGen2Result result)
 	{
@@ -1672,7 +1734,13 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private unsafe bool TryForceGuestExitToHostStub(nint argPackPtr, long dispatchIndex, ulong returnRip, string nid)
+	private unsafe bool TryForceGuestExitToHostStub(
+		nint argPackPtr,
+		long dispatchIndex,
+		ulong returnRip,
+		string nid,
+		ulong arg0,
+		ulong arg1)
 	{
 		ulong num = ActiveEntryReturnSentinelRip;
 		if (num < 65536 || !TryPatchActiveGuestReturnSlot(num))
@@ -1689,8 +1757,13 @@ public sealed partial class DirectExecutionBackend
 		}
 		ActiveForcedGuestExit = true;
 		LastError = $"Detected repeating import loop at import#{dispatchIndex} ({nid}) and forced guest exit.";
-		Console.Error.WriteLine($"[LOADER][ERROR] Import-loop guard fired at import#{dispatchIndex}: nid={nid} ret=0x{returnRip:X16} -> host_exit=0x{num:X16}");
+		Console.Error.WriteLine(
+			$"[LOADER][ERROR] Import-loop guard fired at import#{dispatchIndex}: " +
+			$"nid={nid} ret=0x{returnRip:X16} rdi=0x{arg0:X16} rsi=0x{arg1:X16} " +
+			$"managed={Environment.CurrentManagedThreadId} " +
+			$"guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} -> host_exit=0x{num:X16}");
 		DumpRecentImportTrace();
+		LogStallWatchdogSnapshot();
 		return true;
 	}
 

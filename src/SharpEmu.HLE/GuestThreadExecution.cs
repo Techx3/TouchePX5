@@ -161,6 +161,8 @@ public readonly record struct GuestCpuContinuation(
 
 public static class GuestThreadExecution
 {
+    public const string CooperativeTimesliceReason = "guest_thread_timeslice";
+
     private sealed class DelegateGuestThreadBlockWaiter : IGuestThreadBlockWaiter
     {
         private readonly Func<int> _resume;
@@ -314,6 +316,33 @@ public static class GuestThreadExecution
     }
 
     public static bool RequestCurrentThreadBlock(string reason) => RequestCurrentThreadBlock(null, reason);
+
+    /// <summary>
+    /// Yields a long-running guest worker at an import boundary without losing
+    /// the completed import's register result. Unlike a synchronization wait,
+    /// this never replaces another pending block or control transfer.
+    /// </summary>
+    public static bool RequestCurrentThreadTimeslice(GuestCpuContinuation continuation)
+    {
+        if (!IsGuestThread ||
+            _pendingBlockReason is not null ||
+            _pendingEntryExit ||
+            _pendingContextTransfer ||
+            continuation.Rip < 65536 ||
+            continuation.Rsp == 0 ||
+            continuation.ReturnSlotAddress == 0)
+        {
+            return false;
+        }
+
+        _pendingBlockReason = CooperativeTimesliceReason;
+        _pendingBlockWakeKey = CooperativeTimesliceReason;
+        _pendingBlockWaiter = null;
+        _pendingBlockDeadlineTimestamp = Stopwatch.GetTimestamp();
+        _pendingBlockContinuation = continuation;
+        _pendingBlockContinuationValid = true;
+        return true;
+    }
 
     public static bool RequestCurrentThreadBlock(
         CpuContext? context,
