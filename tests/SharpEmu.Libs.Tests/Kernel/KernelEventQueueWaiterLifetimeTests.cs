@@ -14,6 +14,8 @@ public sealed class KernelEventQueueWaiterLifetimeTests
     private const ulong HandleAddress = BaseAddress + 0x100;
     private const ulong EventsAddress = BaseAddress + 0x200;
     private const ulong OutCountAddress = BaseAddress + 0x300;
+    private const ulong SecondEventsAddress = BaseAddress + 0x400;
+    private const ulong SecondOutCountAddress = BaseAddress + 0x500;
 
     [Fact]
     public void DeleteEqueue_CompletesStagedWaiterAsDeleted()
@@ -79,6 +81,82 @@ public sealed class KernelEventQueueWaiterLifetimeTests
             KernelEventQueueCompatExports.KernelDeleteEqueue(ctx));
     }
 
+    [Fact]
+    public void TwoWaiters_ReserveDistinctEventsWithoutDuplicateDelivery()
+    {
+        for (var iteration = 0; iteration < 64; iteration++)
+        {
+            VerifyTwoWaitersReserveDistinctEvents(iteration);
+        }
+    }
+
+    private static void VerifyTwoWaitersReserveDistinctEvents(int iteration)
+    {
+        var (memory, firstContext, handle) = CreateEqueue();
+        var secondContext = new CpuContext(memory, Generation.Gen5);
+        var firstWaiter = StageGuestWait(
+            firstContext,
+            handle,
+            threadHandle: 0x703 + ((ulong)iteration * 2),
+            EventsAddress,
+            OutCountAddress);
+        var secondWaiter = StageGuestWait(
+            secondContext,
+            handle,
+            threadHandle: 0x704 + ((ulong)iteration * 2),
+            SecondEventsAddress,
+            SecondOutCountAddress);
+
+        Assert.True(KernelEventQueueCompatExports.EnqueueEvent(
+            handle,
+            CreateEvent(data: 0x1111)));
+
+        var firstWoke = false;
+        var secondWoke = false;
+        Parallel.Invoke(
+            () => firstWoke = firstWaiter.TryWake(),
+            () => secondWoke = secondWaiter.TryWake());
+        Assert.NotEqual(firstWoke, secondWoke);
+
+        var winningWaiter = firstWoke ? firstWaiter : secondWaiter;
+        var losingWaiter = firstWoke ? secondWaiter : firstWaiter;
+        var winningEventsAddress = firstWoke ? EventsAddress : SecondEventsAddress;
+        var winningOutCountAddress = firstWoke ? OutCountAddress : SecondOutCountAddress;
+        var losingEventsAddress = firstWoke ? SecondEventsAddress : EventsAddress;
+        var losingOutCountAddress = firstWoke ? SecondOutCountAddress : OutCountAddress;
+
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            winningWaiter.Resume());
+        Assert.Equal(1u, ReadUInt32(memory, winningOutCountAddress));
+        Assert.Equal(0x1111UL, ReadUInt64(memory, winningEventsAddress + 0x10));
+        Assert.Equal(0u, ReadUInt32(memory, losingOutCountAddress));
+
+        Assert.True(KernelEventQueueCompatExports.EnqueueEvent(
+            handle,
+            CreateEvent(data: 0x2222)));
+        Assert.True(losingWaiter.TryWake());
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            losingWaiter.Resume());
+        Assert.Equal(1u, ReadUInt32(memory, losingOutCountAddress));
+        Assert.Equal(0x2222UL, ReadUInt64(memory, losingEventsAddress + 0x10));
+
+        firstContext[CpuRegister.Rdi] = handle;
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            KernelEventQueueCompatExports.KernelDeleteEqueue(firstContext));
+    }
+
+    private static KernelEventQueueCompatExports.KernelQueuedEvent CreateEvent(ulong data) =>
+        new(
+            Ident: 0x77,
+            Filter: KernelEventQueueCompatExports.KernelEventFilterUser,
+            Flags: KernelEventQueueCompatExports.KernelEventFlagClear,
+            Fflags: 1,
+            Data: data,
+            UserData: 0x5678);
+
     private static (FakeCpuMemory Memory, CpuContext Context, ulong Handle)
         CreateEqueue()
     {
@@ -99,7 +177,9 @@ public sealed class KernelEventQueueWaiterLifetimeTests
     private static IGuestThreadBlockWaiter StageGuestWait(
         CpuContext ctx,
         ulong handle,
-        ulong threadHandle)
+        ulong threadHandle,
+        ulong eventsAddress = EventsAddress,
+        ulong outCountAddress = OutCountAddress)
     {
         var previousThread = GuestThreadExecution.EnterGuestThread(threadHandle);
         var previousFrame = GuestThreadExecution.EnterImportCallFrame(
@@ -109,9 +189,9 @@ public sealed class KernelEventQueueWaiterLifetimeTests
         try
         {
             ctx[CpuRegister.Rdi] = handle;
-            ctx[CpuRegister.Rsi] = EventsAddress;
+            ctx[CpuRegister.Rsi] = eventsAddress;
             ctx[CpuRegister.Rdx] = 1;
-            ctx[CpuRegister.Rcx] = OutCountAddress;
+            ctx[CpuRegister.Rcx] = outCountAddress;
             ctx[CpuRegister.R8] = 0;
             Assert.Equal(
                 (int)OrbisGen2Result.ORBIS_GEN2_OK,
